@@ -206,7 +206,7 @@ int main(void)
     check(modbus_parse_response(rx, len, &resp) == ERR_NONE, "06H 回显解析");
     check(resp.reg_addr == 0x00C8 && resp.reg_count == 1, "06H 地址/数量");
 
-    /* 06H 写使能 0x00D4 = 0（立三使能语义与旧 Zeta 相反） */
+    /* 06H 写使能 0x00D4 = 0（立三使能语义：写 0 使能） */
     len = modbus_build_write_single(0x01, 0x00D4, 0x0000, frame);
     check(frame[1] == 0x06 && frame[2] == 0x00 && frame[3] == 0xD4 &&
           frame[4] == 0x00 && frame[5] == 0x00, "06H 写 0x00D4=0（使能）");

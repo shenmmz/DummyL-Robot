@@ -8,8 +8,8 @@
  * 依赖模块：comm/comm_if（CommOps 总线接口）、comm/modbus_rtu（帧构造/解析）、
  *           config/robot_config、utils/logger
  * 寄存器映射依据：external/485通讯手册_sv126.1.pdf（LEESN V126）。
- * Zeta 协议已作废：本文件全部寄存器与命令值均按立三手册实现，
- * 特别注意 0x00D4 使能语义与旧体系相反（写 0 = 使能）。
+ * 本文件全部寄存器与命令值均按立三手册实现，
+ * 特别注意 0x00D4 使能语义：写 0 = 使能。
  */
 
 #include "control/robot.h"

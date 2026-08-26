@@ -15,7 +15,7 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 
 代码运行在 Windows PC 上，通过 USB 转 RS485 以 Modbus RTU 协议直接驱动立三（LEESN）闭环步进电机（六轴机械臂），不再依赖单片机固件。运动学、轨迹规划、电机控制逻辑全部在 PC 端完成，算法实现保持纯 C、无重量级依赖，可随时移植回单片机。
 
-> **协议基线**：Zeta 电机协议已作废，全项目一律使用立三（LEESN）485 协议，
+> **协议基线**：全项目一律使用立三（LEESN）485 协议，
 > 寄存器表见 [docs/protocol.md](docs/protocol.md) 与 `src/control/robot_internal.h`。
 
 ---
@@ -35,7 +35,7 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 
 ```
 DummyL-Robot/
-├── CMakeLists.txt              # 主构建：lib + app + tests 三个目标
+├── CMakeLists.txt              # 主构建：5 静态库（comm/kinematics/trajectory/control/utils）+ app + 4 测试目标
 ├── README.md                   # 本文件
 ├── config/
 │   ├── robot_config.h          # 电机ID/减速比/堵转电流/限位（宏定义）
@@ -44,9 +44,10 @@ DummyL-Robot/
 ├── src/
 │   ├── main.c                  # 入口 + CLI 交互循环
 │   ├── comm/
-│   │   ├── serial_win.c/h      # Windows 串口封装
+│   │   ├── comm_if.h           # CommOps 接口层（串口帧收发统一接口抽象）
+│   │   ├── serial_win.c/h      # Windows 串口封装（实现 CommOps）
 │   │   ├── crc16.c/h           # CRC16 0xA001
-│   │   └── modbus_rtu.c/h      # Modbus RTU 主站：03H/06H/10H 帧构造与解析
+│   │   └── modbus_rtu.c/h      # Modbus RTU 主站：03H/06H/10H/04H 帧构造与解析
 │   ├── kinematics/
 │   │   ├── mat3.c/h            # 3x3 矩阵运算（纯 C）
 │   │   ├── dh.c/h              # DH 建模 + 正运动学 FK
@@ -54,10 +55,13 @@ DummyL-Robot/
 │   ├── trajectory/
 │   │   └── planner.c/h         # 点到点梯形/S 曲线、关节插补
 │   ├── control/
-│   │   ├── robot.c/h           # 高层接口：robot_home / movej / enable / disable
-│   │   └── monitor.c/h         # 状态轮询：在线检测、堵转报警
+│   │   ├── robot.c/h           # 高层接口：movej / enable / disable / 状态查询
+│   │   ├── home.c/h            # 回零流程：顶限位→电流判堵转→急停→清零→就位
+│   │   ├── monitor.c/h         # 状态轮询：在线检测、堵转报警
+│   │   └── robot_internal.h    # 立三（LEESN）寄存器宏表 + DWORD 字节序契约
 │   ├── utils/
 │   │   ├── logger.c/h          # 精简中文日志
+│   │   ├── err.c/h             # ErrCode 统一错误码 + err_str() 中文提示
 │   │   └── cmd_parser.c/h      # 命令行解析（movej:1:45 / home / status）
 │   └── tools/
 │       ├── scan_motors.c       # 总线电机扫描
@@ -68,7 +72,8 @@ DummyL-Robot/
 │   ├── test_fk_ik.c            # FK→IK→FK 闭环
 │   └── test_planner.c          # 轨迹规划验证
 └── docs/
-    └── protocol.md             # 立三（LEESN）寄存器表 + Modbus 帧格式
+    ├── protocol.md             # 立三（LEESN）寄存器表 + Modbus 帧格式
+    └── output/                 # 产物输出目录（技术面试题库等文档）
 ```
 
 ## 3. 构建与运行
@@ -79,13 +84,13 @@ cmake -G Ninja -B build -DCMAKE_C_COMPILER=C:/Qt/Tools/mingw1310_64/bin/gcc.exe
 ninja -C build
 
 # 运行
-build\dummyrobot.exe
+build\bin\dummyrobot.exe
 
 # 运行单元测试
 ctest --test-dir build
 ```
 
-构建产物：`build\dummyrobot.exe`。
+构建产物：`build\bin\dummyrobot.exe`。
 
 ## 4. 硬件与通信协议
 
@@ -125,15 +130,21 @@ ctest --test-dir build
 | 地址 | 功能码 | 内容 | 初始值 |
 |---|---|---|---|
 | 0x00C8 | 06H | 运行/停止：写 0 减速停、1 正转、256 急停、257 反转 | -- |
+| 0x00C9 | 06H | 回原点：触发电机回机械原点（速度取 0x00D8~0x00D9） | -- |
 | 0x00D8 / 0x00D9 | 10H | 运行速度（INT32，单位 0.01 rpm，默认 30000=300rpm） | 30000 |
+| 0x0098 / 0x0099 | 06H | 加/减速时间（UINT16 ms，出厂默认 120ms） | 120 |
 | 0x00E8 / 0x00E9 | 10H | 运行到绝对位置（INT32 脉冲，相对原点，运行/停止均可执行） | -- |
 | 0x00D2 / 0x00D3 | 10H | 设置当前电机位置（只改位置寄存器值，物理不动，回零清零用） | -- |
 
 #### 使能与地址区
 | 地址 | 功能码 | 内容 | 初始值 |
 |---|---|---|---|
-| 0x00D4 | 06H | 脱机/使能/驱动重启：**写 0 使能、写 1 释放马达**（与已作废的 Zeta 相反）；0x0100 驱动重启 | -- |
+| 0x00D4 | 06H | 脱机/使能/驱动重启：**写 0 使能、写 1 释放马达**；0x0100 驱动重启 | -- |
+| 0x0008 | 06H | 串口超时（UINT16，单位 10ms，写 0 取消超时） | -- |
+| 0x0009 | 06H | 通讯参数（低 8 位波特率码，出厂 12=115200） | 12 |
+| 0x0024 | 10H | 细分（每转脉冲数，UINT32，出厂默认 4000） | 4000 |
 | 0x0066 | 06H | 驱动器基地址（默认 1，多轴需逐台设置并写 0x00DC=1 保存） | 1 |
+| 0x0067 | 06H | 驱动器地址源（默认 0） | 0 |
 | 0x00DC | 06H | 断电保存命令：写 1 保存参数、写 0 恢复出厂 | -- |
 
 ### 4.3 回零流程与参数
@@ -149,7 +160,8 @@ ctest --test-dir build
 - 回零堵转电流阈值 `HOME_STALL_CURRENT_MA[7] = {0, 500, 500, 800, 500, 500, 0} mA`（实机标定，
   下标 0 不用；立三无 0x00E1 类堵转电流寄存器，判定由上位机电流轮询完成）
 - 堵转检测电流余量 `HOME_STALL_MARGIN_MA = 400 mA`
-- 回零速度 `HOME_SPEED_RPM = 100 rpm`（写 0x009A）
+- 回零速度 `HOME_SPEED_RPM = 100 rpm`（写 0x00D8~0x00D9 运行速度寄存器，与 robot_movej 一致；
+  0x009A 为 SV113 以下固件 UINT16 速度寄存器，不再使用）
 - 机械原点位姿 `HOME_POSE_DEG[6]`：6 关节目标角度（度），待用户设置
 
 ## 5. CLI 命令
@@ -169,12 +181,12 @@ ctest --test-dir build
 | `calib` | `calib` | 提示运行独立工具 `servo_calib.exe` 单关节标定 | `calib` |
 | `exit` | `exit` 或 `quit` | 退出程序 | `exit` |
 
-> 关节号 N 范围 1..6。2 号电机默认屏蔽（启动即生效），可 `unmask:2` 临时恢复。
+> 关节号 N 范围 1..6，1~6 号电机全部在线；故障/未安装关节可用 `mask:N` 屏蔽、`unmask:N` 恢复。
 > 独立可执行程序：`scan_motors.exe`（总线扫描）、`servo_calib.exe`（单关节手动标定），均位于 `build/bin/`。
 
 ## 6. 设计原则
 
-1. **三层分离**：`comm/`（帧收发）→ `control/`（业务指令）→ `main.c`（交互），换电机/换总线只改 comm 层
+1. **三层分离 + CommOps 接口抽象**：`comm/`（帧收发，serial_win 实现 CommOps 函数指针表）→ `control/`（业务指令，仅依赖 `comm_if.h` 接口）→ `main.c`（交互），换总线/换电机不动控制层
 2. **可移植**：运动学与轨迹规划为纯 C，无平台依赖，可整体搬回单片机固件
 3. **配置外置**：电机减速比、DH 参数、限位集中在 `config/`，换机型不碰业务代码
 4. **离线可测**：CRC / Modbus 帧 / IK / 轨迹全部可单测，不接硬件也能验证逻辑
@@ -184,18 +196,18 @@ ctest --test-dir build
 
 > **项目**：DummyL-Robot — PC 端六轴机械臂控制台（C 语言，脱离单片机）
 > **架构**：C11 + MinGW GCC + CMake/Ninja；`comm/` 走 RS485 Modbus RTU 直驱立三（LEESN）闭环步进电机；`control/robot.c` 提供 movej/home 等高层接口；`kinematics/` 纯 C 正逆解（球腕解耦 + 限位筛选/最优解）
-> **协议**：立三（LEESN）寄存器（地址 0x0066、使能 0x00D4（写0使能/写1释放）、实时位置 0x0004/5、速度 0x00D8/9（0.01rpm）、绝对位置 0x00E8/9、状态 0x0006/7、电流 0x001A、报警 0x00A3/清 0x00A4、回零位置清零 0x00D2/3）；Modbus RTU 03H/06H/10H；CRC16 0xA001；115200 8N1；脉冲 = 角度° × 减速比 ÷ 360 × 16384；Zeta 协议已作废
-> **硬件**：6× 立三闭环步进电机（1~3号 42 机座，减速比 50:1/100:1/50:1；4/5号 35 机座 IP35ET，50:1；6号 28 机座 IP28ET，50:1），4096 线编码器单圈 16384 步，USB 转 485；2 号默认屏蔽
-> **约束**：① 只本地 git commit，禁止 push；② 架构/接口改动先讨论再动手；③ 串口打印精简中文；④ 单位：角度用度、长度用毫米；⑤ 优先可移植到单片机的纯 C 实现，不引入重量级依赖
+> **协议**：立三（LEESN）寄存器（地址 0x0066、使能 0x00D4（写0使能/写1释放）、实时位置 0x0004/5、速度 0x00D8/9（0.01rpm）、绝对位置 0x00E8/9、状态 0x0006/7、电流 0x001A、报警 0x00A3/清 0x00A4、回零位置清零 0x00D2/3）；Modbus RTU 03H/06H/10H；CRC16 0xA001；115200 8N1；脉冲 = 角度° × 减速比 ÷ 360 × 16384
+> **硬件**：6× 立三闭环步进电机（1~3号 42 机座，减速比 50:1/100:1/50:1；4/5号 35 机座 IP35ET，50:1；6号 28 机座 IP28ET，50:1），4096 线编码器单圈 16384 步，USB 转 485；1~6 号全部在线
+> **约束**：① 只本地 git commit，禁止 push；② 架构/接口改动先讨论再动手；③ 串口打印精简中文；④ 单位：角度用度、长度用毫米；⑤ 优先可移植到单片机的纯 C 实现，不引入重量级依赖；⑥ 运动学/轨迹/通信逻辑保持离线可单测（不接硬件）；⑦ 新模块先调研 GitHub 开源项目确认方案再写代码；⑧ 产物输出到 docs\output\
 > **开发原则**：comm/control/ui 三层分离；配置头文件 + ini；离线可单测；先方案后代码
 
 ## 8. 路线图
 
-- [ ] 串口层（serial_win.c）联调验证：打开 COM 口、收发帧
-- [ ] Modbus RTU 主站：读状态/写使能/写位置，单关节验证
-- [ ] 六轴高层接口：movej / home / status
-- [ ] 运动学库：DH/FK/IK + 单测闭环
-- [ ] 轨迹规划：梯形/S 曲线插补
+- [x] 串口层（serial_win.c）联调验证：打开 COM 口、收发帧
+- [x] Modbus RTU 主站：读状态/写使能/写位置，单关节验证
+- [x] 六轴高层接口：movej / home / status
+- [x] 运动学库：DH/FK/IK + 单测闭环
+- [x] 轨迹规划：梯形/S 曲线插补
 - [ ] 笛卡尔空间运动（moveL）
 - [ ] 3D 可视化验证（可选）
 *（内容由AI生成，仅供参考）*

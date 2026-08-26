@@ -45,7 +45,7 @@ void monitor_destroy(Monitor *m)
 }
 
 /* monitor_poll：轮询全部关节在线状态并报警，返回在线数。
- * 立三状态字 0x0006~0x0007 为位定义（无 Zeta 式碰撞停/光电停状态值）：
+ * 立三状态字 0x0006~0x0007 为位定义（无碰撞停/光电停状态值）：
  *   bit21 报警、bit12 到位、bit13/14 软件限位；报警代码读 0x00A3 低 4 位。 */
 int monitor_poll(Monitor *m)
 {
