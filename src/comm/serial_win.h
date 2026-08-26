@@ -10,8 +10,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef struct SerialPort SerialPort;
+#include "comm/comm_if.h"
 
+typedef struct SerialPort SerialPort;
 /* 打开串口，成功返回句柄对象，失败返回 NULL
  * port_name 形如 "COM3"（Windows 10 以上建议 "\\\\.\\COM3" 亦可）
  * baudrate 波特率，如 115200 */
@@ -34,5 +35,11 @@ void serial_flush(SerialPort *port);
 
 /* 返回句柄是否有效 */
 int serial_is_open(const SerialPort *port);
+
+/* ================= CommOps 适配（方案一：接口抽象） =================
+ * serial_win 以全局静态句柄实现 CommOps 5 个操作，供上层统一注入。
+ * open 仅支持 8N1（data_bits=8 / parity='N' / stop_bits=1），
+ * 其他组合返回失败（内部逻辑沿用 serial_open 的 8N1 固定配置）。 */
+extern const CommOps serial_comm_ops;
 
 #endif /* SERIAL_WIN_H */

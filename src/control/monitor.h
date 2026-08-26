@@ -2,19 +2,15 @@
 #define MONITOR_H
 
 /*
- * 在线检测与堵转报警
+ * 在线检测与堵转报警（LEESN 立三体系）
  * ------------------------------------------------------------
- * 周期轮询各关节状态寄存器（0x0000）与电流（0x0005），
+ * 周期轮询各关节状态寄存器（0x0006~0x0007，UINT32）与电流（0x001A），
  * 对照堵转电流阈值（TODO-待用户确认）触发报警回调。
+ * 状态判定使用 robot_internal.h 中 LEESN_STAT_* 位定义
+ * （立三无碰撞停/光电停状态字，堵转靠电流超阈值判定）。
  */
 
 #include "control/robot.h"
-
-#define MONITOR_STATUS_IDLE       0x0000  /* 待机或到达位置 */
-#define MONITOR_STATUS_RUNNING    0x0001  /* 运行中 */
-#define MONITOR_STATUS_COLLISION  0x0002  /* 碰撞停 */
-#define MONITOR_STATUS_PHOTO_POS  0x0003  /* 正光电停 */
-#define MONITOR_STATUS_PHOTO_NEG  0x0004  /* 反光电停 */
 
 typedef struct Monitor Monitor;
 

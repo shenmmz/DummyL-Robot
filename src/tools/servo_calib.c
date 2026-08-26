@@ -15,6 +15,8 @@
  */
 
 #include "control/robot.h"
+#include "comm/serial_win.h"
+#include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
 #include "utils/logger.h"
 
@@ -52,6 +54,9 @@ int main(int argc, char **argv)
     log_set_level(LOG_LEVEL_INFO);
     printf("单关节标定工具，串口 %s\n", port);
 
+    /* 注入串口 CommOps（方案一） */
+    modbus_comm_set(&serial_comm_ops);
+
     robot = robot_init(port, MODBUS_BAUDRATE);
     if (robot == NULL) {
         LOG_ERROR("初始化失败");
@@ -77,18 +82,26 @@ int main(int argc, char **argv)
         } else if (strcmp(cmd, "exit") == 0) {
             break;
         } else if (sscanf(cmd, "en:%d", &joint) == 1) {
-            robot_enable(robot, joint);
+            ErrCode rc = robot_enable(robot, joint);
+            if (rc != ERR_NONE) LOG_ERROR("使能失败：%s", err_str(rc));
         } else if (sscanf(cmd, "dis:%d", &joint) == 1) {
-            robot_disable(robot, joint);
+            ErrCode rc = robot_disable(robot, joint);
+            if (rc != ERR_NONE) LOG_ERROR("失能失败：%s", err_str(rc));
         } else if (sscanf(cmd, "st:%d", &joint) == 1) {
-            int st = robot_read_status(robot, joint);
+            uint16_t st;
             int ok = 0;
+            ErrCode rc = robot_read_status(robot, joint, &st);
             int32_t pos = robot_read_position_steps(robot, joint, &ok);
             int cur = robot_read_current_ma(robot, joint);
-            printf("关节%d: 状态=0x%04X 位置=%d步 电流=%dmA\n", joint, st, (int)pos, cur);
+            if (rc == ERR_NONE) {
+                printf("关节%d: 状态=0x%04X 位置=%d步 电流=%dmA\n", joint, st, (int)pos, cur);
+            } else {
+                LOG_ERROR("读取状态失败：%s", err_str(rc));
+            }
         } else if (strncmp(cmd, "mov:", 4) == 0) {
             if (sscanf(cmd + 4, "%d:%lf", &joint, &angle) == 2) {
-                robot_movej(robot, joint, angle, 0.0);
+                ErrCode rc = robot_movej(robot, joint, angle, 0.0);
+                if (rc != ERR_NONE) LOG_ERROR("运动失败：%s", err_str(rc));
             } else {
                 printf("用法: mov:N:A\n");
             }

@@ -15,7 +15,12 @@
  */
 
 #include "control/robot.h"
+#include "control/robot_internal.h"
+#include "control/home.h"
 #include "control/monitor.h"
+#include "comm/serial_win.h"
+#include "comm/modbus_rtu.h"
+#include "config/robot_config.h"
 #include "utils/logger.h"
 #include "utils/cmd_parser.h"
 
@@ -29,19 +34,21 @@
 
 #define INI_PATH "config/robot_config.ini"
 
-/* 极简 ini 读取：取 [serial] 段下 key 的 value（去除空白），找不到返回默认 */
-static void ini_read_serial(const char *path, char *port, size_t port_sz, unsigned long *baud)
+/* 极简 ini 读取：取 [serial] 段下 key 的 value（去除空白），找不到返回默认。
+ * 返回 1 = ini 文件存在并已装载（生效来源：ini）；
+ * 返回 0 = ini 缺失/无法打开，回退默认值宏（生效来源：默认）。 */
+static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigned long *baud)
 {
     FILE *f;
     char line[256];
     int in_serial = 0;
 
     snprintf(port, port_sz, "COM3");
-    *baud = 115200UL;
+    *baud = MODBUS_BAUDRATE;
 
     f = fopen(path, "r");
     if (f == NULL) {
-        return;
+        return 0;
     }
     while (fgets(line, sizeof(line), f) != NULL) {
         char *p = line;
@@ -77,26 +84,44 @@ static void ini_read_serial(const char *path, char *port, size_t port_sz, unsign
         }
     }
     fclose(f);
+    return 1;
 }
 
-/* cmd_status：查询并打印全部关节的状态/位置/电流 */
+/* cmd_status：查询并打印全部关节的状态/位置/电流（完整 32 位状态字解析） */
 static int cmd_status(Robot *robot)
 {
     int j;
     LOG_INFO("关节状态查询：");
     for (j = 1; j <= 6; j++) {
-        int st, ok = 0;
+        uint32_t st32 = 0;
+        int ok = 0;
         int32_t pos;
         int cur;
+        ErrCode rc;
         if (robot_is_masked(robot, j)) {
             printf("  关节%d: 已屏蔽\n", j);
             continue;
         }
-        st = robot_read_status(robot, j);
+        rc = robot_read_status32(robot, j, &st32);
         pos = robot_read_position_steps(robot, j, &ok);
         cur = robot_read_current_ma(robot, j);
-        if (st >= 0) {
-            printf("  关节%d: 在线 状态=0x%04X 位置=%d步 电流=%dmA\n", j, st, (int)pos, cur);
+        if (rc == ERR_NONE) {
+            const char *run = "空闲";
+            switch (st32 & LEESN_STAT_RUN_MASK) {
+            case LEESN_STAT_RUN_START:  run = "即将启动"; break;
+            case LEESN_STAT_RUN_STOP:   run = "即将停止"; break;
+            case LEESN_STAT_RUN_ACTIVE: run = "正在运行"; break;
+            default:                    run = "空闲";     break;
+            }
+            printf("  关节%d: 在线 状态=0x%08X 运行=%s 位置=%d步 电流=%dmA\n",
+                   j, (unsigned)st32, run, (int)pos, cur);
+            printf("         [%s%s%s%s%s%s]\n",
+                   (st32 & LEESN_STAT_INPOS)      ? "到位" : "",
+                   (st32 & LEESN_STAT_SOFT_NEG)   ? "负限位" : "",
+                   (st32 & LEESN_STAT_SOFT_POS)   ? "正限位" : "",
+                   (st32 & LEESN_STAT_HOMED)      ? "原点完成" : "",
+                   (st32 & LEESN_STAT_ENABLE_LVL) ? "使能" : "",
+                   (st32 & LEESN_STAT_ALARM)      ? "报警" : "");
         } else {
             printf("  关节%d: 离线\n", j);
         }
@@ -121,11 +146,19 @@ int main(int argc, char **argv)
     printf("DummyL-Robot 控制台 (C11 + MinGW)\n");
     printf("输入 help 查看命令，exit 退出。\n\n");
 
-    ini_read_serial(INI_PATH, port, sizeof(port), &baud);
+    int ini_loaded = ini_read_serial(INI_PATH, port, sizeof(port), &baud);
     if (argc > 1) {
         snprintf(port, sizeof(port), "%s", argv[1]);
     }
-    LOG_INFO("打开串口 %s @ %lu 8N1", port, baud);
+    /* 方案二：配置单一来源——打印运行时参数生效来源（ini 缺失回退默认值宏） */
+    if (ini_loaded) {
+        LOG_INFO("生效来源：ini（%s），串口 %s @ %lu 8N1", INI_PATH, port, baud);
+    } else {
+        LOG_INFO("生效来源：默认（ini 缺失，回退 robot_config.h 默认值），串口 %s @ %lu 8N1", port, baud);
+    }
+
+    /* 注入串口 CommOps（方案一：control 层通过接口操作总线） */
+    modbus_comm_set(&serial_comm_ops);
 
     robot = robot_init(port, (uint32_t)baud);
     if (robot == NULL) {
@@ -143,27 +176,39 @@ int main(int argc, char **argv)
         cmd_parse(line, &cmd);
 
         switch (cmd.type) {
-        case CMD_HOME:
-            robot_home(robot);
+        case CMD_HOME: {
+            ErrCode rc = robot_home(robot);
+            if (rc != ERR_NONE) LOG_ERROR("回零失败：%s", err_str(rc));
             break;
-        case CMD_MOVEJ:
-            robot_movej(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
+        }
+        case CMD_MOVEJ: {
+            ErrCode rc = robot_movej(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
+            if (rc != ERR_NONE) LOG_ERROR("运动指令失败：%s", err_str(rc));
             break;
-        case CMD_ENABLE:
-            robot_enable(robot, cmd.joint);
+        }
+        case CMD_ENABLE: {
+            ErrCode rc = robot_enable(robot, cmd.joint);
+            if (rc != ERR_NONE) LOG_ERROR("使能失败：%s", err_str(rc));
             break;
-        case CMD_DISABLE:
-            robot_disable(robot, cmd.joint);
+        }
+        case CMD_DISABLE: {
+            ErrCode rc = robot_disable(robot, cmd.joint);
+            if (rc != ERR_NONE) LOG_ERROR("失能失败：%s", err_str(rc));
             break;
+        }
         case CMD_STATUS:
             cmd_status(robot);
             break;
-        case CMD_MASK:
-            robot_mask(robot, cmd.joint);
+        case CMD_MASK: {
+            ErrCode rc = robot_mask(robot, cmd.joint);
+            if (rc != ERR_NONE) LOG_ERROR("屏蔽失败：%s", err_str(rc));
             break;
-        case CMD_UNMASK:
-            robot_unmask(robot, cmd.joint);
+        }
+        case CMD_UNMASK: {
+            ErrCode rc = robot_unmask(robot, cmd.joint);
+            if (rc != ERR_NONE) LOG_ERROR("恢复失败：%s", err_str(rc));
             break;
+        }
         case CMD_SCAN:
             LOG_INFO("总线扫描请运行 scan_motors 工具");
             break;

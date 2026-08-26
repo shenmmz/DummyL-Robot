@@ -1,6 +1,6 @@
 # ============================================================
 # DummyL-Robot 主构建脚本
-# 平台: Windows PC (USB 转 RS485 -> Zeta 电机)
+# 平台: Windows PC (USB 转 RS485 -> 立三 LEESN 闭环步进电机)
 # 工具链: C11 + MinGW-w64 GCC + CMake/Ninja
 # 目标: lib(comm/kinematics/trajectory/control/utils) + app + tests
 # 用法:
@@ -48,17 +48,19 @@ add_library(trajectory STATIC
 )
 
 # ---------- 静态库: control ----------
-# 高层接口 (robot_home/movej/enable/disable) + 监控
+# 高层接口 (movej/enable/disable) + 堵转回零 + 监控
 add_library(control STATIC
     src/control/robot.c
+    src/control/home.c
     src/control/monitor.c
 )
 
 # ---------- 静态库: utils ----------
-# 精简中文日志 + 命令行解析
+# 精简中文日志 + 命令行解析 + 统一错误码
 add_library(utils STATIC
     src/utils/logger.c
     src/utils/cmd_parser.c
+    src/utils/err.c
 )
 
 # 公共头文件目录与警告选项
@@ -98,7 +100,7 @@ add_test(NAME test_crc16 COMMAND test_crc16)
 
 # 2. Modbus RTU 帧构造/解析测试 (不连硬件)
 add_executable(test_modbus tests/test_modbus.c)
-target_link_libraries(test_modbus PRIVATE comm)
+target_link_libraries(test_modbus PRIVATE comm utils)
 add_test(NAME test_modbus COMMAND test_modbus)
 
 # 3. 正解/逆解闭环测试

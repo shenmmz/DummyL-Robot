@@ -177,3 +177,68 @@ int serial_is_open(const SerialPort *port)
 {
     return (port != NULL && port->h != INVALID_HANDLE_VALUE && port->h != NULL) ? 1 : 0;
 }
+
+/* ================= CommOps 适配实现 ================= */
+
+/* 全局静态句柄：CommOps 无句柄参数，适配层自持当前打开的串口 */
+static SerialPort *g_ops_port = NULL;
+
+static void ops_close(void);   /* 前向声明：ops_open 在替换旧句柄前关闭 */
+
+/* ops_open：支持 8N1 打开串口，其他数据位/校验/停止位组合返回失败 */
+static int ops_open(const char *port, uint32_t baud,
+                    uint8_t data_bits, char parity, uint8_t stop_bits)
+{
+    if (data_bits != 8 || parity != 'N' || stop_bits != 1) {
+        return -1;
+    }
+    if (g_ops_port != NULL) {
+        ops_close();
+    }
+    g_ops_port = serial_open(port, baud);
+    return g_ops_port != NULL ? 0 : -1;
+}
+
+/* ops_close：关闭当前串口并清空句柄 */
+static void ops_close(void)
+{
+    if (g_ops_port != NULL) {
+        serial_close(g_ops_port);
+        g_ops_port = NULL;
+    }
+}
+
+/* ops_read_frame：读一帧，返回实际读取字节数，失败/超时返回 <= 0 */
+static int ops_read_frame(uint8_t *buf, int cap, int timeout_ms)
+{
+    if (g_ops_port == NULL || buf == NULL || cap <= 0) {
+        return -1;
+    }
+    return serial_read(g_ops_port, buf, (size_t)cap, (uint32_t)timeout_ms);
+}
+
+/* ops_write_frame：写一帧，成功返回写入字节数，失败返回 -1 */
+static int ops_write_frame(const uint8_t *buf, int len)
+{
+    if (g_ops_port == NULL || buf == NULL || len <= 0) {
+        return -1;
+    }
+    return serial_write(g_ops_port, buf, (size_t)len);
+}
+
+/* ops_flush：清空收发缓冲 */
+static void ops_flush(void)
+{
+    if (g_ops_port != NULL) {
+        serial_flush(g_ops_port);
+    }
+}
+
+/* 全局 CommOps 实例：上层通过它操作串口总线 */
+const CommOps serial_comm_ops = {
+    ops_open,
+    ops_close,
+    ops_read_frame,
+    ops_write_frame,
+    ops_flush,
+};

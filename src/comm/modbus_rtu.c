@@ -45,6 +45,19 @@ size_t modbus_build_read(uint8_t slave, uint16_t reg_addr,
     return 8;
 }
 
+/* modbus_build_read_input：构造 04H 读单个寄存器请求帧（立三手册 V126
+ * 功能码 0x04=读单个寄存器，帧格式与 03H 相同，返回 WORD），返回帧长 */
+size_t modbus_build_read_input(uint8_t slave, uint16_t reg_addr,
+                               uint8_t *frame)
+{
+    frame[0] = slave;
+    frame[1] = MODBUS_FUNC_READ_INPUT;
+    put_u16_be(&frame[2], reg_addr);
+    put_u16_be(&frame[4], 1);
+    append_crc(frame, 6);
+    return 8;
+}
+
 /* modbus_build_write_single：构造 06H 写单寄存器请求帧，返回帧长 */
 size_t modbus_build_write_single(uint8_t slave, uint16_t reg_addr,
                                  uint16_t value, uint8_t *frame)
@@ -82,33 +95,33 @@ size_t modbus_build_write_multi(uint8_t slave, uint16_t reg_addr,
     return p + 2;
 }
 
-/* modbus_check_crc：校验帧 CRC，0 通过，负值返回错误码 */
-int modbus_check_crc(const uint8_t *frame, size_t len)
+/* modbus_check_crc：校验帧 CRC，通过返回 ERR_NONE */
+ErrCode modbus_check_crc(const uint8_t *frame, size_t len)
 {
     uint16_t crc;
     if (len < 4) {
-        return MODBUS_ERR_BAD_LEN;
+        return ERR_LEN;
     }
     crc = crc16_modbus(frame, len - 2);
     if ((uint8_t)(crc & 0xFF) != frame[len - 2] ||
         (uint8_t)(crc >> 8) != frame[len - 1]) {
-        return MODBUS_ERR_BAD_CRC;
+        return ERR_CRC;
     }
-    return 0;
+    return ERR_NONE;
 }
 
-/* modbus_parse_response：解析响应帧（异常码/03H/06H/10H），成功返回 0 */
-int modbus_parse_response(const uint8_t *rx, size_t rx_len, ModbusFrame *out)
+/* modbus_parse_response：解析响应帧（异常码/03H/06H/10H），成功返回 ERR_NONE */
+ErrCode modbus_parse_response(const uint8_t *rx, size_t rx_len, ModbusFrame *out)
 {
     uint8_t func;
     uint16_t i;
-    int crc_ret;
+    ErrCode crc_ret;
 
     if (rx == NULL || out == NULL || rx_len < 5) {
-        return MODBUS_ERR_BAD_LEN;
+        return ERR_LEN;
     }
     crc_ret = modbus_check_crc(rx, rx_len);
-    if (crc_ret != 0) {
+    if (crc_ret != ERR_NONE) {
         return crc_ret;
     }
 
@@ -122,18 +135,19 @@ int modbus_parse_response(const uint8_t *rx, size_t rx_len, ModbusFrame *out)
     /* 异常响应: func | 0x80，帧长 5 */
     if (func & MODBUS_FUNC_ERR_BIT) {
         if (rx_len != 5) {
-            return MODBUS_ERR_BAD_LEN;
+            return ERR_LEN;
         }
         out->data[0] = rx[2];   /* 异常码 */
         out->data_len = 1;
-        return MODBUS_ERR_EXCEPTION;
+        return ERR_EXCEPTION;
     }
 
     switch (func) {
     case MODBUS_FUNC_READ_HOLDING:
-        /* [slave][03][byte_cnt][data...][crcL][crcH] */
+    case MODBUS_FUNC_READ_INPUT:
+        /* [slave][03/04][byte_cnt][data...][crcL][crcH] */
         if (rx_len < 5 || rx[2] != (rx_len - 5)) {
-            return MODBUS_ERR_BAD_LEN;
+            return ERR_LEN;
         }
         out->data_len = rx[2];
         for (i = 0; i < out->data_len; i++) {
@@ -144,7 +158,7 @@ int modbus_parse_response(const uint8_t *rx, size_t rx_len, ModbusFrame *out)
     case MODBUS_FUNC_WRITE_SINGLE:
         /* [slave][06][addrH][addrL][valH][valL][crcL][crcH] 回显 */
         if (rx_len != 8) {
-            return MODBUS_ERR_BAD_LEN;
+            return ERR_LEN;
         }
         out->reg_addr = get_u16_be(&rx[2]);
         out->reg_count = 1;
@@ -156,7 +170,7 @@ int modbus_parse_response(const uint8_t *rx, size_t rx_len, ModbusFrame *out)
     case MODBUS_FUNC_WRITE_MULTI:
         /* [slave][10][addrH][addrL][cntH][cntL][crcL][crcH] 回显 */
         if (rx_len != 8) {
-            return MODBUS_ERR_BAD_LEN;
+            return ERR_LEN;
         }
         out->reg_addr = get_u16_be(&rx[2]);
         out->reg_count = get_u16_be(&rx[4]);
@@ -164,7 +178,48 @@ int modbus_parse_response(const uint8_t *rx, size_t rx_len, ModbusFrame *out)
         break;
 
     default:
-        return MODBUS_ERR_BAD_FUNC;
+        return ERR_ARG;
     }
-    return 0;
+    return ERR_NONE;
+}
+
+/* ================= CommOps 注入与总线收发（方案一） ================= */
+
+/* 全局 CommOps 指针：由调用方在初始化时注入（串口实现或内存假串口） */
+static const CommOps *g_comm_ops = NULL;
+
+void modbus_comm_set(const CommOps *ops)
+{
+    g_comm_ops = ops;
+}
+
+const CommOps *modbus_comm_get(void)
+{
+    return g_comm_ops;
+}
+
+/* modbus_transact：flush -> write -> read -> parse 完整一次主从交互 */
+ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out)
+{
+    uint8_t rx[300];
+    int got;
+    const CommOps *ops = g_comm_ops;
+
+    if (ops == NULL || tx == NULL || len == 0 || out == NULL) {
+        return ERR_PORT;
+    }
+    if (ops->flush != NULL) {
+        ops->flush();
+    }
+    if (ops->write_frame == NULL || ops->write_frame(tx, (int)len) != (int)len) {
+        return ERR_PORT;
+    }
+    if (ops->read_frame == NULL) {
+        return ERR_PORT;
+    }
+    got = ops->read_frame(rx, (int)sizeof(rx), 200);
+    if (got <= 0) {
+        return ERR_TIMEOUT;
+    }
+    return modbus_parse_response(rx, (size_t)got, out);
 }

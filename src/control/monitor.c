@@ -8,6 +8,8 @@
  */
 
 #include "control/monitor.h"
+#include "control/robot_internal.h"
+#include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
 #include "utils/logger.h"
 
@@ -42,7 +44,9 @@ void monitor_destroy(Monitor *m)
     free(m);
 }
 
-/* monitor_poll：轮询全部关节在线状态并报警，返回在线数 */
+/* monitor_poll：轮询全部关节在线状态并报警，返回在线数。
+ * 立三状态字 0x0006~0x0007 为位定义（无 Zeta 式碰撞停/光电停状态值）：
+ *   bit21 报警、bit12 到位、bit13/14 软件限位；报警代码读 0x00A3 低 4 位。 */
 int monitor_poll(Monitor *m)
 {
     int j;
@@ -52,16 +56,15 @@ int monitor_poll(Monitor *m)
         return 0;
     }
     for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
-        int st = robot_read_status(m->robot, j);
-        if (st >= 0) {
+        uint16_t st;
+        ErrCode rc = robot_read_status(m->robot, j, &st);
+        if (rc == ERR_NONE) {
             m->online[j - 1] = 1;
             cnt++;
-            if (st == MONITOR_STATUS_COLLISION) {
-                LOG_WARN("关节%d 碰撞停", j);
-            } else if (st == MONITOR_STATUS_PHOTO_POS) {
-                LOG_WARN("关节%d 正光电停", j);
-            } else if (st == MONITOR_STATUS_PHOTO_NEG) {
-                LOG_WARN("关节%d 反光电停", j);
+            if (st & LEESN_STAT_SOFT_NEG) {
+                LOG_WARN("关节%d 到达软件负限位", j);
+            } else if (st & LEESN_STAT_SOFT_POS) {
+                LOG_WARN("关节%d 到达软件正限位", j);
             }
         } else {
             m->online[j - 1] = 0;
@@ -71,7 +74,46 @@ int monitor_poll(Monitor *m)
     return cnt;
 }
 
-/* monitor_check_stall：单关节堵转电流检测，超阈值报警返回 1 */
+/* monitor_check_alarm：读 0x00A3 报警状态，有报警时打印代码并返回报警代码（0=正常） */
+int monitor_check_alarm(Monitor *m, int joint)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len;
+    ErrCode rc;
+    int code;
+
+    if (m == NULL || m->robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
+        return 0;
+    }
+    len = modbus_build_read(joint_slave(joint), LEESN_REG_ALARM_STAT, 1, frame);
+    rc = robot_request(m->robot, frame, len, &resp);
+    if (rc != ERR_NONE || resp.data_len < 2) {
+        return 0;
+    }
+    code = (int)((resp.data[0] << 8) | resp.data[1]) & 0x0F;  /* 低 4 位为当前报警 */
+    if (code != 0) {
+        LOG_ERROR("关节%d 驱动器报警：%s（代码 %d）", joint, leesn_alarm_text(code), code);
+    }
+    return code;
+}
+
+/* monitor_clear_alarm：写 0x00A4 = 0 清除报警，返回 ERR_NONE 成功 */
+ErrCode monitor_clear_alarm(Monitor *m, int joint)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len;
+
+    if (m == NULL || m->robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
+        return ERR_ARG;
+    }
+    len = modbus_build_write_single(joint_slave(joint), LEESN_REG_CLEAR_ALARM, 0x0000, frame);
+    return robot_request(m->robot, frame, len, &resp);
+}
+
+/* monitor_check_stall：单关节电流超阈值检测（立三无堵转寄存器，碰撞/堵转
+ * 判定唯一依据为 0x001A 实时电流），超阈值报警返回 1 */
 int monitor_check_stall(Monitor *m, int joint)
 {
     int cur;
@@ -80,7 +122,7 @@ int monitor_check_stall(Monitor *m, int joint)
         return 0;
     }
     if (m->stall_threshold_ma <= 0) {
-        return 0; /* 阈值未配置，跳过堵转检测 */
+        return 0; /* 阈值未配置，跳过检测 */
     }
     cur = robot_read_current_ma(m->robot, joint);
     if (cur < 0) {
