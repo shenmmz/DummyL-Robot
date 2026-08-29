@@ -36,6 +36,7 @@ typedef struct ModbusFrame ModbusFrame;
 #define LEESN_REG_STATUS      0x0006  /* 运行及输入口状态 (UINT32, RO，位定义见下) */
 #define LEESN_REG_SERIAL_TIMEOUT 0x0008 /* 串口超时设置 (UINT16, RW，单位 10ms，0=取消) */
 #define LEESN_REG_BAUD_CODE   0x0009  /* 通讯参数 (UINT16, RW，低 8 位波特率码，出厂 12=115200) */
+#define LEESN_REG_SPEED_RT    0x0019  /* 实时速度 (INT32, 0.01 rpm, RO) */
 #define LEESN_REG_CURRENT     0x001A  /* 实时电流 (UINT16 mA, RO) */
 #define LEESN_REG_SUBDIV      0x0024  /* 细分（每转脉冲数）(UINT32, RW，出厂默认 4000) */
 #define LEESN_REG_DEVICE_ADDR 0x0066  /* 驱动器基地址 (UINT16, RW，默认 1，多台逐台设置并 0x00DC 保存) */

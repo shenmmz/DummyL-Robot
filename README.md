@@ -33,9 +33,75 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 
 ## 2. 项目架构
 
+### 2.1 可视化架构图
+
+完整可视化架构图见 [docs/architecture.html](docs/architecture.html)（浏览器打开可查看交互式架构图，支持深色模式）。
+
+### 2.2 分层架构图
+
+```
+┌─────────────────────────── PC 软件 (Windows / MinGW) ───────────────────────────┐
+│                                                                                 │
+│                          ┌──────────┐                                           │
+│                          │  main.c  │  命令行入口                              │
+│                          └────┬─────┘                                           │
+│                               │                                                 │
+│  ┌──┐  ┌──────────────────────┼──────────────────────┐  ┌────────────┐          │
+│  │utils│ │       控制层 (control)                     │  │  算法库    │          │
+│  │     │ │  robot.c   home.c   monitor.c              │  │ mat3.c     │          │
+│  │logger│ │  使能/运动  堵转回零  状态监控              │  │ dh.c       │          │
+│  │cmd  │ │             ┌─────┐                       │  │ ik.c       │          │
+│  │err  │ │             │核心 │                       │  ├────────────┤          │
+│  └──┬──┘ └─────────────┴─────┴───────────────────────┘  │ planner.c  │          │
+│     │                    │                               └─────┬──────┘          │
+│     │              ┌─────┘                                     │                │
+│  ┌──┴──────┐  ┌────▼────────────────────────┐                 │                │
+│  │ config  │  │     通信层 (comm)            │                 │                │
+│  │ config.h│  │ serial_win  modbus_rtu  crc16│                 │                │
+│  │ config  │  │ Win32串口   RTU主站    CRC校验 │                 │                │
+│  │ .ini    │  └─────────────┬───────────────┘                 │                │
+│  └─────────┘                │                                  │                │
+│                             │                                  │                │
+└─────────────────────────────┼──────────────────────────────────┘                │
+                              │                                                   │
+                    ┌─────────▼───────────────────┐                                │
+                    │  USB-RS485 → 6轴步进电机    │                                │
+                    │  立三 LEESN · Modbus RTU    │                                │
+                    │  115200 8N1                │                                │
+                    └───────────────────────────┘                                │
+```
+
+### 2.3 层级说明
+
+| 层 | 目录 | 模块 | 职责 |
+|---|---|---|---|
+| 应用层 | `src/main.c` | CLI | 命令行入口，解析用户输入，调用控制层 |
+| 控制层 | `src/control/` | robot.c / home.c / monitor.c | 使能/运动/状态/屏蔽、堵转回零、状态监控 |
+| 通信层 | `src/comm/` | serial_win.c / modbus_rtu.c / crc16.c | Win32串口、Modbus RTU主站、CRC16校验 |
+| 算法库 | `src/kinematics/` `src/trajectory/` | mat3.c / dh.c / ik.c / planner.c | 矩阵运算、DH建模、逆运动学、轨迹规划 |
+| 工具层 | `src/utils/` | logger / cmd_parser / err | 中文日志、命令解析、统一错误码 |
+| 配置层 | `config/` | robot_config.h / .ini | 编译期参数（宏）+ 运行时参数（ini） |
+
+### 2.4 关键设计
+
+- **通信抽象**：`comm_if.h` 定义 `CommOps` 函数指针表，控制层不直接依赖串口实现，可注入假串口做单测
+- **内部共享**：`robot_internal.h` 暴露寄存器定义和 `robot_request()` 给 home.c，不对外公开
+- **单一产物**：只编译 `dummyrobot.exe`，工具和测试已清理
+
+### 2.5 数据流向
+
+```
+用户命令 → main.c → control层 → comm层 → RS485 → 电机
+                     ↑    ↑
+              utils  ↑    ↑  algorithm (kinematics/trajectory)
+              config ↑
+```
+
+### 2.6 目录结构
+
 ```
 DummyL-Robot/
-├── CMakeLists.txt              # 主构建：5 静态库（comm/kinematics/trajectory/control/utils）+ app + 4 测试目标
+├── CMakeLists.txt              # 主构建：5 静态库（comm/kinematics/trajectory/control/utils）+ app
 ├── README.md                   # 本文件
 ├── config/
 │   ├── robot_config.h          # 电机ID/减速比/堵转电流/限位（宏定义）
@@ -59,21 +125,12 @@ DummyL-Robot/
 │   │   ├── home.c/h            # 回零流程：顶限位→电流判堵转→急停→清零→就位
 │   │   ├── monitor.c/h         # 状态轮询：在线检测、堵转报警
 │   │   └── robot_internal.h    # 立三（LEESN）寄存器宏表 + DWORD 字节序契约
-│   ├── utils/
-│   │   ├── logger.c/h          # 精简中文日志
-│   │   ├── err.c/h             # ErrCode 统一错误码 + err_str() 中文提示
-│   │   └── cmd_parser.c/h      # 命令行解析（movej:1:45 / home / status）
-│   └── tools/
-│       ├── scan_motors.c       # 总线电机扫描
-│       └── servo_calib.c       # 单关节手动调试
-├── tests/
-│   ├── test_crc16.c            # CRC 向量测试
-│   ├── test_modbus.c           # 帧构造/解析（不连硬件）
-│   ├── test_fk_ik.c            # FK→IK→FK 闭环
-│   └── test_planner.c          # 轨迹规划验证
+│   └── utils/
+│       ├── logger.c/h          # 精简中文日志
+│       ├── err.c/h             # ErrCode 统一错误码 + err_str() 中文提示
+│       └── cmd_parser.c/h      # 命令行解析（movej:1:45 / home / status）
 └── docs/
-    ├── protocol.md             # 立三（LEESN）寄存器表 + Modbus 帧格式
-    └── output/                 # 产物输出目录（技术面试题库等文档）
+    └── output/                 # 产物输出目录
 ```
 
 ## 3. 构建与运行

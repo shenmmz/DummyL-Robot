@@ -4,11 +4,34 @@
  * 所属模块：通信层（comm）
  * 对外接口：modbus_build_read、modbus_build_write_single、
  *           modbus_build_write_multi、modbus_check_crc、modbus_parse_response
- * 依赖模块：comm/crc16
+ * 包含 CRC16-Modbus（0xA001）校验计算
  */
 
 #include "comm/modbus_rtu.h"
-#include "comm/crc16.h"
+#include <windows.h>
+
+/* ================= CRC16-Modbus（0xA001） ================= */
+
+/* 逐字节异或 + 右移 8 次，最低位为 1 时异或多项式 0xA001 */
+static uint16_t crc16_modbus(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFFu;
+    size_t i;
+    int bit;
+
+    for (i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i];
+        for (bit = 0; bit < 8; bit++) {
+            if (crc & 0x0001u) {
+                crc >>= 1;
+                crc ^= 0xA001u;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
 
 /*
  * Modbus RTU 主站 03H/06H/10H 帧构造与解析
@@ -198,7 +221,7 @@ const CommOps *modbus_comm_get(void)
     return g_comm_ops;
 }
 
-/* modbus_transact：flush -> write -> read -> parse 完整一次主从交互 */
+/* modbus_transact：flush -> write -> read响应 -> parse */
 ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out)
 {
     uint8_t rx[300];
@@ -208,16 +231,25 @@ ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out)
     if (ops == NULL || tx == NULL || len == 0 || out == NULL) {
         return ERR_PORT;
     }
+
+    /* 帧间延时：Modbus RTU 3.5字符间隔 */
+    Sleep(2);
+
     if (ops->flush != NULL) {
         ops->flush();
     }
     if (ops->write_frame == NULL || ops->write_frame(tx, (int)len) != (int)len) {
         return ERR_PORT;
     }
+
+    /* RTS_CONTROL_TOGGLE 模式下，Windows 自动管理 RS485 方向：
+     * 发送时 RTS 高（发送模式），发送完成后 RTS 低（接收模式）。
+     * 不需要手动处理回声。 */
     if (ops->read_frame == NULL) {
         return ERR_PORT;
     }
-    got = ops->read_frame(rx, (int)sizeof(rx), 200);
+    got = ops->read_frame(rx, (int)sizeof(rx), 50);
+
     if (got <= 0) {
         return ERR_TIMEOUT;
     }

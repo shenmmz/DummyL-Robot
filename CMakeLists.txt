@@ -26,9 +26,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # ---------- 静态库: comm ----------
-# Windows 串口封装 + CRC16 + Modbus RTU 主站
+# Windows 串口封装 + Modbus RTU（含 CRC16）
 add_library(comm STATIC
-    src/comm/crc16.c
     src/comm/modbus_rtu.c
     src/comm/serial_win.c
 )
@@ -45,6 +44,12 @@ add_library(kinematics STATIC
 # 点到点 梯形/S 曲线 关节插补
 add_library(trajectory STATIC
     src/trajectory/planner.c
+)
+
+# ---------- 静态库: api ----------
+# 电机寄存器 API（封装 Modbus 读写，供 control/monitor 等模块调用）
+add_library(api STATIC
+    src/api/motor_reg.c
 )
 
 # ---------- 静态库: control ----------
@@ -65,50 +70,23 @@ add_library(utils STATIC
 
 # 公共头文件目录与警告选项
 # src 用于引用 comm/kinematics/... 子模块头；项目根用于引用 config/*.h
-foreach(lib comm kinematics trajectory control utils)
+foreach(lib comm kinematics trajectory api control utils)
     target_include_directories(${lib} PUBLIC src ${CMAKE_SOURCE_DIR})
     target_compile_options(${lib} PRIVATE -Wall -Wextra)
 endforeach()
 
-# control 依赖 comm/kinematics/trajectory/utils
+# api 依赖 comm（Modbus 帧构造）和 utils（logger）
+target_link_libraries(api PUBLIC comm utils)
+
+# control 依赖 comm/kinematics/trajectory/api/utils
 target_link_libraries(control PUBLIC
     comm
     kinematics
     trajectory
+    api
     utils
 )
 
 # ---------- 应用: CLI 主程序 ----------
 add_executable(dummyrobot src/main.c)
 target_link_libraries(dummyrobot PRIVATE control utils)
-
-# ---------- 应用: 总线电机扫描工具 ----------
-add_executable(scan_motors src/tools/scan_motors.c)
-target_link_libraries(scan_motors PRIVATE control utils)
-
-# ---------- 应用: 单关节标定工具 ----------
-add_executable(servo_calib src/tools/servo_calib.c)
-target_link_libraries(servo_calib PRIVATE control utils)
-
-# ---------- 测试: CTest 注册 4 个单测 ----------
-enable_testing()
-
-# 1. CRC16 向量测试
-add_executable(test_crc16 tests/test_crc16.c)
-target_link_libraries(test_crc16 PRIVATE comm)
-add_test(NAME test_crc16 COMMAND test_crc16)
-
-# 2. Modbus RTU 帧构造/解析测试 (不连硬件)
-add_executable(test_modbus tests/test_modbus.c)
-target_link_libraries(test_modbus PRIVATE comm utils)
-add_test(NAME test_modbus COMMAND test_modbus)
-
-# 3. 正解/逆解闭环测试
-add_executable(test_fk_ik tests/test_fk_ik.c)
-target_link_libraries(test_fk_ik PRIVATE kinematics)
-add_test(NAME test_fk_ik COMMAND test_fk_ik)
-
-# 4. 轨迹规划测试
-add_executable(test_planner tests/test_planner.c)
-target_link_libraries(test_planner PRIVATE trajectory)
-add_test(NAME test_planner COMMAND test_planner)

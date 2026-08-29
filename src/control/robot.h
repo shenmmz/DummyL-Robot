@@ -55,6 +55,12 @@ int32_t robot_read_position_steps(Robot *robot, int joint, int *ok);
 /* 读取关节当前电流（mA，0x001A），失败返回 -1 */
 int robot_read_current_ma(Robot *robot, int joint);
 
+/* 读取关节实时速度（rpm，0x0019，0.01rpm），失败返回 -1 */
+int robot_read_speed_rpm(Robot *robot, int joint);
+
+/* 读取关节报警代码（0x00A3），失败返回 -1 */
+int robot_read_alarm(Robot *robot, int joint);
+
 /* 屏蔽/恢复关节（1=屏蔽）：屏蔽后所有操作自动跳过该关节，不发指令、不轮询。
  * 返回 ErrCode：ERR_NONE / ERR_ARG */
 ErrCode robot_mask(Robot *robot, int joint);

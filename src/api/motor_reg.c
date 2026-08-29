@@ -1,0 +1,254 @@
+/*
+ * motor_reg.c —— 电机寄存器 API 实现（立三 LEESN 485 驱动器）
+ * ------------------------------------------------------------
+ * 封装 Modbus 帧构造与请求发送，提供简洁的寄存器读写接口。
+ * 所有函数 joint 参数为 1~6 关节号，内部自动查表转换为从站地址。
+ */
+
+#include "api/motor_reg.h"
+#include "control/robot_internal.h"
+#include "comm/modbus_rtu.h"
+#include "utils/logger.h"
+
+/* ================= 基本寄存器读写 ================= */
+
+/* motor_write_u16：写单个 16 位寄存器（功能码 06H）
+ * robot   - 机器人对象
+ * joint   - 关节号 1~6
+ * reg     - 寄存器地址
+ * val     - 要写入的值
+ * 返回：ERR_NONE 成功，其他失败 */
+ErrCode motor_write_u16(Robot *robot, int joint, uint16_t reg, uint16_t val)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len = modbus_build_write_single(joint_slave(joint), reg, val, frame);
+    return robot_request(robot, frame, len, &resp);
+}
+
+/* motor_write_i32：写 32 位寄存器（功能码 10H）
+ * 立三 DWORD 字节序：低 16 位寄存器在前、字内高字节在前
+ * robot   - 机器人对象
+ * joint   - 关节号 1~6
+ * reg     - 起始寄存器地址（低 16 位）
+ * val     - 32 位整数值
+ * 返回：ERR_NONE 成功，其他失败 */
+ErrCode motor_write_i32(Robot *robot, int joint, uint16_t reg, int32_t val)
+{
+    uint16_t vals[2];
+    uint8_t frame[32];
+    ModbusFrame resp;
+    vals[0] = (uint16_t)((uint32_t)val & 0xFFFFu);      /* 低 16 位 */
+    vals[1] = (uint16_t)(((uint32_t)val >> 16) & 0xFFFFu); /* 高 16 位 */
+    size_t len = modbus_build_write_multi(joint_slave(joint), reg, vals, 2, frame);
+    return robot_request(robot, frame, len, &resp);
+}
+
+/* motor_read_u16：读单个 16 位寄存器（功能码 03H）
+ * robot   - 机器人对象
+ * joint   - 关节号 1~6
+ * reg     - 寄存器地址
+ * val     - [输出] 读取到的值
+ * 返回：ERR_NONE 成功，其他失败 */
+ErrCode motor_read_u16(Robot *robot, int joint, uint16_t reg, uint16_t *val)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len = modbus_build_read(joint_slave(joint), reg, 1, frame);
+    ErrCode rc = robot_request(robot, frame, len, &resp);
+    if (rc != ERR_NONE) return rc;
+    if (resp.data_len < 2) return ERR_LEN;
+    *val = ((uint16_t)resp.data[0] << 8) | (uint16_t)resp.data[1];
+    return ERR_NONE;
+}
+
+/* motor_read_i32：读 32 位寄存器（功能码 03H）
+ * 立三 DWORD 字节序：低 16 位寄存器在前、字内高字节在前
+ * robot   - 机器人对象
+ * joint   - 关节号 1~6
+ * reg     - 起始寄存器地址（低 16 位）
+ * val     - [输出] 读取到的 32 位值
+ * 返回：ERR_NONE 成功，其他失败 */
+ErrCode motor_read_i32(Robot *robot, int joint, uint16_t reg, int32_t *val)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len = modbus_build_read(joint_slave(joint), reg, 2, frame);
+    ErrCode rc = robot_request(robot, frame, len, &resp);
+    if (rc != ERR_NONE) return rc;
+    if (resp.data_len < 4) return ERR_LEN;
+    uint16_t lo = ((uint16_t)resp.data[0] << 8) | (uint16_t)resp.data[1];
+    uint16_t hi = ((uint16_t)resp.data[2] << 8) | (uint16_t)resp.data[3];
+    *val = (int32_t)(((uint32_t)hi << 16) | (uint32_t)lo);
+    return ERR_NONE;
+}
+
+/* ================= 常用电机操作 ================= */
+
+/* motor_enable：使能电机
+ * 写 0x00D4 = 0，马达上电，可以接收运动指令
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_enable(Robot *robot, int joint)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_ENABLE, LEESN_CMD_ENABLE);
+}
+
+/* motor_disable：失能/释放电机
+ * 写 0x00D4 = 1，马达断电，自由转动
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_disable(Robot *robot, int joint)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_ENABLE, LEESN_CMD_RELEASE);
+}
+
+/* motor_estop：急停电机
+ * 写 0x00C8 = 0x0100，立即停止输出，电机保持使能状态
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_estop(Robot *robot, int joint)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, LEESN_CMD_ESTOP);
+}
+
+/* motor_set_speed：设置运行速度
+ * 写 0x00D8~0x00D9（INT32，单位 0.01 rpm）
+ * rpm - 目标速度，单位 rpm（内部自动 ×100 转换为寄存器值）
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_set_speed(Robot *robot, int joint, int rpm)
+{
+    return motor_write_i32(robot, joint, LEESN_REG_VEL_RUN,
+                           LEESN_RPM_TO_VELREG((double)rpm));
+}
+
+/* motor_set_accel：设置加减速时间
+ * 同时写 0x0098（加速时间）和 0x0099（减速时间）
+ * ms - 加减速时间，单位毫秒，值越大启停越平缓
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_set_accel(Robot *robot, int joint, int ms)
+{
+    ErrCode rc = motor_write_u16(robot, joint, LEESN_REG_ACC_TIME, (uint16_t)ms);
+    if (rc != ERR_NONE) return rc;
+    return motor_write_u16(robot, joint, LEESN_REG_DEC_TIME, (uint16_t)ms);
+}
+
+/* motor_clear_pos：清零当前位置
+ * 写 0x00D2 = 0，把当前电机位置设为坐标原点
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_clear_pos(Robot *robot, int joint)
+{
+    return motor_write_i32(robot, joint, LEESN_REG_SET_POS, 0);
+}
+
+/* motor_set_limit：设置限位使能
+ * 写 0x006D，enable=1 限位有效，enable=0 限位失效
+ * 回零时需关闭限位防止撞到硬限位报警，正常运行时开启
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_set_limit(Robot *robot, int joint, int enable)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_LIMIT, enable ? 0x0001 : 0x0000);
+}
+
+/* motor_run：速度模式运行
+ * 写 0x00C8，dir > 0 正转(CW)，dir < 0 反转(CCW)
+ * 注意：运行前需先调用 motor_set_speed 设置速度
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_run(Robot *robot, int joint, int dir)
+{
+    uint16_t cmd = (dir > 0) ? LEESN_CMD_RUN_CW : LEESN_CMD_RUN_CCW;
+    return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, cmd);
+}
+
+/* motor_read_current：读取实时电流
+ * 读 0x001A（UINT16，单位 mA）
+ * 返回：电流值 mA，失败返回 -1 */
+int motor_read_current(Robot *robot, int joint)
+{
+    uint16_t val;
+    if (motor_read_u16(robot, joint, LEESN_REG_CURRENT, &val) != ERR_NONE)
+        return -1;
+    return (int)val;
+}
+
+/* motor_read_position：读取实时位置
+ * 读 0x0004~0x0005（INT32，单位脉冲）
+ * ok - [输出] 1=读取成功，0=失败，可传 NULL
+ * 返回：位置脉冲数，失败时返回 0 */
+int32_t motor_read_position(Robot *robot, int joint, int *ok)
+{
+    int32_t val;
+    if (motor_read_i32(robot, joint, LEESN_REG_POS, &val) != ERR_NONE) {
+        if (ok) *ok = 0;
+        return 0;
+    }
+    if (ok) *ok = 1;
+    return val;
+}
+
+/* motor_read_status：读取状态字低 16 位
+ * 读 0x0006（32 位寄存器，取低 16 位）
+ * 包含：运行状态(bit8-9)、到位(bit12)、软限位(bit13-14)、原点(bit15)等
+ * status - [输出] 状态字
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_read_status(Robot *robot, int joint, uint16_t *status)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len = modbus_build_read(joint_slave(joint), LEESN_REG_STATUS, 2, frame);
+    ErrCode rc = robot_request(robot, frame, len, &resp);
+    if (rc != ERR_NONE) return rc;
+    if (resp.data_len < 2) return ERR_LEN;
+    *status = ((uint16_t)resp.data[0] << 8) | (uint16_t)resp.data[1];
+    return ERR_NONE;
+}
+
+/* ================= 运动控制 ================= */
+
+/* motor_move_abs：绝对位置运动
+ * 写 0x00E8~0x00E9（INT32 脉冲），电机运行到目标绝对位置
+ * 运行中也可执行，步数由 DEG2STEPS 计算 */
+ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
+{
+    return motor_write_i32(robot, joint, LEESN_REG_ABS_MOVE, steps);
+}
+
+/* ================= 状态读取（扩展） ================= */
+
+/* motor_read_speed：读取实时速度
+ * 读 0x0019（INT32，单位 0.01rpm），转换为 rpm 返回
+ * 失败返回 -1 */
+int motor_read_speed(Robot *robot, int joint)
+{
+    int32_t val;
+    if (motor_read_i32(robot, joint, LEESN_REG_SPEED_RT, &val) != ERR_NONE)
+        return -1;
+    return (int)LEESN_VELREG_TO_RPM(val);
+}
+
+/* motor_read_alarm：读取报警代码
+ * 读 0x00A3（UINT16），低 4 位为当前报警代码
+ * 0=正常，>0=报警，失败返回 -1 */
+int motor_read_alarm(Robot *robot, int joint)
+{
+    uint16_t val;
+    if (motor_read_u16(robot, joint, LEESN_REG_ALARM_STAT, &val) != ERR_NONE)
+        return -1;
+    return (int)(val & 0x0F);
+}
+
+/* motor_clear_alarm：清除报警
+ * 写 0x00A4 = 0，清除当前报警
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_clear_alarm(Robot *robot, int joint)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_CLEAR_ALARM, 0x0000);
+}
+
+/* motor_read_device_addr：读取驱动器地址
+ * 读 0x0066（UINT16），用于检测电机是否在线
+ * 返回：地址值（1~64），失败返回 -1 */
+int motor_read_device_addr(Robot *robot, int joint)
+{
+    uint16_t val;
+    if (motor_read_u16(robot, joint, LEESN_REG_DEVICE_ADDR, &val) != ERR_NONE)
+        return -1;
+    return (int)val;
+}

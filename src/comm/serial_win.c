@@ -76,7 +76,9 @@ SerialPort *serial_open(const char *port_name, uint32_t baudrate)
     dcb.fBinary = TRUE;
     dcb.fParity = FALSE;
     dcb.fDtrControl = DTR_CONTROL_ENABLE;
-    dcb.fRtsControl = RTS_CONTROL_ENABLE;
+    /* RTS_CONTROL_TOGGLE: Windows 自动在发送时置高、发送后置低，
+     * 用于 RS485 自动方向切换（需转换器硬件支持）。 */
+    dcb.fRtsControl = RTS_CONTROL_TOGGLE;
     if (!SetCommState(port->h, &dcb)) {
         fprintf(stderr, "[串口] SetCommState 失败\n");
         serial_close(port);
@@ -185,13 +187,9 @@ static SerialPort *g_ops_port = NULL;
 
 static void ops_close(void);   /* 前向声明：ops_open 在替换旧句柄前关闭 */
 
-/* ops_open：支持 8N1 打开串口，其他数据位/校验/停止位组合返回失败 */
-static int ops_open(const char *port, uint32_t baud,
-                    uint8_t data_bits, char parity, uint8_t stop_bits)
+/* ops_open：打开串口（固定 8N1，由 serial_open 内部配置） */
+static int ops_open(const char *port, uint32_t baud)
 {
-    if (data_bits != 8 || parity != 'N' || stop_bits != 1) {
-        return -1;
-    }
     if (g_ops_port != NULL) {
         ops_close();
     }

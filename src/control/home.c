@@ -1,308 +1,451 @@
 /*
- * home.c —— 堵转模式回零实现（LEESN 立三体系）
+ * home.c —— 回零实现（堵转模式 + 传感器模式）
  * ------------------------------------------------------------
- * 所属模块：控制层（control）
- * 对外接口：robot_home
- * 依赖模块：control/robot（内部接口）、comm/modbus_rtu、config/robot_config、utils/logger
+ * 关节1-4：堵转回零（速度模式顶硬限位 → 电流超阈值 → 清零位置）
+ * 关节5：  堵转回零 → 清零 → 正向移动
+ * 关节6：  传感器回零（反向→碰IN0降速→离开→正向碰IN0→极慢速离开→清零）
  *
- * 回零策略：立三电机无"堵转电流/堵转逻辑"专用寄存器，改为
- * 速度模式顶硬限位 → 电流超阈值判定堵转 → 急停(0x00C8=0x0100) →
- * 清零位置(0x00D2~0x00D3=0) → 运动到机械原点。
+ * 所有电机寄存器操作统一走 motor_reg API，不直接操作 Modbus 帧。
  */
 
 #include "control/home.h"
-#include "control/robot_internal.h"
-#include "comm/modbus_rtu.h"
-#include "config/robot_config.h"
+#include "api/motor_reg.h"
+#include "control/robot_internal.h"   /* LEESN_STAT_* 状态位定义 */
 #include "utils/logger.h"
-
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
-/* ================= 内部辅助函数 ================= */
+/* ====================== 回零参数 ====================== */
 
-/* 写单个寄存器并检查响应：返回 ErrCode（ERR_NONE 成功 / 对应错误码） */
-static ErrCode home_write_reg(Robot *robot, int joint, uint16_t reg, uint16_t val)
+/* 关节1-5 堵转回零参数（下标1-5对应关节1-5） */
+typedef struct {
+    int    speed_rpm;     /* 回零速度 rpm */
+    int    accel_ms;      /* 加减速时间 ms */
+    int    dir;           /* 方向 +1正转 / -1反转 */
+    int    stall_current; /* 堵转电流 mA，0=仅靠状态字判定 */
+    double forward_deg;   /* 堵转后正向移动角度，0=不移动 */
+} StallHome;
+
+static StallHome stall[6] = {
+    [1] = { 80, 300, +1, 500, 0   },
+    [2] = { 60, 400, -1, 500, 0   },
+    [3] = { 80, 300, +1, 800, 0   },
+    [4] = { 60, 500, -1, 500, 0   },
+    [5] = {100, 200, -1, 500, 5.0 },
+};
+
+/* 关节6 传感器回零参数 */
+static struct {
+    int fast_rpm;         /* 快速寻找传感器 */
+    int slow_rpm;         /* 碰到IN0后降速 */
+    int crawl_rpm;        /* 极慢速离开IN0 */
+    int dir;              /* 初始方向 -1反向 */
+    int accel_ms;         /* 加减速时间 ms */
+} sensor = { 300, 90, 30, -1, 100 };
+
+/* 通用参数 */
+static int    home_timeout_ms  = 20000;
+static double home_pose_deg[6] = {0, 0, 0, 0, 0, 0};
+
+/* 传感器输入位（状态寄存器 0x0006 的 bit0=IN0, bit1=IN1） */
+#define SENSOR_IN0  0x0001u
+#define SENSOR_IN1  0x0002u
+
+/* ====================== 传感器回零阶段 ====================== */
+
+typedef enum {
+    SEN_REV_FAST,  /* 反向快速找IN0或IN1 */
+    SEN_REV_SLOW,  /* 反向慢速（在IN0区域，等离开） */
+    SEN_FWD_FAST,  /* 从IN1转向正向，快速找IN0 */
+    SEN_FWD_SLOW,  /* 慢速正向碰IN0 */
+    SEN_CRAWL,     /* 极慢速正向离开IN0 */
+    SEN_DONE       /* 完成 */
+} SensorPhase;
+
+/* ====================== 内部辅助函数 ====================== */
+
+/* home_arm：回零前准备 —— 使能电机 + 关闭硬限位
+ * 回零时电机要顶到硬限位，必须先关闭限位否则会报警 */
+static ErrCode home_arm(Robot *robot, int joint)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len = modbus_build_write_single(joint_slave(joint), reg, val, frame);
-    return robot_request(robot, frame, len, &resp);
-}
-
-/* 回零启动前握手：使能 → 关限位 → 设运行速度 → 启动正/反向运行。
- * 立三无堵转电流/堵转逻辑专用寄存器，碰撞判定全部由 PC 侧读 0x001A
- * 实时电流完成（见 home_grp_stall_scan）。 */
-static ErrCode home_arm_motor(Robot *robot, int joint)
-{
-    static const int home_dir[ROBOT_JOINT_COUNT] = HOME_DIR;
-    int dir = home_dir[joint - 1];
-    ErrCode rc;
-
-    /* ① 使能电机（0x00D4 写 0 = 马达使能） */
-    rc = home_write_reg(robot, joint, LEESN_REG_ENABLE, LEESN_CMD_ENABLE);
-    if (rc != ERR_NONE) { LOG_WARN("关节%d 使能失败：%s", joint, err_str(rc)); return rc; }
+    ErrCode rc = motor_enable(robot, joint);
+    if (rc != ERR_NONE) return rc;
     Sleep(50);
-
-    /* ② 关限位（纯靠电流检测碰撞，避免限位开关提前截停） */
-    rc = home_write_reg(robot, joint, LEESN_REG_LIMIT, 0x0000);
-    if (rc != ERR_NONE) { LOG_WARN("关节%d 关限位失败：%s", joint, err_str(rc)); return rc; }
-    Sleep(20);
-
-    /* ③ 设运行速度 0x00D8~0x00D9（INT32，0.01 rpm；立三 V126 目标速度寄存器，
-     *    与 robot_movej 一致。0x009A 为 SV113 以下固件 UINT16 速度寄存器，回零不再使用） */
-    {
-        int32_t vel = LEESN_RPM_TO_VELREG((double)HOME_SPEED_RPM);
-        uint16_t vals[2];
-        uint8_t frame[32];
-        ModbusFrame resp;
-        size_t len;
-        vals[0] = (uint16_t)((uint32_t)vel & 0xFFFFu);
-        vals[1] = (uint16_t)(((uint32_t)vel >> 16) & 0xFFFFu);
-        len = modbus_build_write_multi(joint_slave(joint), LEESN_REG_VEL_RUN, vals, 2, frame);
-        rc = robot_request(robot, frame, len, &resp);
-    }
-    if (rc != ERR_NONE) { LOG_WARN("关节%d 设速度失败：%s", joint, err_str(rc)); return rc; }
-    Sleep(20);
-
-    /* ④ 启动运行：0x00C8 写 1=正转 / 257=反转 */
-    rc = home_write_reg(robot, joint, LEESN_REG_RUN_CTRL,
-                        (dir > 0) ? LEESN_CMD_RUN_CW : LEESN_CMD_RUN_CCW);
-    if (rc != ERR_NONE) { LOG_WARN("关节%d 启动运行失败：%s", joint, err_str(rc)); return rc; }
-
-    LOG_INFO("关节%d 堵转回零已启动 (%+d rpm)", joint, dir * (int)HOME_SPEED_RPM);
-    return ERR_NONE;
+    return motor_set_limit(robot, joint, 0);  /* 关闭限位 */
 }
 
-/* 急停电机（写 0x00C8 = 0x0100） */
-static ErrCode home_stop_motor(Robot *robot, int joint)
+/* home_restore：回零后恢复 —— 保持使能 + 开启硬限位 */
+static ErrCode home_restore(Robot *robot, int joint)
 {
-    return home_write_reg(robot, joint, LEESN_REG_RUN_CTRL, LEESN_CMD_ESTOP);
-}
-
-/* 清零位置：写 0x00D2~0x00D3 = 0（设定当前电机绝对位置为 0） */
-static ErrCode home_clear_position(Robot *robot, int joint)
-{
-    uint16_t vals[2] = {0, 0};
-    uint8_t frame[32];
-    ModbusFrame resp;
-    size_t len = modbus_build_write_multi(joint_slave(joint), LEESN_REG_SET_POS, vals, 2, frame);
-    return robot_request(robot, frame, len, &resp);
-}
-
-/* 恢复电机正常工作状态：使能 + 开限位（立三无堵转逻辑寄存器，无需恢复） */
-static ErrCode home_restore_motor(Robot *robot, int joint)
-{
-    ErrCode rc;
-    rc = home_write_reg(robot, joint, LEESN_REG_ENABLE, LEESN_CMD_ENABLE);
-    if (rc != ERR_NONE) { LOG_WARN("关节%d 恢复使能失败：%s", joint, err_str(rc)); }
+    ErrCode rc = motor_enable(robot, joint);
+    if (rc != ERR_NONE) LOG_WARN("关节%d 恢复使能失败", joint);
     Sleep(30);
-    rc = home_write_reg(robot, joint, LEESN_REG_LIMIT, 0x0001);
-    if (rc != ERR_NONE) { LOG_WARN("关节%d 恢复限位失败：%s", joint, err_str(rc)); }
+    rc = motor_set_limit(robot, joint, 1);     /* 开启限位 */
+    if (rc != ERR_NONE) LOG_WARN("关节%d 恢复限位失败", joint);
     return rc;
 }
 
-/* 扫描一组关节堵转状态：电流超阈值→急停清零标记到位，返回1=全员到位。
- * 立三无碰撞停状态位，堵转判定完全依赖 0x001A 实时电流；
- * 运行状态取 0x0006 状态字 bit8~9（11=正在运行）。 */
-static int home_grp_stall_scan(Robot *robot, const int *joints, int cnt,
-                               uint8_t *done_bits, uint32_t grp_start_ms)
+/* home_stall_start：启动堵转回零 —— 设加速度 → 设速度 → 按方向运行 */
+static void home_stall_start(Robot *robot, int joint)
 {
-    static const uint16_t stall_cur[ROBOT_JOINT_COUNT + 1] = HOME_STALL_CURRENT_MA;
-    static uint32_t stuck_since[ROBOT_JOINT_COUNT];
-    static int stuck_init = 0;
-    int all_done = 1;
-    int j;
-    uint32_t now = GetTickCount();
-
-    if (!stuck_init) {
-        for (j = 0; j < ROBOT_JOINT_COUNT; j++) stuck_since[j] = 0;
-        stuck_init = 1;
-    }
-
-    for (j = 0; j < cnt; j++) {
-        int joint = joints[j];
-        uint16_t st;
-        ErrCode rc;
-        int cur, pos_ok = 0;
-        int32_t pos;
-
-        if (robot_is_masked(robot, joint)) continue;
-        if (*done_bits & (1u << (joint - 1))) continue;  /* 已到位或已跳过 */
-
-        all_done = 0;
-
-        rc = robot_read_status(robot, joint, &st);
-        if (rc != ERR_NONE) continue;  /* 通信失败，跳过本轮 */
-
-        cur = robot_read_current_ma(robot, joint);
-        if (cur < 0) cur = 0;
-        /* 电流读数有效性检查：超过 3000mA 视为通信异常值（保守上限，
-         * 实机按电机额定电流校准），不用于堵转判定 */
-        if (cur > 3000) {
-            LOG_WARN("关节%d 电流读数异常 %dmA（>3000），本次忽略电流判定", joint, cur);
-            cur = 0;
-        }
-
-        pos = robot_read_position_steps(robot, joint, &pos_ok);
-
-        LOG_INFO("关节%d 状态=0x%04X 电流=%dmA 位置=%d脉冲 (阈值=%dmA)",
-                 joint, st, cur, pos_ok ? (int)pos : -99999, stall_cur[joint] + HOME_STALL_MARGIN_MA);
-
-        /* 到位判定：电流 > 阈值+余量（堵转/碰撞） */
-        if (stall_cur[joint] > 0 && cur > (int)(stall_cur[joint] + HOME_STALL_MARGIN_MA)) {
-            int clear_ok;
-            home_stop_motor(robot, joint);
-            Sleep(50);
-            clear_ok = (home_clear_position(robot, joint) == ERR_NONE);
-            Sleep(30);
-            pos = robot_read_position_steps(robot, joint, &pos_ok);
-            *done_bits |= (1u << (joint - 1));
-            stuck_since[joint - 1] = 0;
-            LOG_INFO("关节%d 堵转到位 (状态=0x%04X 电流=%dmA)，清零%s，清零后位置=%d脉冲",
-                     joint, st, cur, clear_ok ? "成功" : "失败",
-                     pos_ok ? (int)pos : -99999);
-            continue;
-        }
-
-        /* 正在运行：正常，复位保活计时 */
-        if ((st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) {
-            stuck_since[joint - 1] = 0;
-            continue;
-        }
-
-        /* 非运行非堵转：超最小运行窗口后累计计时，超时重新下发运行命令 */
-        if ((now - grp_start_ms) >= HOME_MIN_RUN_MS) {
-            if (stuck_since[joint - 1] == 0) {
-                stuck_since[joint - 1] = now;
-            } else if ((now - stuck_since[joint - 1]) >= HOME_STUCK_MS) {
-                static const int home_dir[ROBOT_JOINT_COUNT] = HOME_DIR;
-                int dir = home_dir[joint - 1];
-                home_write_reg(robot, joint, LEESN_REG_RUN_CTRL,
-                               (dir > 0) ? LEESN_CMD_RUN_CW : LEESN_CMD_RUN_CCW);
-                LOG_WARN("关节%d 非运行态(状态=0x%04X)超%ums，重新下发运行命令",
-                         joint, st, (unsigned)HOME_STUCK_MS);
-                stuck_since[joint - 1] = 0;
-            }
-        }
-    }
-    return all_done;
+    StallHome *p = &stall[joint];
+    motor_set_accel(robot, joint, p->accel_ms);
+    motor_set_speed(robot, joint, p->speed_rpm);
+    Sleep(20);
+    motor_run(robot, joint, p->dir);
+    LOG_INFO("关节%d 堵转启动 (方向=%+d, %drpm, %dms, 阈值=%dmA)",
+             joint, p->dir, p->speed_rpm, p->accel_ms, p->stall_current);
 }
 
-/* 轮询一组关节直到全部堵转到位或超时，返回0成功 / -1超时 */
-static int wait_group_stall(Robot *robot, const int *joints, int cnt, uint32_t timeout_ms)
+/* home_check_stall：检查是否堵转到位
+ * 返回 1=堵转到位，0=还在运行 */
+static int home_check_stall(Robot *robot, int joint)
 {
-    uint8_t done_bits = 0;
-    uint32_t start_ms = GetTickCount();
-    int j;
+    uint16_t st;
+    int cur, pos_ok = 0;
+    int32_t pos;
+    int threshold = stall[joint].stall_current;
 
-    /* 先 arm 所有电机，arm 失败的标记为跳过（计入 done_bits） */
-    for (j = 0; j < cnt; j++) {
-        if (robot_is_masked(robot, joints[j])) continue;
-        if (home_arm_motor(robot, joints[j]) != ERR_NONE) {
-            LOG_WARN("关节%d arm 失败，跳过", joints[j]);
-            done_bits |= (1u << (joints[j] - 1));  /* 标记为已完成，不等待 */
-        }
-        Sleep(10);  /* 台间间隔，防帧粘连 */
-    }
+    if (motor_read_status(robot, joint, &st) != ERR_NONE) return 0;
+    cur = motor_read_current(robot, joint);
+    if (cur < 0 || cur > 3000) cur = 0;
+    pos = motor_read_position(robot, joint, &pos_ok);
 
-    /* 轮询堵转到位 */
-    while ((GetTickCount() - start_ms) < timeout_ms) {
-        if (home_grp_stall_scan(robot, joints, cnt, &done_bits, start_ms)) {
-            return 0;
-        }
-        Sleep(200);  /* 200ms 轮询间隔 */
-    }
-    return -1;
+    LOG_INFO("关节%d 状态=0x%04X 电流=%dmA 位置=%d (阈值=%dmA)",
+             joint, st, cur, pos_ok ? (int)pos : -99999, threshold);
+
+    return (threshold > 0 && cur > threshold);
 }
 
-/* 轮询一组关节直到全部非运行态（到位或停止），超时返回 -1 */
-static int wait_group_idle(Robot *robot, const int *joints, int cnt)
+/* home_stall_done：堵转到位处理 —— 急停 → 清零位置 */
+static void home_stall_done(Robot *robot, int joint)
+{
+    int cur = motor_read_current(robot, joint);
+    int pos_ok = 0;
+    int32_t pos;
+
+    motor_estop(robot, joint);
+    Sleep(50);
+    int clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
+    Sleep(30);
+    pos = motor_read_position(robot, joint, &pos_ok);
+    LOG_INFO("关节%d 堵转到位 (电流=%dmA)，清零%s，位置=%d",
+             joint, cur, clear_ok ? "成功" : "失败", pos_ok ? (int)pos : -99999);
+}
+
+/* home_wait_inpos：等待关节运动到位（非运行状态） */
+static void home_wait_inpos(Robot *robot, int joint, int timeout_ms)
 {
     uint32_t elapsed = 0;
-
-    LOG_INFO("等待运动到位...");
-    while (elapsed < HOME_GRP_TIMEOUT_MS) {
-        int all_done = 1;
-        int j;
-        for (j = 0; j < cnt; j++) {
-            int joint = joints[j];
-            uint16_t st;
-            ErrCode rc;
-            if (robot_is_masked(robot, joint)) {
-                continue;
-            }
-            rc = robot_read_status(robot, joint, &st);
-            if (rc != ERR_NONE) {
-                /* 通信失败的关节也视为"已到位"，避免一直等 */
-                continue;
-            }
-            if ((st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) {
-                all_done = 0;
-            }
+    while (elapsed < (uint32_t)timeout_ms) {
+        uint16_t st;
+        if (motor_read_status(robot, joint, &st) != ERR_NONE) {
+            Sleep(200); elapsed += 200; continue;
         }
-        if (all_done) {
-            LOG_INFO("运动到位");
-            return 0;
-        }
+        if ((st & LEESN_STAT_RUN_MASK) != LEESN_STAT_RUN_ACTIVE) break;
         Sleep(200);
         elapsed += 200;
     }
-    LOG_WARN("等待运动到位超时");
-    return -1;
 }
 
-/* ================= 公开接口 ================= */
+/* ====================== 关节1-4：并行堵转回零 ====================== */
 
+/* home_stall_group：一组关节并行堵转回零
+ * joints - 关节号数组
+ * cnt    - 关节数量 */
+static void home_stall_group(Robot *robot, const int *joints, int cnt)
+{
+    uint8_t done = 0;
+    uint32_t start_ms = GetTickCount();
+
+    /* 逐个启动 */
+    for (int j = 0; j < cnt; j++) {
+        int joint = joints[j];
+        if (robot_is_masked(robot, joint)) continue;
+        if (home_arm(robot, joint) != ERR_NONE) {
+            LOG_WARN("关节%d arm 失败，跳过", joint);
+            done |= (1u << (joint - 1));
+            continue;
+        }
+        home_stall_start(robot, joint);
+        Sleep(10);
+    }
+
+    /* 轮询堵转状态 */
+    while ((GetTickCount() - start_ms) < (uint32_t)home_timeout_ms) {
+        int all_done = 1;
+        for (int j = 0; j < cnt; j++) {
+            int joint = joints[j];
+            if (robot_is_masked(robot, joint)) continue;
+            if (done & (1u << (joint - 1))) continue;
+            all_done = 0;
+
+            if (home_check_stall(robot, joint)) {
+                home_stall_done(robot, joint);
+                done |= (1u << (joint - 1));
+            }
+        }
+        if (all_done) break;
+        Sleep(200);
+    }
+
+    /* 超时处理 */
+    for (int j = 0; j < cnt; j++) {
+        int joint = joints[j];
+        if (robot_is_masked(robot, joint)) continue;
+        if (!(done & (1u << (joint - 1)))) {
+            LOG_WARN("关节%d 堵转回零超时", joint);
+            motor_estop(robot, joint);
+        }
+    }
+}
+
+/* ====================== 关节5：堵转 + 正向移动 ====================== */
+
+/* home_joint5：关节5 堵转回零 → 清零 → 正向移动 forward_deg 度 */
+static void home_joint5(Robot *robot)
+{
+    StallHome *p = &stall[5];
+    uint32_t start_ms;
+
+    if (home_arm(robot, 5) != ERR_NONE) { LOG_WARN("关节5 arm 失败"); return; }
+    home_stall_start(robot, 5);
+
+    /* 等待堵转 */
+    start_ms = GetTickCount();
+    while ((GetTickCount() - start_ms) < (uint32_t)home_timeout_ms) {
+        if (home_check_stall(robot, 5)) {
+            home_stall_done(robot, 5);
+            break;
+        }
+        Sleep(200);
+    }
+
+    /* 正向移动一段距离 */
+    LOG_INFO("关节5 正向移动 %.1f°", p->forward_deg);
+    robot_movej(robot, 5, p->forward_deg, (double)p->speed_rpm);
+    home_wait_inpos(robot, 5, home_timeout_ms);
+    home_restore(robot, 5);
+    LOG_INFO("关节5 回零完成");
+}
+
+/* ====================== 关节6：传感器回零 ====================== */
+
+/* sensor_phase_name：阶段名（用于日志） */
+static const char *sensor_phase_name(SensorPhase ph)
+{
+    static const char *names[] = {
+        "反向快速", "反向慢速", "正向快速", "正向慢速", "极慢速离开", "完成"
+    };
+    if (ph < 0 || ph >= (int)(sizeof(names) / sizeof(names[0]))) return "未知";
+    return names[ph];
+}
+
+/* home_joint6：关节6 传感器回零状态机
+ * 覆盖3种情况：
+ *   1. 反向→碰IN0降速→离开→慢速正向碰IN0→极慢速离开→清零
+ *   2. 反向→碰IN1→转向正向→碰IN0→极慢速离开→清零
+ *   3. 初始就在IN0上→反向离开→慢速正向碰IN0→极慢速离开→清零 */
+static void home_joint6(Robot *robot)
+{
+    SensorPhase ph = SEN_REV_FAST;
+    int in0_was_on = 0;
+    uint32_t start_ms, crawl_start = 0;
+
+    if (home_arm(robot, 6) != ERR_NONE) { LOG_WARN("关节6 arm 失败"); return; }
+    motor_set_accel(robot, 6, sensor.accel_ms);
+    motor_set_speed(robot, 6, sensor.fast_rpm);
+    Sleep(20);
+    motor_run(robot, 6, sensor.dir);
+    LOG_INFO("关节6 传感器回零启动 (反向快速 %drpm)", sensor.fast_rpm);
+
+    start_ms = GetTickCount();
+
+    while (ph != SEN_DONE) {
+        uint16_t inputs;
+        int in0, in1, cur, pos_ok = 0;
+        int32_t pos;
+        uint32_t now = GetTickCount();
+
+        /* 超时检测 */
+        if (ph == SEN_CRAWL && crawl_start > 0 && (now - crawl_start) >= 10000) {
+            LOG_WARN("关节6 极慢速离开IN0超时");
+            break;
+        }
+        if (ph != SEN_CRAWL && (now - start_ms) >= (uint32_t)home_timeout_ms) {
+            LOG_WARN("关节6 传感器回零超时");
+            break;
+        }
+
+        /* 读传感器状态 */
+        if (motor_read_status(robot, 6, &inputs) != ERR_NONE) { Sleep(100); continue; }
+        in0 = (inputs & SENSOR_IN0) ? 1 : 0;
+        in1 = (inputs & SENSOR_IN1) ? 1 : 0;
+        cur = motor_read_current(robot, 6);
+        if (cur < 0 || cur > 3000) cur = 0;
+        pos = motor_read_position(robot, 6, &pos_ok);
+
+        LOG_INFO("关节6 IN0=%d IN1=%d 电流=%dmA 位置=%d 阶段=%s",
+                 in0, in1, cur, pos_ok ? (int)pos : -99999, sensor_phase_name(ph));
+
+        /* 状态机切换 */
+        switch (ph) {
+        case SEN_REV_FAST:
+            if (in1) {
+                /* 碰到反向限位IN1，转向正向找IN0 */
+                LOG_INFO("关节6 碰到IN1，改为正向快速找IN0");
+                motor_set_speed(robot, 6, sensor.fast_rpm);
+                Sleep(10);
+                motor_run(robot, 6, +1);
+                ph = SEN_FWD_FAST;
+            } else if (in0) {
+                /* 碰到IN0，降速继续反向，等离开IN0 */
+                LOG_INFO("关节6 碰到IN0，降速至%drpm", sensor.slow_rpm);
+                motor_set_speed(robot, 6, sensor.slow_rpm);
+                ph = SEN_REV_SLOW;
+            }
+            break;
+
+        case SEN_REV_SLOW:
+            if (!in0) {
+                /* 离开IN0，转为慢速正向，准备精确对齐 */
+                LOG_INFO("关节6 离开IN0，慢速正向找IN0 (%drpm)", sensor.slow_rpm);
+                motor_set_speed(robot, 6, sensor.slow_rpm);
+                Sleep(10);
+                motor_run(robot, 6, +1);
+                ph = SEN_FWD_SLOW;
+            }
+            break;
+
+        case SEN_FWD_FAST:
+        case SEN_FWD_SLOW:
+            if (in0) {
+                /* 正向碰到IN0，极慢速正向离开，离开瞬间清零 */
+                LOG_INFO("关节6 正向碰到IN0，极慢速离开 (%drpm)", sensor.crawl_rpm);
+                motor_set_speed(robot, 6, sensor.crawl_rpm);
+                in0_was_on = 1;
+                crawl_start = GetTickCount();
+                ph = SEN_CRAWL;
+            }
+            break;
+
+        case SEN_CRAWL:
+            if (in0_was_on && !in0) {
+                /* 刚离开IN0，停止并清零位置 */
+                LOG_INFO("关节6 极慢速离开IN0，回零完成");
+                motor_estop(robot, 6);
+                Sleep(50);
+                ph = SEN_DONE;
+            }
+            break;
+
+        default:
+            break;
+        }
+
+        Sleep(100);
+    }
+
+    /* 完成后清零 / 超时急停 */
+    if (ph == SEN_DONE) {
+        int pos_ok = 0;
+        int32_t pos;
+        int clear_ok = (motor_clear_pos(robot, 6) == ERR_NONE);
+        Sleep(30);
+        pos = motor_read_position(robot, 6, &pos_ok);
+        LOG_INFO("关节6 位置清零%s，位置=%d",
+                 clear_ok ? "成功" : "失败", pos_ok ? (int)pos : -99999);
+    } else {
+        motor_estop(robot, 6);
+    }
+
+    home_restore(robot, 6);
+    LOG_INFO("关节6 回零完成");
+}
+
+/* ====================== 公开接口 ====================== */
+
+/* robot_home：执行回零流程
+ * 步骤：
+ *   1. 关节1-4 并行堵转回零
+ *   2. 关节5 堵转回零 + 正向移动
+ *   3. 关节6 传感器回零
+ *   4. 关节1-4 运动到机械原点
+ * 返回 ERR_NONE 成功，ERR_TIMEOUT 超时 */
 ErrCode robot_home(Robot *robot)
 {
-    static const double home_pose[ROBOT_JOINT_COUNT] = HOME_POSE_DEG;
-    const int group0[] = {1, 2, 3, 5, 6};
-    const int group1[] = {4};
-    const int all[] = {1, 2, 3, 4, 5, 6};
+    const int group0[] = {1, 2, 3, 4};
     int j;
     ErrCode rc = ERR_NONE;
 
-    if (robot == NULL) {
-        return ERR_ARG;
-    }
+    if (robot == NULL) return ERR_ARG;
 
-    /* 组0：{1,2,3,5,6} 并行堵转回零 */
-    LOG_INFO("回零：组0 {1,2,3,5,6} 并行堵转回零...");
-    if (wait_group_stall(robot, group0, 5, HOME_GRP_TIMEOUT_MS) != 0) {
-        LOG_WARN("组0 堵转回零超时");
-        rc = ERR_TIMEOUT;
-    }
-    LOG_INFO("组0 堵转回零完成");
-
-    /* 组1：{4} 堵转回零 */
-    LOG_INFO("回零：组1 {4} 堵转回零...");
-    if (wait_group_stall(robot, group1, 1, HOME_GRP_TIMEOUT_MS) != 0) {
-        LOG_WARN("组1 堵转回零超时");
-        rc = ERR_TIMEOUT;
-    }
-    LOG_INFO("组1 堵转回零完成");
-
-    /* 运动到机械原点位姿（电机保持使能状态，防止松力后重力漂移） */
-    LOG_INFO("回零完成，运动到机械原点位姿...");
-    for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
-        if (robot_is_masked(robot, j)) continue;
-        if (robot_movej(robot, j, home_pose[j - 1], (double)HOME_SPEED_RPM) != ERR_NONE) {
-            rc = ERR_TIMEOUT;
+    /* 打印参数总览 */
+    LOG_INFO("=== 回零参数 ===");
+    for (j = 1; j <= 5; j++) {
+        if (robot_is_masked(robot, j)) {
+            LOG_INFO("  关节%d: 已屏蔽", j);
+        } else {
+            LOG_INFO("  关节%d: 堵转 %drpm %dms 方向=%+d 阈值=%dmA 正向=%.1f°",
+                     j, stall[j].speed_rpm, stall[j].accel_ms, stall[j].dir,
+                     stall[j].stall_current, stall[j].forward_deg);
         }
     }
-    wait_group_idle(robot, all, 6);
+    if (!robot_is_masked(robot, 6)) {
+        LOG_INFO("  关节6: 传感器 快%d/慢%d/极慢%drpm 方向=%+d",
+                 sensor.fast_rpm, sensor.slow_rpm, sensor.crawl_rpm, sensor.dir);
+    }
+    LOG_INFO("================");
 
-    /* 运动完成后恢复正常工作状态（使能+限位） */
-    LOG_INFO("运动完成，恢复电机正常模式...");
-    for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
+    /* 第1步：关节1-4 堵转回零 */
+    LOG_INFO("回零：{1,2,3,4} 堵转回零...");
+    home_stall_group(robot, group0, 4);
+
+    /* 第2步：关节5 堵转 + 正向移动 */
+    if (!robot_is_masked(robot, 5)) {
+        LOG_INFO("回零：关节5 堵转 + 正向%.1f°...", stall[5].forward_deg);
+        home_joint5(robot);
+    }
+
+    /* 第3步：关节6 传感器回零 */
+    if (!robot_is_masked(robot, 6)) {
+        LOG_INFO("回零：关节6 传感器回零...");
+        home_joint6(robot);
+    }
+
+    /* 第4步：关节1-4 运动到机械原点 */
+    LOG_INFO("运动到机械原点位姿...");
+    for (j = 1; j <= 4; j++) {
         if (robot_is_masked(robot, j)) continue;
-        home_restore_motor(robot, j);
+        if (robot_movej(robot, j, home_pose_deg[j - 1],
+                        (double)stall[j].speed_rpm) != ERR_NONE)
+            rc = ERR_TIMEOUT;
+    }
+
+    /* 等待到位 */
+    LOG_INFO("等待运动到位...");
+    {
+        uint32_t elapsed = 0;
+        while (elapsed < (uint32_t)home_timeout_ms) {
+            int all_done = 1;
+            for (j = 1; j <= 4; j++) {
+                uint16_t st;
+                if (robot_is_masked(robot, j)) continue;
+                if (motor_read_status(robot, j, &st) != ERR_NONE) continue;
+                if ((st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) all_done = 0;
+            }
+            if (all_done) { LOG_INFO("运动到位"); break; }
+            Sleep(200);
+            elapsed += 200;
+        }
+    }
+
+    /* 恢复限位 */
+    for (j = 1; j <= 4; j++) {
+        if (robot_is_masked(robot, j)) continue;
+        home_restore(robot, j);
         Sleep(20);
     }
 

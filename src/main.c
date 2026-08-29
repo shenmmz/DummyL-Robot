@@ -87,45 +87,94 @@ static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigne
     return 1;
 }
 
-/* cmd_status：查询并打印全部关节的状态/位置/电流（完整 32 位状态字解析） */
+/* cmd_status：持续刷新全部关节状态，按回车退出 */
 static int cmd_status(Robot *robot)
 {
-    int j;
-    LOG_INFO("关节状态查询：");
-    for (j = 1; j <= 6; j++) {
-        uint32_t st32 = 0;
-        int ok = 0;
-        int32_t pos;
-        int cur;
-        ErrCode rc;
-        if (robot_is_masked(robot, j)) {
-            printf("  关节%d: 已屏蔽\n", j);
-            continue;
-        }
-        rc = robot_read_status32(robot, j, &st32);
-        pos = robot_read_position_steps(robot, j, &ok);
-        cur = robot_read_current_ma(robot, j);
-        if (rc == ERR_NONE) {
-            const char *run = "空闲";
-            switch (st32 & LEESN_STAT_RUN_MASK) {
-            case LEESN_STAT_RUN_START:  run = "即将启动"; break;
-            case LEESN_STAT_RUN_STOP:   run = "即将停止"; break;
-            case LEESN_STAT_RUN_ACTIVE: run = "正在运行"; break;
-            default:                    run = "空闲";     break;
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD old_mode = 0;
+
+    /* 设为非阻塞输入模式 */
+    GetConsoleMode(hStdin, &old_mode);
+    SetConsoleMode(hStdin, old_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT));
+
+    printf("持续刷新状态中（按任意键退出）...\n\n");
+
+    while (1) {
+        int j;
+        static const int reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+
+        /* 光标回到行首，刷新输出 */
+        printf("\033[H\033[J");
+        printf("持续刷新状态中（按任意键退出）...\n\n");
+        printf("  %-4s %-6s %-8s %-10s %-8s %-8s %-8s %-6s %-4s %-4s %s\n",
+               "关节", "在线", "状态字", "位置(步)", "角度", "电流mA", "速度rpm", "报警", "IN0", "IN1", "标志");
+        printf("  ---- ------ -------- ---------- -------- -------- -------- ---- ---- ---- ----\n");
+
+        for (j = 1; j <= 6; j++) {
+            uint32_t st32 = 0;
+            int ok = 0;
+            int32_t pos;
+            int cur, spd, alm;
+            ErrCode rc;
+
+            if (robot_is_masked(robot, j)) {
+                printf("  %-4d 已屏蔽\n", j);
+                continue;
             }
-            printf("  关节%d: 在线 状态=0x%08X 运行=%s 位置=%d步 电流=%dmA\n",
-                   j, (unsigned)st32, run, (int)pos, cur);
-            printf("         [%s%s%s%s%s%s]\n",
-                   (st32 & LEESN_STAT_INPOS)      ? "到位" : "",
-                   (st32 & LEESN_STAT_SOFT_NEG)   ? "负限位" : "",
-                   (st32 & LEESN_STAT_SOFT_POS)   ? "正限位" : "",
-                   (st32 & LEESN_STAT_HOMED)      ? "原点完成" : "",
-                   (st32 & LEESN_STAT_ENABLE_LVL) ? "使能" : "",
-                   (st32 & LEESN_STAT_ALARM)      ? "报警" : "");
-        } else {
-            printf("  关节%d: 离线\n", j);
+            rc = robot_read_status32(robot, j, &st32);
+            if (rc != ERR_NONE) {
+                printf("  %-4d 离线\n", j);
+                continue;
+            }
+            pos = robot_read_position_steps(robot, j, &ok);
+            cur = robot_read_current_ma(robot, j);
+            spd = robot_read_speed_rpm(robot, j);
+            alm = robot_read_alarm(robot, j);
+
+            {
+                char flags[64] = "";
+                int in0 = (st32 & LEESN_STAT_INPUT(0)) ? 1 : 0;
+                int in1 = (st32 & LEESN_STAT_INPUT(1)) ? 1 : 0;
+                double angle = ok ? STEPS2DEG(pos, reductions[j - 1]) : 0.0;
+
+                if (st32 & LEESN_STAT_INPOS)      strcat(flags, "到位 ");
+                if (st32 & LEESN_STAT_SOFT_NEG)   strcat(flags, "负限位 ");
+                if (st32 & LEESN_STAT_SOFT_POS)   strcat(flags, "正限位 ");
+                if (st32 & LEESN_STAT_HOMED)      strcat(flags, "原点 ");
+                if (st32 & LEESN_STAT_ENABLE_LVL) strcat(flags, "使能 ");
+                if (st32 & LEESN_STAT_ALARM)      strcat(flags, "报警!");
+
+                printf("  %-4d %-6s 0x%06X %-10d %-8.2f %-8d %-8d %-6s %-4d %-4d %s\n",
+                       j, "在线", (unsigned)(st32 & 0xFFFFFFu),
+                       ok ? (int)pos : 0,
+                       angle,
+                       cur >= 0 ? cur : 0,
+                       spd >= 0 ? spd : 0,
+                       alm >= 0 ? leesn_alarm_text(alm) : "?",
+                       in0, in1,
+                       flags[0] ? flags : "—");
+            }
+        }
+
+        fflush(stdout);
+
+        /* 检查是否有按键 */
+        if (WaitForSingleObject(hStdin, 300) == WAIT_OBJECT_0) {
+            INPUT_RECORD ir;
+            DWORD read;
+            PeekConsoleInputA(hStdin, &ir, 1, &read);
+            if (read > 0) {
+                ReadConsoleInputA(hStdin, &ir, 1, &read);
+                if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown) {
+                    break;
+                }
+            }
         }
     }
+
+    /* 恢复控制台模式 */
+    SetConsoleMode(hStdin, old_mode);
+    printf("\n状态刷新已停止。\n");
     return 0;
 }
 
@@ -146,15 +195,85 @@ int main(int argc, char **argv)
     printf("DummyL-Robot 控制台 (C11 + MinGW)\n");
     printf("输入 help 查看命令，exit 退出。\n\n");
 
-    int ini_loaded = ini_read_serial(INI_PATH, port, sizeof(port), &baud);
     if (argc > 1) {
         snprintf(port, sizeof(port), "%s", argv[1]);
-    }
-    /* 方案二：配置单一来源——打印运行时参数生效来源（ini 缺失回退默认值宏） */
-    if (ini_loaded) {
-        LOG_INFO("生效来源：ini（%s），串口 %s @ %lu 8N1", INI_PATH, port, baud);
     } else {
-        LOG_INFO("生效来源：默认（ini 缺失，回退 robot_config.h 默认值），串口 %s @ %lu 8N1", port, baud);
+        int ini_loaded = ini_read_serial(INI_PATH, port, sizeof(port), &baud);
+        if (ini_loaded) {
+            LOG_INFO("生效来源：ini（%s），串口 %s @ %lu 8N1", INI_PATH, port, baud);
+        } else {
+            LOG_INFO("生效来源：默认（ini 缺失，回退 robot_config.h 默认值），串口 %s @ %lu 8N1", port, baud);
+        }
+
+        char found_ports[16][64];
+        int port_count = 0;
+
+        HKEY hKey;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                         "HARDWARE\\DEVICEMAP\\SERIALCOMM",
+                         0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            for (int i = 0; i < 256 && port_count < 16; i++) {
+                char value_name[256];
+                DWORD name_len = sizeof(value_name);
+                BYTE value_data[64];
+                DWORD data_len = sizeof(value_data);
+                DWORD value_type;
+                if (RegEnumValueA(hKey, i, value_name, &name_len, NULL,
+                                  &value_type, value_data, &data_len) != ERROR_SUCCESS) {
+                    break;
+                }
+                if (value_type == REG_SZ && data_len > 0) {
+                    char *com_name = (char *)value_data;
+                    if (strncmp(com_name, "COM", 3) == 0) {
+                        snprintf(found_ports[port_count], 64, "%s", com_name);
+                        port_count++;
+                    }
+                }
+            }
+            RegCloseKey(hKey);
+        }
+
+        for (int i = 0; i < port_count - 1; i++) {
+            for (int j = i + 1; j < port_count; j++) {
+                int a = atoi(found_ports[i] + 3);
+                int b = atoi(found_ports[j] + 3);
+                if (a > b) {
+                    char tmp[64];
+                    strcpy(tmp, found_ports[i]);
+                    strcpy(found_ports[i], found_ports[j]);
+                    strcpy(found_ports[j], tmp);
+                }
+            }
+        }
+
+        if (port_count == 0) {
+            LOG_ERROR("未发现可用串口");
+            return 1;
+        }
+
+        if (port_count == 1) {
+            snprintf(port, sizeof(port), "%s", found_ports[0]);
+        } else {
+            printf("\n检测到多个串口：\n");
+            for (int i = 0; i < port_count; i++) {
+                printf("  [%d] %s\n", i + 1, found_ports[i]);
+            }
+            printf("请选择串口编号 (1-%d): ", port_count);
+            fflush(stdout);
+            char sel_line[16];
+            if (fgets(sel_line, sizeof(sel_line), stdin) != NULL) {
+                int sel = atoi(sel_line) - 1;
+                if (sel >= 0 && sel < port_count) {
+                    snprintf(port, sizeof(port), "%s", found_ports[sel]);
+                } else {
+                    LOG_ERROR("无效选择");
+                    return 1;
+                }
+            } else {
+                return 1;
+            }
+        }
+        printf("\n使用串口: %s @ %lu 8N1\n", port, baud);
     }
 
     /* 注入串口 CommOps（方案一：control 层通过接口操作总线） */
@@ -210,10 +329,10 @@ int main(int argc, char **argv)
             break;
         }
         case CMD_SCAN:
-            LOG_INFO("总线扫描请运行 scan_motors 工具");
+            LOG_INFO("总线扫描功能未启用");
             break;
         case CMD_CALIB:
-            LOG_INFO("单关节调试请运行 servo_calib 工具");
+            LOG_INFO("单关节调试功能未启用");
             break;
         case CMD_HELP:
             cmd_print_help();

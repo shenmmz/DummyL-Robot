@@ -36,10 +36,9 @@ void serial_flush(SerialPort *port);
 /* 返回句柄是否有效 */
 int serial_is_open(const SerialPort *port);
 
-/* ================= CommOps 适配（方案一：接口抽象） =================
+/* ================= CommOps 适配 =================
  * serial_win 以全局静态句柄实现 CommOps 5 个操作，供上层统一注入。
- * open 仅支持 8N1（data_bits=8 / parity='N' / stop_bits=1），
- * 其他组合返回失败（内部逻辑沿用 serial_open 的 8N1 固定配置）。 */
+ * 串口格式固定 8N1（由 serial_open 内部配置）。 */
 extern const CommOps serial_comm_ops;
 
 #endif /* SERIAL_WIN_H */

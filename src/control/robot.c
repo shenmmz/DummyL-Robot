@@ -14,6 +14,7 @@
 
 #include "control/robot.h"
 #include "control/robot_internal.h"
+#include "api/motor_reg.h"
 #include "comm/comm_if.h"
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
@@ -66,7 +67,7 @@ Robot *robot_init(const char *port_name, uint32_t baudrate)
     }
     r->ops = ops;
     r->baudrate = baudrate;
-    if (ops->open(port_name, baudrate, MODBUS_DATA_BITS, MODBUS_PARITY, MODBUS_STOP_BITS) != 0) {
+    if (ops->open(port_name, baudrate) != 0) {
         LOG_ERROR("串口打开失败: %s", port_name);
         free(r);
         return NULL;
@@ -85,10 +86,21 @@ Robot *robot_init(const char *port_name, uint32_t baudrate)
     }
     LOG_INFO("机器人初始化完成，串口 %s @ %lu 8N1", port_name, (unsigned long)baudrate);
 
-    /* 启动时默认使能所有未屏蔽电机 */
+    /* 启动时查询各电机在线状态（读 0x0066 设备地址） */
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
-        if (!r->masked[i]) {
-            robot_enable(r, i + 1);
+        if (r->masked[i]) {
+            LOG_INFO("关节%d 已屏蔽，跳过检测", i + 1);
+            continue;
+        }
+        {
+            int id = motor_read_device_addr(r, i + 1);
+            if (id > 0) {
+                r->online[i] = 1;
+                LOG_INFO("关节%d 在线，电机ID=%d", i + 1, id);
+            } else {
+                r->online[i] = 0;
+                LOG_WARN("关节%d 离线", i + 1);
+            }
         }
     }
     return r;
@@ -138,9 +150,6 @@ int robot_is_masked(const Robot *robot, int joint)
 /* robot_enable：使能指定关节（写 0x00D4 = 0，马达使能），返回 ErrCode */
 ErrCode robot_enable(Robot *robot, int joint)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
     ErrCode rc;
 
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
@@ -150,8 +159,7 @@ ErrCode robot_enable(Robot *robot, int joint)
         LOG_INFO("关节%d 已屏蔽，跳过使能", joint);
         return ERR_NONE;
     }
-    len = modbus_build_write_single(joint_slave(joint), LEESN_REG_ENABLE, LEESN_CMD_ENABLE, frame);
-    rc = robot_request(robot, frame, len, &resp);
+    rc = motor_enable(robot, joint);
     if (rc == ERR_NONE) {
         robot->online[joint - 1] = 1;
         LOG_INFO("关节%d 已使能", joint);
@@ -165,9 +173,6 @@ ErrCode robot_enable(Robot *robot, int joint)
 /* robot_disable：失能指定关节（写 0x00D4 = 1，释放马达），返回 ErrCode */
 ErrCode robot_disable(Robot *robot, int joint)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
     ErrCode rc;
 
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
@@ -177,8 +182,7 @@ ErrCode robot_disable(Robot *robot, int joint)
         LOG_INFO("关节%d 已屏蔽，跳过失能", joint);
         return ERR_NONE;
     }
-    len = modbus_build_write_single(joint_slave(joint), LEESN_REG_ENABLE, LEESN_CMD_RELEASE, frame);
-    rc = robot_request(robot, frame, len, &resp);
+    rc = motor_disable(robot, joint);
     if (rc == ERR_NONE) {
         LOG_INFO("关节%d 已失能", joint);
     } else {
@@ -346,6 +350,50 @@ int robot_read_current_ma(Robot *robot, int joint)
         return -1;
     }
     len = modbus_build_read(joint_slave(joint), LEESN_REG_CURRENT, 1, frame);
+    rc = robot_request(robot, frame, len, &resp);
+    if (rc != ERR_NONE || resp.data_len < 2) {
+        return -1;
+    }
+    return (int)((resp.data[0] << 8) | resp.data[1]);
+}
+
+/* robot_read_speed_rpm：读取关节实时速度（rpm，0x0019 INT32 0.01rpm），失败返回 -1 */
+int robot_read_speed_rpm(Robot *robot, int joint)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len;
+    ErrCode rc;
+
+    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
+        return -1;
+    }
+    len = modbus_build_read(joint_slave(joint), LEESN_REG_SPEED_RT, 2, frame);
+    rc = robot_request(robot, frame, len, &resp);
+    if (rc != ERR_NONE || resp.data_len < 4) {
+        return -1;
+    }
+    {
+        int32_t vel = (int32_t)(((uint32_t)resp.data[2] << 24) |
+                                ((uint32_t)resp.data[3] << 16) |
+                                ((uint32_t)resp.data[0] << 8) |
+                                (uint32_t)resp.data[1]);
+        return (int)LEESN_VELREG_TO_RPM(vel);
+    }
+}
+
+/* robot_read_alarm：读取关节报警代码（0x00A3），失败返回 -1 */
+int robot_read_alarm(Robot *robot, int joint)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    size_t len;
+    ErrCode rc;
+
+    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
+        return -1;
+    }
+    len = modbus_build_read(joint_slave(joint), LEESN_REG_ALARM_STAT, 1, frame);
     rc = robot_request(robot, frame, len, &resp);
     if (rc != ERR_NONE || resp.data_len < 2) {
         return -1;
