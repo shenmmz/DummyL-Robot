@@ -17,18 +17,48 @@
 void cmd_print_help(void)
 {
     printf("可用命令:\n");
-    printf("  home                  回零\n");
+    printf("  home                  回零（全轴）\n");
+    printf("  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n");
+    printf("                         (例 home:1 单独验证 1 轴，与其它轴无关)\n");
+    printf("  homej:N:ANGLE         关节 N 回零后自动运动到 ANGLE 度 (N=1..6)\n");
+    printf("  homej:N:ANGLE:SPEED   指定速度 (rpm)\n");
     printf("  movej:N:ANGLE         关节 N 绝对运动到 ANGLE 度 (N=1..6)\n");
     printf("  movej:N:ANGLE:SPEED   指定速度 (rpm)\n");
     printf("  enable:N              使能关节 N\n");
     printf("  disable:N             失能关节 N\n");
     printf("  status                查询所有关节状态\n");
-    printf("  mask:N                屏蔽关节 N（跳过该关节，不发指令）\n");
-    printf("  unmask:N              恢复关节 N\n");
+    printf("  mask:N[,M,...]        屏蔽关节（可批量，例 mask:2,3,4）\n");
+    printf("  unmask:N[,M,...]      恢复关节（可批量，例 unmask:2,3,4）\n");
     printf("  scan                  扫描总线电机\n");
     printf("  calib                 单关节手动调试\n");
     printf("  help                  帮助\n");
     printf("  exit                  退出\n");
+}
+
+/* parse_joint_list：解析逗号分隔的关节列表（如 "2,3,4"）到 out->joints。
+ * 任一关节号非法（<1 或 >6）则整体失败返回 -1，避免只屏蔽一半。
+ * 单个关节（如 "2"）同样兼容。 */
+static int parse_joint_list(const char *s, ParsedCmd *out)
+{
+    char buf[32];
+    char *save = NULL;
+    char *tok;
+    int n = 0;
+
+    snprintf(buf, sizeof(buf), "%s", s);
+    tok = strtok_r(buf, ",", &save);
+    while (tok != NULL) {
+        int j = atoi(tok);
+        if (j < 1 || j > 6) {
+            LOG_WARN("关节号须在 1..6 之间：%s", tok);
+            return -1;
+        }
+        out->joints[n++] = j;
+        tok = strtok_r(NULL, ",", &save);
+    }
+    out->joint_count = n;
+    out->joint = (n > 0) ? out->joints[0] : 0;
+    return 0;
 }
 
 /* cmd_parse：解析一行命令文本到 ParsedCmd，返回命令类型 */
@@ -84,7 +114,38 @@ int cmd_parse(const char *line, ParsedCmd *out)
     snprintf(cmd, sizeof(cmd), "%s", tok);
 
     if (strcmp(cmd, "home") == 0) {
+        char *j = strtok_r(NULL, ":", &save);
         out->type = CMD_HOME;
+        if (j != NULL) {
+            int joint = atoi(j);
+            if (joint < 1 || joint > 6) {
+                LOG_WARN("用法: home[:关节号]  例 home:1 单独回零1轴");
+                return CMD_UNKNOWN;
+            }
+            out->joint = joint;   /* 带关节号 = 单轴独立回零 */
+        } else {
+            out->joint = 0;       /* 不带 = 全轴回零 */
+        }
+    } else if (strcmp(cmd, "homej") == 0) {
+        char *j = strtok_r(NULL, ":", &save);
+        char *a = strtok_r(NULL, ":", &save);
+        char *s = strtok_r(NULL, ":", &save);
+        int joint;
+        double angle;
+        if (j == NULL || a == NULL) {
+            LOG_WARN("用法: homej:关节号:角度[:速度]");
+            return CMD_UNKNOWN;
+        }
+        joint = atoi(j);
+        angle = atof(a);
+        if (joint < 1 || joint > 6) {
+            LOG_WARN("关节号须在 1..6 之间");
+            return CMD_UNKNOWN;
+        }
+        out->type = CMD_HOMEJ;
+        out->joint = joint;
+        out->angle_deg = angle;
+        out->speed_rpm = (s != NULL) ? atof(s) : 0.0;
     } else if (strcmp(cmd, "movej") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         char *a = strtok_r(NULL, ":", &save);
@@ -126,19 +187,23 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "mask") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         if (j == NULL) {
-            LOG_WARN("用法: mask:关节号");
+            LOG_WARN("用法: mask:关节号[,关节号...]  例 mask:2 或 mask:2,3,4");
+            return CMD_UNKNOWN;
+        }
+        if (parse_joint_list(j, out) != 0) {
             return CMD_UNKNOWN;
         }
         out->type = CMD_MASK;
-        out->joint = atoi(j);
     } else if (strcmp(cmd, "unmask") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         if (j == NULL) {
-            LOG_WARN("用法: unmask:关节号");
+            LOG_WARN("用法: unmask:关节号[,关节号...]  例 unmask:2 或 unmask:2,3,4");
+            return CMD_UNKNOWN;
+        }
+        if (parse_joint_list(j, out) != 0) {
             return CMD_UNKNOWN;
         }
         out->type = CMD_UNMASK;
-        out->joint = atoi(j);
     } else if (strcmp(cmd, "scan") == 0) {
         out->type = CMD_SCAN;
     } else if (strcmp(cmd, "calib") == 0) {

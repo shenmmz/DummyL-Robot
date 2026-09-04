@@ -24,6 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 /* joint_slave：关节号 -> Modbus 从站地址查表（各电机驱动器基地址 0x0066 已设为 1~6） */
 static const uint8_t SLAVE_ADDR_TABLE[ROBOT_JOINT_COUNT] = ROBOT_SLAVE_ADDR_TABLE;
 
@@ -37,14 +41,24 @@ struct Robot {
     uint32_t baudrate;
     int online[ROBOT_JOINT_COUNT];
     int masked[ROBOT_JOINT_COUNT];   /* 1=屏蔽（故障电机跳过） */
+    CRITICAL_SECTION lock;           /* 总线互斥：多线程（CLI + 监控线程）共享单串口时逐帧串行 */
 };
 
 /* 发送请求并等待响应：通过注入的 CommOps 完成一次 Modbus 主从交互。
- * 帧构造由调用方完成，此处统一走 modbus_transact（flush->write->read->parse）。 */
+ * 帧构造由调用方完成，此处统一走 modbus_transact（flush->write->read->parse）。
+ * 注意：RS485 半双工单主站，任何时刻只允许一个线程占用总线，
+ * 故此处在整帧事务期间持锁（Sleep 等空闲期由上层自行控制，不持锁）。 */
 ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *out)
 {
-    (void)r;
-    return modbus_transact(frame, len, out);
+    ErrCode rc;
+
+    if (r == NULL) {
+        return ERR_ARG;
+    }
+    EnterCriticalSection(&r->lock);
+    rc = modbus_transact(frame, len, out);
+    LeaveCriticalSection(&r->lock);
+    return rc;
 }
 
 /* robot_init：初始化机器人，注入的 CommOps 打开总线，失败返回 NULL */
@@ -72,6 +86,7 @@ Robot *robot_init(const char *port_name, uint32_t baudrate)
         free(r);
         return NULL;
     }
+    InitializeCriticalSection(&r->lock);
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
         r->online[i] = 0;
     }
@@ -116,6 +131,7 @@ void robot_close(Robot *robot)
         robot->ops->close();
         robot->ops = NULL;
     }
+    DeleteCriticalSection(&robot->lock);
     free(robot);
 }
 
@@ -157,7 +173,7 @@ ErrCode robot_enable(Robot *robot, int joint)
     }
     if (robot_is_masked(robot, joint)) {
         LOG_INFO("关节%d 已屏蔽，跳过使能", joint);
-        return ERR_NONE;
+        return ERR_MASKED;
     }
     rc = motor_enable(robot, joint);
     if (rc == ERR_NONE) {
@@ -180,7 +196,7 @@ ErrCode robot_disable(Robot *robot, int joint)
     }
     if (robot_is_masked(robot, joint)) {
         LOG_INFO("关节%d 已屏蔽，跳过失能", joint);
-        return ERR_NONE;
+        return ERR_MASKED;
     }
     rc = motor_disable(robot, joint);
     if (rc == ERR_NONE) {
@@ -195,12 +211,8 @@ ErrCode robot_disable(Robot *robot, int joint)
  * 速度写 0x00D8~0x00D9，单位 0.01 rpm），返回 ErrCode */
 ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
 {
-    uint8_t frame[64];
-    ModbusFrame resp;
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
     int32_t steps;
-    uint16_t vals[2];
-    size_t len;
     ErrCode rc;
 
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
@@ -208,33 +220,20 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
     }
     if (robot_is_masked(robot, joint)) {
         LOG_INFO("关节%d 已屏蔽，跳过运动", joint);
-        return ERR_NONE;
+        return ERR_MASKED;
     }
     steps = DEG2STEPS(angle_deg, reductions[joint - 1]);
     if (speed_rpm <= 0.0) {
         speed_rpm = 3000.0;
     }
 
-    /* ① 写目标速度 0x00D8~0x00D9（INT32，0.01 rpm，范围 ±9999.99 rpm）。
-     * 立三手册 10H 写 DWORD 为「低 16 位寄存器在前、字内高字节在前」，
-     * 故 vals[0]=低字、vals[1]=高字（构造器按数组序逐字大端发送）。 */
-    {
-        int32_t vel = LEESN_RPM_TO_VELREG(speed_rpm);
-        vals[0] = (uint16_t)((uint32_t)vel & 0xFFFF);
-        vals[1] = (uint16_t)((uint32_t)vel >> 16);
-        len = modbus_build_write_multi(joint_slave(joint), LEESN_REG_VEL_RUN, vals, 2, frame);
-        rc = robot_request(robot, frame, len, &resp);
-        if (rc != ERR_NONE) {
-            LOG_WARN("关节%d 写速度失败：%s", joint, err_str(rc));
-            return rc;
-        }
+    rc = motor_set_speed(robot, joint, speed_rpm);
+    if (rc != ERR_NONE) {
+        LOG_WARN("关节%d 写速度失败：%s", joint, err_str(rc));
+        return rc;
     }
 
-    /* ② 写绝对位置 0x00E8~0x00E9（INT32 脉冲，运行中亦可执行，低字在前） */
-    vals[0] = (uint16_t)((uint32_t)steps & 0xFFFF);
-    vals[1] = (uint16_t)((uint32_t)steps >> 16);
-    len = modbus_build_write_multi(joint_slave(joint), LEESN_REG_ABS_MOVE, vals, 2, frame);
-    rc = robot_request(robot, frame, len, &resp);
+    rc = motor_move_abs(robot, joint, steps);
     if (rc == ERR_NONE) {
         LOG_INFO("关节%d 运动到 %.2f 度 (脉冲 %d)", joint, angle_deg, (int)steps);
     } else {
@@ -243,162 +242,88 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
     return rc;
 }
 
-/* robot_read_status：读取关节状态字低 16 位（0x0006~0x0007，UINT32），
- * 成功返回 ERR_NONE 并置 *status，失败返回对应 ErrCode。
- * 立三 03H 读 DWORD 为「低 16 位寄存器在前、字内高字节在前」，
- * 故低 16 位位于响应数据 data[0..1]。
- * 位定义见 robot_internal.h LEESN_STAT_*（bit8~9 运行、bit12 到位、bit15 原点、
- * bit16 使能电平）。报警位为 bit21，不在低 16 位内，需读完整 32 位时另行处理。 */
-ErrCode robot_read_status(Robot *robot, int joint, uint16_t *status)
+/* robot_read_status：读取关节完整 32 位状态字（0x0006 低字 + 0x0007 高字）。
+ * 成功返回 ERR_NONE 并置 *status（含 bit16 使能电平 / bit21 报警等全部标志）；
+ * 关节被屏蔽返回 ERR_MASKED；失败返回对应 ErrCode。 */
+ErrCode robot_read_status(Robot *robot, int joint, uint32_t *status)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
     ErrCode rc;
 
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT || status == NULL) {
         return ERR_ARG;
     }
     if (robot_is_masked(robot, joint)) {
-        return ERR_ARG;  /* 屏蔽：视为参数/状态不可用 */
+        return ERR_MASKED;
     }
-    len = modbus_build_read(joint_slave(joint), LEESN_REG_STATUS, 2, frame);
-    rc = robot_request(robot, frame, len, &resp);
-    if (rc != ERR_NONE || resp.data_len < 4) {
-        return (rc != ERR_NONE) ? rc : ERR_LEN;
+    rc = motor_read_status(robot, joint, status);
+    if (rc == ERR_NONE) {
+        robot->online[joint - 1] = 1;
     }
-    robot->online[joint - 1] = 1;
-    *status = (uint16_t)((resp.data[0] << 8) | resp.data[1]);
-    return ERR_NONE;
+    return rc;
 }
 
-/* robot_read_status32：读取关节完整 32 位状态字（0x0006~0x0007，UINT32 低字在前），
- * 成功返回 ERR_NONE 并置 *status，失败返回对应 ErrCode。
- * 立三 03H 读 DWORD 为「低 16 位寄存器在前、字内高字节在前」：
- * 响应数据 data[0..1]=低 16 位、data[2..3]=高 16 位。
- * 完整状态字含 bit8~9 运行 / bit12 到位 / bit13~14 软限位 / bit15 原点 /
- * bit16 使能电平 / bit21 报警（低 16 位读取无法覆盖 bit16/bit21）。 */
+/* robot_read_status32：读取关节完整 32 位状态字（0x0006~0x0007），含报警位等高位标志 */
 ErrCode robot_read_status32(Robot *robot, int joint, uint32_t *status)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
+    int32_t val;
     ErrCode rc;
 
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT || status == NULL) {
         return ERR_ARG;
     }
     if (robot_is_masked(robot, joint)) {
-        return ERR_ARG;  /* 屏蔽 */
+        return ERR_MASKED;
     }
-    len = modbus_build_read(joint_slave(joint), LEESN_REG_STATUS, 2, frame);
-    rc = robot_request(robot, frame, len, &resp);
-    if (rc != ERR_NONE || resp.data_len < 4) {
-        return (rc != ERR_NONE) ? rc : ERR_LEN;
+    rc = motor_read_i32(robot, joint, LEESN_REG_STATUS, &val);
+    if (rc == ERR_NONE) {
+        robot->online[joint - 1] = 1;
+        *status = (uint32_t)val;
     }
-    robot->online[joint - 1] = 1;
-    *status = ((uint32_t)resp.data[2] << 24) |
-              ((uint32_t)resp.data[3] << 16) |
-              ((uint32_t)resp.data[0] << 8) |
-              (uint32_t)resp.data[1];
-    return ERR_NONE;
+    return rc;
 }
 
-/* robot_is_online：读状态成功视为在线，返回 1/0 */
+/* robot_is_online：读状态成功视为在线，返回 1/0（被屏蔽关节返回 0） */
 int robot_is_online(Robot *robot, int joint)
 {
-    uint16_t st;
+    uint32_t st;
     ErrCode rc = robot_read_status(robot, joint, &st);
     return (rc == ERR_NONE) ? 1 : 0;
 }
 
-/* robot_read_position_steps：读取关节实时位置（脉冲，0x0004~0x0005 INT32），ok 指示成功。
- * 立三 03H 读 DWORD 为「低 16 位寄存器在前、字内高字节在前」：
- * 响应数据 data[0..1]=低 16 位、data[2..3]=高 16 位。 */
+/* robot_read_position_steps：读取关节实时位置（脉冲，0x0004~0x0005 INT32），ok 指示成功 */
 int32_t robot_read_position_steps(Robot *robot, int joint, int *ok)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
+    int32_t val;
     ErrCode rc;
 
     if (ok) *ok = 0;
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
         return 0;
     }
-    len = modbus_build_read(joint_slave(joint), LEESN_REG_POS, 2, frame);
-    rc = robot_request(robot, frame, len, &resp);
-    if (rc != ERR_NONE || resp.data_len < 4) {
+    rc = motor_read_i32(robot, joint, LEESN_REG_POS, &val);
+    if (rc != ERR_NONE) {
         return 0;
     }
     if (ok) *ok = 1;
-    return (int32_t)(((uint32_t)resp.data[2] << 24) |
-                     ((uint32_t)resp.data[3] << 16) |
-                     ((uint32_t)resp.data[0] << 8) |
-                     (uint32_t)resp.data[1]);
+    return val;
 }
 
 /* robot_read_current_ma：读取关节实时电流（mA，0x001A），失败返回 -1 */
 int robot_read_current_ma(Robot *robot, int joint)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
-    ErrCode rc;
-
-    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return -1;
-    }
-    len = modbus_build_read(joint_slave(joint), LEESN_REG_CURRENT, 1, frame);
-    rc = robot_request(robot, frame, len, &resp);
-    if (rc != ERR_NONE || resp.data_len < 2) {
-        return -1;
-    }
-    return (int)((resp.data[0] << 8) | resp.data[1]);
+    return motor_read_current(robot, joint);
 }
 
-/* robot_read_speed_rpm：读取关节实时速度（rpm，0x0019 INT32 0.01rpm），失败返回 -1 */
+/* robot_read_speed_rpm：读取关节实时速度（rpm，0x0019），失败返回 -1 */
 int robot_read_speed_rpm(Robot *robot, int joint)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
-    ErrCode rc;
-
-    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return -1;
-    }
-    len = modbus_build_read(joint_slave(joint), LEESN_REG_SPEED_RT, 2, frame);
-    rc = robot_request(robot, frame, len, &resp);
-    if (rc != ERR_NONE || resp.data_len < 4) {
-        return -1;
-    }
-    {
-        int32_t vel = (int32_t)(((uint32_t)resp.data[2] << 24) |
-                                ((uint32_t)resp.data[3] << 16) |
-                                ((uint32_t)resp.data[0] << 8) |
-                                (uint32_t)resp.data[1]);
-        return (int)LEESN_VELREG_TO_RPM(vel);
-    }
+    return motor_read_speed(robot, joint);
 }
 
 /* robot_read_alarm：读取关节报警代码（0x00A3），失败返回 -1 */
 int robot_read_alarm(Robot *robot, int joint)
 {
-    uint8_t frame[16];
-    ModbusFrame resp;
-    size_t len;
-    ErrCode rc;
-
-    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return -1;
-    }
-    len = modbus_build_read(joint_slave(joint), LEESN_REG_ALARM_STAT, 1, frame);
-    rc = robot_request(robot, frame, len, &resp);
-    if (rc != ERR_NONE || resp.data_len < 2) {
-        return -1;
-    }
-    return (int)((resp.data[0] << 8) | resp.data[1]);
+    return motor_read_alarm(robot, joint);
 }
 
 /* leesn_alarm_text：报警代码 -> 中文描述 */

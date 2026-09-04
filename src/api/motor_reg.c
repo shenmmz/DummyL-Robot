@@ -109,6 +109,17 @@ ErrCode motor_estop(Robot *robot, int joint)
     return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, LEESN_CMD_ESTOP);
 }
 
+/* motor_stop_slow：减速停止电机（退出连续运行模式）
+ * 写 0x00C8 = 0x0000，按设定减速时间停止。
+ * 连续运行(0x00C8=0x0001/0x0101)未退出时，后续绝对位置运动命令
+ * (0x00E8) 会被驱动器忽略，因此"连续运行→清零→move_abs"序列前
+ * 必须先调本函数退出连续运行模式。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_stop_slow(Robot *robot, int joint)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, LEESN_CMD_STOP_SLOW);
+}
+
 /* motor_set_speed：设置运行速度
  * 写 0x00D8~0x00D9（INT32，单位 0.01 rpm）
  * rpm - 目标速度，单位 rpm（内部自动 ×100 转换为寄存器值）
@@ -119,15 +130,16 @@ ErrCode motor_set_speed(Robot *robot, int joint, int rpm)
                            LEESN_RPM_TO_VELREG((double)rpm));
 }
 
-/* motor_set_accel：设置加减速时间
- * 同时写 0x0098（加速时间）和 0x0099（减速时间）
- * ms - 加减速时间，单位毫秒，值越大启停越平缓
+/* motor_set_profile：设置加减速时间
+ * 分别写 0x0098（加速时间）和 0x0099（减速时间），两寄存器独立
+ * accel_ms - 加速时间 ms，从启动速度到目标速度所需时间
+ * decel_ms - 减速时间 ms，从目标速度到停止速度所需时间
  * 返回：ERR_NONE 成功 */
-ErrCode motor_set_accel(Robot *robot, int joint, int ms)
+ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms)
 {
-    ErrCode rc = motor_write_u16(robot, joint, LEESN_REG_ACC_TIME, (uint16_t)ms);
+    ErrCode rc = motor_write_u16(robot, joint, LEESN_REG_ACC_TIME, (uint16_t)accel_ms);
     if (rc != ERR_NONE) return rc;
-    return motor_write_u16(robot, joint, LEESN_REG_DEC_TIME, (uint16_t)ms);
+    return motor_write_u16(robot, joint, LEESN_REG_DEC_TIME, (uint16_t)decel_ms);
 }
 
 /* motor_clear_pos：清零当前位置
@@ -136,6 +148,44 @@ ErrCode motor_set_accel(Robot *robot, int joint, int ms)
 ErrCode motor_clear_pos(Robot *robot, int joint)
 {
     return motor_write_i32(robot, joint, LEESN_REG_SET_POS, 0);
+}
+
+/* motor_disable_pos_err_alarm：关闭位置超差报警（回零堵转专用）
+ * 写 0x000B=0（动态误差）/ 0x000C=0（静态误差）。
+ * 关闭后顶死不再触发超差报警切断输出，电流保持顶出状态，
+ * 配合 home_check_stall 的"电流超阈值+位置停涨"判据使用。
+ * RAM 即时生效，断电/复位后恢复记忆值（默认 200/100）。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_disable_pos_err_alarm(Robot *robot, int joint)
+{
+    ErrCode rc;
+    rc = motor_write_u16(robot, joint, LEESN_REG_ERR_DYN, 0);
+    if (rc != ERR_NONE) return rc;
+    return motor_write_u16(robot, joint, LEESN_REG_ERR_STAT, 0);
+}
+
+/* motor_restore_pos_err_alarm：恢复位置超差报警默认值
+ * 写 0x000B=200 / 0x000C=100（出厂默认，动态 360°、静态 180°）。
+ * 回零结束后调用，恢复正常运动时的超差保护。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_restore_pos_err_alarm(Robot *robot, int joint)
+{
+    ErrCode rc;
+    rc = motor_write_u16(robot, joint, LEESN_REG_ERR_DYN, 200);
+    if (rc != ERR_NONE) return rc;
+    return motor_write_u16(robot, joint, LEESN_REG_ERR_STAT, 100);
+}
+
+/* motor_set_pos_err_prewarn：设置位置偏差预警
+ * 写 0x0010，值域 1~65535（无法写 0 取消），默认 20，单位 Full step(1.8°)。
+ * 偏差超过该值时状态字 bit10 置位并切断输出（比 0x000B/C 报警更早动作），
+ * 回零堵转期间需临时放宽（如 10000）让顶死瞬间保持输出、供电流判据检测；
+ * 回零结束后写回 20 恢复失步预警保护。
+ * RAM 即时生效，断电/复位后恢复记忆值（默认 20）。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_set_pos_err_prewarn(Robot *robot, int joint, uint16_t steps)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_ERR_PREWARN, steps);
 }
 
 /* motor_set_limit：设置限位使能
@@ -183,20 +233,23 @@ int32_t motor_read_position(Robot *robot, int joint, int *ok)
     return val;
 }
 
-/* motor_read_status：读取状态字低 16 位
- * 读 0x0006（32 位寄存器，取低 16 位）
- * 包含：运行状态(bit8-9)、到位(bit12)、软限位(bit13-14)、原点(bit15)等
- * status - [输出] 状态字
+/* motor_read_status：读取状态字完整 32 位
+ * 读 0x0006（低字）+ 0x0007（高字），拼成 UINT32
+ * 包含：运行状态(bit8-9)、到位(bit12)、软限位(bit13-14)、原点(bit15)、
+ *       使能电平(bit16)、报警(bit21) 等（位定义见 robot_internal.h LEESN_STAT_*）
+ * status - [输出] 32 位状态字
  * 返回：ERR_NONE 成功 */
-ErrCode motor_read_status(Robot *robot, int joint, uint16_t *status)
+ErrCode motor_read_status(Robot *robot, int joint, uint32_t *status)
 {
     uint8_t frame[16];
     ModbusFrame resp;
     size_t len = modbus_build_read(joint_slave(joint), LEESN_REG_STATUS, 2, frame);
     ErrCode rc = robot_request(robot, frame, len, &resp);
     if (rc != ERR_NONE) return rc;
-    if (resp.data_len < 2) return ERR_LEN;
-    *status = ((uint16_t)resp.data[0] << 8) | (uint16_t)resp.data[1];
+    if (resp.data_len < 4) return ERR_LEN;
+    uint16_t lo = ((uint16_t)resp.data[0] << 8) | (uint16_t)resp.data[1];
+    uint16_t hi = ((uint16_t)resp.data[2] << 8) | (uint16_t)resp.data[3];
+    *status = ((uint32_t)hi << 16) | (uint32_t)lo;
     return ERR_NONE;
 }
 

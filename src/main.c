@@ -178,12 +178,54 @@ static int cmd_status(Robot *robot)
     return 0;
 }
 
+/* cmd_scan：扫描总线电机在线状态
+ * 对关节 1..6 逐个发状态查询（读 0x0006），收到响应即在线。
+ * 拨码型驱动器总线地址由拨码决定，扫描只判断“有无响应”，不读 0x0066。 */
+static int cmd_scan(Robot *robot)
+{
+    int j;
+    int online_list[6];
+    int online_count = 0;
+    int masked_count = 0;
+
+    printf("总线电机扫描（关节 1..6）...\n\n");
+
+    for (j = 1; j <= 6; j++) {
+        if (robot_is_masked(robot, j)) {
+            printf("  关节 %d: 已屏蔽（跳过）\n", j);
+            masked_count++;
+            continue;
+        }
+        if (robot_is_online(robot, j)) {
+            printf("  关节 %d: 在线\n", j);
+            online_list[online_count++] = j;
+        } else {
+            printf("  关节 %d: 离线（无响应）\n", j);
+        }
+        Sleep(30); /* 给总线留方向切换余量 */
+    }
+
+    printf("\n扫描结果: %d/6 在线", online_count);
+    if (online_count > 0) {
+        printf("，在线关节 ");
+        for (int k = 0; k < online_count; k++) {
+            printf("%s%d", k > 0 ? "," : "", online_list[k]);
+        }
+    }
+    if (masked_count > 0) {
+        printf("，%d 个关节被屏蔽", masked_count);
+    }
+    printf("\n");
+    return 0;
+}
+
 /* main：程序入口，初始化机器人并进入交互命令循环 */
 int main(int argc, char **argv)
 {
     char port[64];
     unsigned long baud;
     Robot *robot;
+    Monitor *mon = NULL;   /* 后台监控线程对象（退出前停止） */
     char line[256];
     int running = 1;
 
@@ -285,6 +327,19 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* 后台定时监控：程序启动即创建线程，按周期巡检六轴状态/电流/报警 */
+    mon = monitor_create(robot, 0); /* 0=不启用电流堵转事件，只做状态监控 */
+    if (mon == NULL) {
+        LOG_WARN("监控器创建失败，继续运行");
+    } else if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS)) {
+        LOG_WARN("监控线程启动失败，继续运行");
+        monitor_destroy(mon);
+        mon = NULL;
+    } else {
+        LOG_INFO("后台监控线程已启动：周期 %d ms 巡检六轴状态/电流/报警",
+                 (int)MONITOR_DEFAULT_INTERVAL_MS);
+    }
+
     while (running) {
         ParsedCmd cmd;
         printf("DummyL> ");
@@ -296,8 +351,21 @@ int main(int argc, char **argv)
 
         switch (cmd.type) {
         case CMD_HOME: {
-            ErrCode rc = robot_home(robot);
+            /* 回零期间暂停后台监控，避免其全轴扫描与堵转采样抢占 RS485 总线 */
+            monitor_stop(mon);
+            ErrCode rc = (cmd.joint >= 1) ? robot_home_single(robot, cmd.joint)
+                                          : robot_home(robot);
             if (rc != ERR_NONE) LOG_ERROR("回零失败：%s", err_str(rc));
+            if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
+                LOG_WARN("回零后监控线程重启失败");
+            break;
+        }
+        case CMD_HOMEJ: {
+            monitor_stop(mon);
+            ErrCode rc = robot_home_joint(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
+            if (rc != ERR_NONE) LOG_ERROR("单轴回零失败：%s", err_str(rc));
+            if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
+                LOG_WARN("回零后监控线程重启失败");
             break;
         }
         case CMD_MOVEJ: {
@@ -318,18 +386,27 @@ int main(int argc, char **argv)
         case CMD_STATUS:
             cmd_status(robot);
             break;
-        case CMD_MASK: {
-            ErrCode rc = robot_mask(robot, cmd.joint);
-            if (rc != ERR_NONE) LOG_ERROR("屏蔽失败：%s", err_str(rc));
-            break;
-        }
+        case CMD_MASK:
         case CMD_UNMASK: {
-            ErrCode rc = robot_unmask(robot, cmd.joint);
-            if (rc != ERR_NONE) LOG_ERROR("恢复失败：%s", err_str(rc));
+            int is_mask = (cmd.type == CMD_MASK);
+            if (cmd.joint_count > 0) {
+                for (int k = 0; k < cmd.joint_count; k++) {
+                    ErrCode rc = is_mask ? robot_mask(robot, cmd.joints[k])
+                                         : robot_unmask(robot, cmd.joints[k]);
+                    if (rc != ERR_NONE) {
+                        LOG_ERROR("%s关节%d失败：%s", is_mask ? "屏蔽" : "恢复",
+                                  cmd.joints[k], err_str(rc));
+                    }
+                }
+            } else {
+                ErrCode rc = is_mask ? robot_mask(robot, cmd.joint)
+                                     : robot_unmask(robot, cmd.joint);
+                if (rc != ERR_NONE) LOG_ERROR("%s失败：%s", is_mask ? "屏蔽" : "恢复", err_str(rc));
+            }
             break;
         }
         case CMD_SCAN:
-            LOG_INFO("总线扫描功能未启用");
+            cmd_scan(robot);
             break;
         case CMD_CALIB:
             LOG_INFO("单关节调试功能未启用");
@@ -348,6 +425,12 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 先停后台监控线程，再关总线 */
+    if (mon != NULL) {
+        monitor_stop(mon);
+        monitor_destroy(mon);
+        mon = NULL;
+    }
     robot_close(robot);
     printf("已退出。\n");
     return 0;

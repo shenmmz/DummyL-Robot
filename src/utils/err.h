@@ -17,6 +17,7 @@ typedef enum {
     ERR_LEN       = 5,  /* 帧长非法 */
     ERR_ARG       = 6,  /* 参数非法 */
     ERR_OVERFLOW  = 7,  /* 数据越界/缓冲不足 */
+    ERR_MASKED    = 8,  /* 关节被屏蔽，操作跳过（非失败） */
 } ErrCode;
 
 /* 错误码 -> 中文描述；未知码返回"未知错误" */

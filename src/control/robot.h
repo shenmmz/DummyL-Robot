@@ -27,24 +27,26 @@ Robot *robot_init(const char *port_name, uint32_t baudrate);
 void robot_close(Robot *robot);
 
 /* 使能/失能关节（1..6）：写 0x00D4，0=马达使能、1=释放马达。
- * 返回 ErrCode：ERR_NONE 成功 / ERR_ARG 参数非法 / 通信错误透传 */
+ * 返回 ErrCode：ERR_NONE 成功 / ERR_ARG 参数非法 / ERR_MASKED 关节被屏蔽（跳过）
+ *             / 通信错误透传 */
 ErrCode robot_enable(Robot *robot, int joint);
 ErrCode robot_disable(Robot *robot, int joint);
 
 /* 单关节绝对运动：角度（度）-> 脉冲，写 0x00E8~0x00E9（INT32，
  * 运行中亦可执行）；速度参数写 0x00D8~0x00D9（0.01 rpm）。
- * 返回 ErrCode。 */
+ * 返回 ErrCode：ERR_NONE / ERR_ARG / ERR_MASKED（屏蔽跳过）/ 通信错误 */
 ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm);
 
-/* 查询关节在线状态（读 0x0006~0x0007 状态字）：返回 1 在线，0 离线/失败 */
+/* 查询关节在线状态（读 0x0006~0x0007 状态字）：返回 1 在线，0 离线/失败/屏蔽 */
 int robot_is_online(Robot *robot, int joint);
 
-/* 读取关节状态字低 16 位（0x0006~0x0007，UINT32）。
- * 成功返回 ERR_NONE 并置 *status；失败返回对应 ErrCode。 */
-ErrCode robot_read_status(Robot *robot, int joint, uint16_t *status);
+/* 读取关节完整 32 位状态字（0x0006 低字 + 0x0007 高字）。
+ * 成功返回 ERR_NONE 并置 *status（含 bit16 使能电平 / bit21 报警等全部标志）；
+ * 关节被屏蔽返回 ERR_MASKED；失败返回对应 ErrCode。 */
+ErrCode robot_read_status(Robot *robot, int joint, uint32_t *status);
 
 /* 读取关节完整 32 位状态字（0x0006~0x0007，UINT32 低字在前）。
- * 成功返回 ERR_NONE 并置 *status；失败返回对应 ErrCode。
+ * 成功返回 ERR_NONE 并置 *status；关节被屏蔽返回 ERR_MASKED；失败返回对应 ErrCode。
  * 包含 bit8~9 运行 / bit12 到位 / bit13~14 软限位 / bit15 原点 /
  * bit16 使能电平 / bit21 报警（位定义见 robot_internal.h LEESN_STAT_*）。 */
 ErrCode robot_read_status32(Robot *robot, int joint, uint32_t *status);

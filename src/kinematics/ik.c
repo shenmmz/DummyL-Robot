@@ -33,6 +33,7 @@ static void rz(double theta, double r[3][3])
     r[2][0] = 0.0; r[2][1] = 0.0; r[2][2] = 1.0;
 }
 
+/* 3x3 矩阵乘法：out = a * b */
 static void r_mul(const double a[3][3], const double b[3][3], double out[3][3])
 {
     int i, j, k;
@@ -52,6 +53,7 @@ static void r_mul(const double a[3][3], const double b[3][3], double out[3][3])
     }
 }
 
+/* 3x3 矩阵转置：out = a^T */
 static void r_transpose(const double a[3][3], double out[3][3])
 {
     int i, j;

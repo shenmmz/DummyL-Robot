@@ -34,6 +34,9 @@ typedef struct ModbusFrame ModbusFrame;
 /* ================= LEESN 立三 485 寄存器地址 ================= */
 #define LEESN_REG_POS         0x0004  /* 电机实时位置 (INT32 pulses, RO) */
 #define LEESN_REG_STATUS      0x0006  /* 运行及输入口状态 (UINT32, RO，位定义见下) */
+#define LEESN_REG_ERR_DYN     0x000B  /* 动态误差报警阈值 (UINT16, RW，单位1.8°，0=取消，默认200) */
+#define LEESN_REG_ERR_STAT    0x000C  /* 静态误差报警阈值 (UINT16, RW，单位1.8°，0=取消，默认100) */
+#define LEESN_REG_ERR_PREWARN 0x0010  /* 位置偏差预警 (UINT16, RW，单位 Full step(1.8°)，值域1~65535，默认20) */
 #define LEESN_REG_SERIAL_TIMEOUT 0x0008 /* 串口超时设置 (UINT16, RW，单位 10ms，0=取消) */
 #define LEESN_REG_BAUD_CODE   0x0009  /* 通讯参数 (UINT16, RW，低 8 位波特率码，出厂 12=115200) */
 #define LEESN_REG_SPEED_RT    0x0019  /* 实时速度 (INT32, 0.01 rpm, RO) */
