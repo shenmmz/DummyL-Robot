@@ -29,7 +29,7 @@ typedef struct {
 /* 堵转电流阈值 (mA) 为实机标定真值，关节1~5 顶死判定"电流>阈值+位置停涨=到位" */
 static StallHome stall[6] = {
     [1] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = +1, .stall_current = 480, .forward_deg = -90.0 },
-    [2] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 490, .forward_deg = +50.0 },  /* 降速回零，减轻顶死撞击 */
+    [2] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 480, .forward_deg = +50.0 },  /* 降速回零，减轻顶死撞击 */
     [3] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = +1, .stall_current = 480, .forward_deg = -50.0 },
     [4] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 400, .forward_deg = +5.0 },
     [5] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 360, .forward_deg = +50.0 },
