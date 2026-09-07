@@ -8,13 +8,15 @@
  * 对外接口：robot_home
  * 依赖模块：control/robot（内部接口）、comm/modbus_rtu、config/robot_config、utils/logger
  *
- * 回零流程：速度模式顶硬限位 → 检测堵转 → 急停 → 清零位置 → 运动到机械原点
- * 分组：组0={1,2,3,5,6} 并行堵转回零 → 组1={4} 堵转回零
+ * 回零流程（defer 分阶段编排）：
+ *   阶段1 {1,2,3,5} 并行堵转归零（仅清零） → 阶段2 关节6 传感器回零
+ *   → 阶段3 关节4 单独堵转归零 → 阶段4 统一 movej 到各轴 forward_deg
+ * 6 轴为 IN0/IN1 传感器回零轴（非堵转），支持 3 种初始情况（见 home_joint6）。
  */
 
 #include "control/robot.h"
 
-/* 堵转模式回零：分组并行堵转回零，完成后运动到机械原点位姿。
+/* 堵转模式回零：分组并行堵转回零，完成后统一运动到 forward_deg 位姿。
  * 返回 ErrCode：ERR_NONE 成功，失败返回对应错误码（超时 ERR_TIMEOUT） */
 ErrCode robot_home(Robot *robot);
 
@@ -23,10 +25,9 @@ ErrCode robot_home(Robot *robot);
  * 返回 ErrCode：ERR_NONE 成功 / ERR_ARG / ERR_MASKED（目标轴被屏蔽）/ ERR_TIMEOUT */
 ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed_rpm);
 
-/* 单轴独立堵转回零（home:N）：仅操作关节 joint，不触碰/不依赖其它轴。
- * 流程：使能+关限位 → 堵转运行 → 电流超阈值 → 急停清零 →
- *       自动 movej 到该轴配置角 stall[joint].forward_deg（0 则停在清零点）。
- * 支持 1..5（堵转轴）；6 为传感器回零轴，请走 robot_home 全流程。
+/* 单轴独立回零（home:N）：仅操作关节 joint，不触碰/不依赖其它轴。
+ * 1..5：堵转流程（arm → 堵转 → 电流超阈值 → 清零 → movej 到 forward_deg）；
+ * 6   ：IN0/IN1 传感器状态机（3 种初始情况，见 home.c home_joint6）。
  * 返回 ErrCode：ERR_NONE 成功 / ERR_ARG / ERR_MASKED（目标轴被屏蔽）/ ERR_TIMEOUT */
 ErrCode robot_home_single(Robot *robot, int joint);
 

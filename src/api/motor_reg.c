@@ -123,11 +123,27 @@ ErrCode motor_stop_slow(Robot *robot, int joint)
 /* motor_set_speed：设置运行速度
  * 写 0x00D8~0x00D9（INT32，单位 0.01 rpm）
  * rpm - 目标速度，单位 rpm（内部自动 ×100 转换为寄存器值）
+ * 注意：0x00D8 是位置/绝对运动(0x00E8/0x00DE)的速度源；
+ * 速度模式连续运行(0x00C8)实际取 0x009A（见 motor_set_speed16），
+ * 连续运行前必须两个都写，否则按驱动器记忆速度（默认 300rpm）运行。
  * 返回：ERR_NONE 成功 */
 ErrCode motor_set_speed(Robot *robot, int joint, int rpm)
 {
     return motor_write_i32(robot, joint, LEESN_REG_VEL_RUN,
                            LEESN_RPM_TO_VELREG((double)rpm));
+}
+
+/* motor_set_speed16：设置连续运行速度源（立三 Bug1 修复）
+ * 写 0x009A（UINT16，单位 rpm，0~10000）。
+ * 手册 66 节：0x00C8 速度模式连续运行的运行速度为 0x009A 设置值；
+ * SV126 固件 0x00D8 同时服务位置模式，但连续运行模式不读它。
+ * 0x009A 是 RAM 寄存器（非断电记忆），回零/连续运行每次启动前
+ * 以及运行中需要调速时都必须重写本寄存器。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_set_speed16(Robot *robot, int joint, int rpm)
+{
+    if (rpm < 0 || rpm > 10000) return ERR_ARG;
+    return motor_write_u16(robot, joint, LEESN_REG_RUN_SPEED16, (uint16_t)rpm);
 }
 
 /* motor_set_profile：设置加减速时间
@@ -144,10 +160,22 @@ ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms)
 
 /* motor_clear_pos：清零当前位置
  * 写 0x00D2 = 0，把当前电机位置设为坐标原点
+ * 注意：0x00D2 是 RAM 写，仅即时生效；断电保持（零点持久化）
+ * 需在清零成功后追加 motor_save_params（0x00DC=1）。
  * 返回：ERR_NONE 成功 */
 ErrCode motor_clear_pos(Robot *robot, int joint)
 {
     return motor_write_i32(robot, joint, LEESN_REG_SET_POS, 0);
+}
+
+/* motor_save_params：断电保存 RAM 参数（立三 Bug8 修复）
+ * 写 0x00DC = 1，将当前位置等 RAM 参数写入驱动器 flash，断电不丢。
+ * 调用时机：位置清零(0x00D2)成功之后、连续运行速度(0x009A)改定之后。
+ * 保存写 flash 需要时间，调用后应间隔数十 ms 再发后续命令。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_save_params(Robot *robot, int joint)
+{
+    return motor_write_u16(robot, joint, LEESN_REG_SAVE_CMD, 0x0001);
 }
 
 /* motor_disable_pos_err_alarm：关闭位置超差报警（回零堵转专用）

@@ -49,7 +49,11 @@ typedef struct ModbusFrame ModbusFrame;
 #define LEESN_REG_SOFT_POS    0x0070  /* 软件正限位 (INT32 pulses, RW) */
 #define LEESN_REG_ACC_TIME    0x0098  /* 加速时间 (UINT16 ms, RW，默认 120) */
 #define LEESN_REG_DEC_TIME    0x0099  /* 减速时间 (UINT16 ms, RW，默认 120) */
-#define LEESN_REG_RUN_SPEED16 0x009A  /* 运行速度 (UINT16 rpm, RW，SV113 以下固件用；回零/movej 统一使用 0x00D8) */
+#define LEESN_REG_RUN_SPEED16 0x009A  /* 连续运行速度源 (UINT16 rpm, RW)
+                                       * 手册：速度模式连续运行(0x00C8)的运行速度为 0x009A 设置值。
+                                       * 注意：0x00D8 仅服务位置/绝对运动(0x00E8/0x00DE)，
+                                       * 连续运行(0x00C8)不读 0x00D8；回零连续运行前必须写 0x009A
+                                       * （motor_set_speed16），漏写则按记忆值 300rpm 运行（Bug1 修复）。 */
 #define LEESN_REG_ALARM_STAT  0x00A3  /* 报警状态 (UINT16, RO) */
 #define LEESN_REG_CLEAR_ALARM 0x00A4  /* 清除报警 (UINT16, WO) */
 #define LEESN_REG_RUN_CTRL    0x00C8  /* 运行/停止 (UINT16, WO，命令值见下) */

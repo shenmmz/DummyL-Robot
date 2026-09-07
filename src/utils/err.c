@@ -19,6 +19,7 @@ const char *err_str(ErrCode e)
     case ERR_ARG:       return "参数非法";
     case ERR_OVERFLOW:  return "数据越界或缓冲不足";
     case ERR_MASKED:    return "关节已屏蔽，操作跳过";
+    case ERR_ALARM:     return "驱动器报警，运动中断";
     default:            return "未知错误";
     }
 }

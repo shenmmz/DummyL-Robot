@@ -47,8 +47,19 @@ ErrCode motor_estop(Robot *robot, int joint);
  * 连续运行未退出时绝对定位命令(0x00E8)会被忽略，move_abs 前必须调用 */
 ErrCode motor_stop_slow(Robot *robot, int joint);
 
-/* 设置运行速度 rpm（0x00D8~0x00D9，范围 ±9999.99 rpm） */
+/* 设置运行速度 rpm（0x00D8~0x00D9，范围 ±9999.99 rpm）
+ * 注意：仅位置/绝对运动(0x00E8/0x00DE)使用 0x00D8；连续运行(0x00C8)
+ * 的实际速度源是 0x009A（见 motor_set_speed16），只写本函数再 motor_run
+ * 会落回驱动器记忆速度（默认 300rpm）——连续运行前必须两个都写 */
 ErrCode motor_set_speed(Robot *robot, int joint, int rpm);
+
+/* 设置连续运行速度源 rpm（0x009A，UINT16，0~10000）
+ * 立三手册：速度模式连续运行(0x00C8)的运行速度为 0x009A 设置值，
+ * 与位置/绝对运动速度寄存器 0x00D8 不同源。SV126 固件若漏写 0x009A，
+ * 连续运行会按驱动器记忆值（默认 300rpm）运行，造成回零速度不符设定。
+ * 0x009A 为 RAM 寄存器，每次连续运行/运行中调速前都须重写；
+ * 连续运行中改写本寄存器即可实时调速（无需重发 0x00C8）。 */
+ErrCode motor_set_speed16(Robot *robot, int joint, int rpm);
 
 /* 设置加减速时间（0x0098 加速 / 0x0099 减速，单位 ms，0~65535）
  * accel_ms - 从启动速度加速到目标速度所需时间
@@ -57,8 +68,16 @@ ErrCode motor_set_speed(Robot *robot, int joint, int rpm);
  * 返回：ERR_NONE 成功 */
 ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms);
 
-/* 清零当前位置（0x00D2 = 0），把当前位置设为坐标原点 */
+/* 清零当前位置（0x00D2 = 0），把当前位置设为坐标原点
+ * 注意：0x00D2 为 RAM 写，仅即时生效，断电即丢；
+ * 需要断电保持（零点持久化）时必须追加 motor_save_params */
 ErrCode motor_clear_pos(Robot *robot, int joint);
+
+/* 断电保存当前 RAM 参数（0x00DC = 1），保存后掉电不丢失。
+ * 用于位置清零(0x00D2)、连续运行速度(0x009A)等 RAM 寄存器持久化；
+ * 保存期间驱动器会写 flash，调用后建议间隔数十 ms 再发后续命令。
+ * 返回：ERR_NONE 成功 */
+ErrCode motor_save_params(Robot *robot, int joint);
 
 /* 关闭位置超差报警（0x000B=0 / 0x000C=0），回零堵转专用 */
 ErrCode motor_disable_pos_err_alarm(Robot *robot, int joint);
