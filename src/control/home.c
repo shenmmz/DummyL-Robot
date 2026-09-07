@@ -24,12 +24,36 @@ typedef struct {
     int    dir;           /* 方向 +1正转 / -1反转 */
     int    stall_current; /* 堵转判定电流 mA，0=仅靠状态字判定 */
     double forward_deg;   /* 堵转后移动角度（绝对角度），0=不移动 */
+    int    stall_mode;    /* 判据模式，见 STALL_MODE_* */
+    int    over_frames;   /* 纯电流模式：滞后计数命中阈值（帧），0=用默认 */
 } StallHome;
 
-/* 堵转电流阈值 (mA) 为实机标定真值，关节1~5 顶死判定"电流>阈值+位置停涨=到位" */
+/* 判据模式：
+ * DUAL     —— 电流超阈值【且】位置停涨（原双确认判据）。
+ *             适用于能真正顶死、编码器随之停转的轴。
+ * CURONLY  —— 纯电流：超阈值经滞后计数确认即命中，不看位置。
+ *             适用于传动打滑/跳齿的轴：此时输出轴已被机械卡住、电机轴仍在转，
+ *             编码器位置恒按满速累加，"位置停涨"永不成立，纯属无效条件。 */
+#define STALL_MODE_DUAL     0
+#define STALL_MODE_CURONLY  1
+
+/* 纯电流模式默认命中计数（帧）。单轴轮询实测 250ms/帧 → 3 帧 ≈ 750ms。 */
+#define STALL_OVER_FRAMES_DEFAULT   3
+
+/* 纯电流模式起步屏蔽：加速段之外再屏蔽的时长（ms），躲启动浪涌电流。
+ * 总屏蔽 = accel_ms + 本值（关节2: 300+500 = 800ms）。 */
+#define STALL_SHIELD_EXTRA_MS      500
+
+/* 滞后计数上限：防止长时间缓慢累加越过阈值，也让计数在振荡下收敛更快 */
+#define STALL_OVER_CNT_MAX           8
+
+/* 堵转电流阈值 (mA) 为实机标定真值。
+ * 关节2 = 550 的取值依据（home:2 实测）：匀速 456mA、堵转区间 612~1349mA，
+ * 取中留出双向裕量；原 480 距匀速仅 24mA(5%)，姿态/负载一变就会误判。 */
 static StallHome stall[6] = {
     [1] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = +1, .stall_current = 480, .forward_deg = -90.0 },
-    [2] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 480, .forward_deg = +50.0 },  /* 降速回零，减轻顶死撞击 */
+    [2] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 550, .forward_deg = +50.0,
+            .stall_mode = STALL_MODE_CURONLY, .over_frames = 3 },  /* 传动跳齿轴：位置不停涨，改纯电流判据 */
     [3] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = +1, .stall_current = 480, .forward_deg = -50.0 },
     [4] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 400, .forward_deg = +5.0 },
     [5] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 360, .forward_deg = +50.0 },
@@ -115,6 +139,12 @@ static void home_restore(Robot *robot, int joint)
 static int32_t s_stall_last_pos[7];
 static int     s_stall_last_ok[7];
 
+/* 纯电流模式滞后计数：本帧超阈值 +1、未超 -1（下限 0），累计达标即命中。
+ * 用"滞后计数"而非"连续 N 帧"的原因：跳齿时电流周期性跌落（实测 612~1349mA 振荡），
+ * 连续计数会被单帧跌落清零而永远命中不了 —— 与位置停涨判据是同一类失效。
+ * 正常匀速电流恒定低于阈值，计数恒为 0；偶发尖峰 +1 后即 -1，够不到阈值。 */
+static int     s_over_cnt[7];
+
 /* 【标定临时】各轴采样时刻与本次堵转启动时刻：
  *   周期 = 本帧与上一帧的时间差 → 真实轮询间隔，随并行轴数变化（单轴 ~7-10ms、
  *          整机 4~5 轴 30~50ms），是定窗口点数与死区的基准量；
@@ -127,6 +157,7 @@ static void home_stall_start(Robot *robot, int joint)
 {
     StallHome *p = &stall[joint];
     s_stall_last_ok[joint] = 0;   /* 新一次堵转，清位置缓存 */
+    s_over_cnt[joint]      = 0;   /* 清纯电流滞后计数（新一次堵转从 0 起算） */
     s_last_tick_ms[joint]  = 0;   /* 清周期基准（首帧周期显示 0） */
     s_stall_t0_ms[joint]   = GetTickCount();   /* 【标定】起步时刻 */
     /* 关超差报警：顶死改由 home_check_stall 电流+停涨判定，不再报警锁存 */
@@ -146,14 +177,21 @@ static void home_stall_start(Robot *robot, int joint)
     motor_set_speed(robot, joint, p->speed_rpm);
     Sleep(20);
     motor_run(robot, joint, p->dir);
-    LOG_INFO("关节%d 堵转启动 (方向=%+d, %drpm, 加速%dms/减速%dms, 阈值=%dmA)",
-             joint, p->dir, p->speed_rpm, p->accel_ms, p->decel_ms, p->stall_current);
+    LOG_INFO("关节%d 堵转启动 (方向=%+d, %drpm, 加速%dms/减速%dms, 阈值=%dmA, 判据=%s, 需%d帧, 屏蔽%dms)",
+             joint, p->dir, p->speed_rpm, p->accel_ms, p->decel_ms, p->stall_current,
+             (p->stall_mode == STALL_MODE_CURONLY) ? "纯电流" : "电流+位置停涨",
+             (p->stall_mode == STALL_MODE_CURONLY)
+                 ? ((p->over_frames > 0) ? p->over_frames : STALL_OVER_FRAMES_DEFAULT) : 1,
+             (p->stall_mode == STALL_MODE_CURONLY)
+                 ? (int)(p->accel_ms + STALL_SHIELD_EXTRA_MS) : 0);
 }
 
 /* home_check_stall：判堵转到位。返回 1=命中 / 0=运行中。
  * 前置：已关 0x000B/C 报警、放宽 0x0010。判据分级兜底：
  * ①报警 bit21 ②超差 bit10 ③电流+位置停涨确认：A 超阈值&停涨（顶着型）/
  * B 电流归零或读失败&停涨&RUN_ACTIVE（固件切断型）；位置停涨排除运动帧误判。
+ * ③' 若该轴 stall_mode = STALL_MODE_CURONLY，则跳过 A/B，改走纯电流滞后计数
+ *     （传动打滑/跳齿轴：位置永不停涨，故判据不含位置项）。
  * 出参 cur_out：读到电流后立即写回本帧 mA(-1=读失败)，供主循环电流快照 */
 static int home_check_stall(Robot *robot, int joint, int *cur_out)
 {
@@ -195,6 +233,44 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
         delta = pos - s_stall_last_pos[joint];
         stopped = (delta >= -STALL_POS_STOP_DELTA) &&
                   (delta <=  STALL_POS_STOP_DELTA);
+    }
+
+    /* 纯电流判据（STALL_MODE_CURONLY）：跳齿/打滑轴专用。
+     * 此类轴输出轴已被机械卡住、电机轴仍在转，编码器位置恒按满速累加，
+     * "位置停涨"永不成立，是完全无效的条件，故本模式彻底不看位置。
+     * 起步屏蔽窗（加速段+STALL_SHIELD_EXTRA_MS）内不计数，躲启动浪涌；
+     * 电流读失败时计数保持不变（不增不减），避免通信抖动造成漏判。
+     * 命中后直接返回，不再走 A/B 型。 */
+    if (stall[joint].stall_mode == STALL_MODE_CURONLY) {
+        int need = (stall[joint].over_frames > 0) ? stall[joint].over_frames
+                                                  : STALL_OVER_FRAMES_DEFAULT;
+        uint32_t shield_ms = (uint32_t)stall[joint].accel_ms + STALL_SHIELD_EXTRA_MS;
+
+        if (threshold > 0 && cur_ok && elaps_ms >= shield_ms) {
+            if (cur > threshold) {
+                if (s_over_cnt[joint] < STALL_OVER_CNT_MAX) s_over_cnt[joint]++;
+            } else if (s_over_cnt[joint] > 0) {
+                s_over_cnt[joint]--;
+            }
+        }
+        if (s_over_cnt[joint] >= need) {
+            LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 电流超阈值累计%d帧(需%d帧, 阈值%dmA, 本帧%dmA)，判定堵转到位",
+                     joint, elaps_ms, period_ms, s_over_cnt[joint], need,
+                     threshold, cur);
+            return 1;
+        }
+        /* 未命中：位置在本模式仅作观测（诊断用），不参与判定 */
+        if (pos_ok) {
+            s_stall_last_pos[joint] = pos;
+            s_stall_last_ok[joint] = 1;
+        }
+        LOG_INFO("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 计数=%d/%d 位置=%d 帧差=%d (阈值=%dmA)",
+                 joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
+                 s_over_cnt[joint], need,
+                 pos_ok ? (int)pos : -99999,
+                 (pos_ok && s_stall_last_ok[joint]) ? (int)delta : -99999,
+                 threshold);
+        return 0;
     }
 
     /* 主判据A：电流顶高 + 位置停涨，双条件确认顶死（驱动器持续顶着型） */
@@ -709,9 +785,10 @@ ErrCode robot_home(Robot *robot)
         if (robot_is_masked(robot, j)) {
             LOG_INFO("  关节%d: 已屏蔽", j);
         } else {
-            LOG_INFO("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f°",
+            LOG_INFO("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f° 判据=%s",
                      j, stall[j].speed_rpm, stall[j].accel_ms, stall[j].decel_ms,
-                     stall[j].dir, stall[j].stall_current, stall[j].forward_deg);
+                     stall[j].dir, stall[j].stall_current, stall[j].forward_deg,
+                     (stall[j].stall_mode == STALL_MODE_CURONLY) ? "纯电流" : "电流+位置停涨");
         }
     }
     if (!robot_is_masked(robot, 6)) {
