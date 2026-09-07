@@ -248,7 +248,10 @@ static void home_stall_done(Robot *robot, int joint)
         Sleep(10);
     }
 
-    /* 清零：当前位置置 0，闭环目标=当前位置，驱动器停止顶着 */
+    /* 清零：当前位置置 0，闭环目标=当前位置，驱动器停止顶着。
+     * 注：0x00D2 为【无记忆】RAM 寄存器，零点不跨断电保持，上电须重新回零。
+     * 禁止在此追加 motor_save_params(0x00DC=1)——既存不住零点，又会把回零期
+     * 临时关闭的报警/限位固化进 flash，理由见 motor_reg.h 声明处。 */
     clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
     Sleep(30);
     pos = motor_read_position(robot, joint, &pos_ok);
@@ -257,13 +260,6 @@ static void home_stall_done(Robot *robot, int joint)
     } else {
         LOG_INFO("关节%d 堵转清零成功，位置=%d",
                  joint, pos_ok ? (int)pos : -99999);
-        /* Bug8：0x00D2 清零仅 RAM 生效，追加 0x00DC=1 写 flash 断电保持 */
-        if (motor_save_params(robot, joint) == ERR_NONE) {
-            LOG_INFO("关节%d 零点已断电保存（0x00DC=1）", joint);
-            Sleep(50);
-        } else {
-            LOG_WARN("关节%d 零点断电保存失败，本次零点断电后可能丢失", joint);
-        }
     }
 }
 
@@ -520,20 +516,14 @@ static void sensor6_finish(Robot *robot, SensorCtx *c)
     if (c->done) {
         int pos_ok = 0;
         int32_t pos;
+        /* 清零：IN0 离开沿即原点。注意 0x00D2 为【无记忆】RAM 寄存器，
+         * 零点不跨断电保持，上电须重新回零；此处不得追加
+         * motor_save_params(0x00DC=1)，理由见 motor_reg.h 声明处。 */
         int clear_ok = (motor_clear_pos(robot, 6) == ERR_NONE);
         Sleep(30);
         pos = motor_read_position(robot, 6, &pos_ok);
         LOG_INFO("关节6 位置清零%s，位置=%d",
                  clear_ok ? "成功" : "失败", pos_ok ? (int)pos : -99999);
-        if (clear_ok) {
-            /* Bug8 修复：零点（IN0 离开沿）断电保持，追加 0x00DC=1 */
-            if (motor_save_params(robot, 6) == ERR_NONE) {
-                LOG_INFO("关节6 零点已断电保存（0x00DC=1）");
-                Sleep(50);
-            } else {
-                LOG_WARN("关节6 零点断电保存失败，本次零点断电后可能丢失");
-            }
-        }
     } else {
         /* 主循环整体超时等未走 tick 超时分支的兜底 */
         if (!c->failed) {

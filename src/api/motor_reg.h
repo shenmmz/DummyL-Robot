@@ -69,14 +69,17 @@ ErrCode motor_set_speed16(Robot *robot, int joint, int rpm);
 ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms);
 
 /* 清零当前位置（0x00D2 = 0），把当前位置设为坐标原点
- * 注意：0x00D2 为 RAM 写，仅即时生效，断电即丢；
- * 需要断电保持（零点持久化）时必须追加 motor_save_params */
+ * 注意：0x00D2 为【无记忆】RAM 寄存器，仅即时生效、断电即丢，
+ * 且不在 0x00DC 断电保存范围内——零点无法持久化，本系统上电必须重新回零。
+ * 禁止在清零后追加 motor_save_params（理由见该函数声明处）。 */
 ErrCode motor_clear_pos(Robot *robot, int joint);
 
-/* 断电保存当前 RAM 参数（0x00DC = 1），保存后掉电不丢失。
- * 用于位置清零(0x00D2)、连续运行速度(0x009A)等 RAM 寄存器持久化；
- * 保存期间驱动器会写 flash，调用后建议间隔数十 ms 再发后续命令。
- * 返回：ERR_NONE 成功 */
+/* 断电保存【记忆】寄存器（0x00DC = 1）。
+ * 仅用于显式参数整定落盘（改定 0x009A 连续运行速度、细分、限位等后持久化），
+ * 调用前须确认所有【记忆】寄存器已处于期望值。
+ * 【禁止在回零清零路径调用】：① 0x00D2 无记忆，存不住零点；
+ * ② 回零期报警/预警/限位被临时改写，保存会把危险状态固化进 flash；
+ * ③ 保存约 0.1s 且关断电机输出，flash 擦写寿命约 10 万次。 */
 ErrCode motor_save_params(Robot *robot, int joint);
 
 /* 关闭位置超差报警（0x000B=0 / 0x000C=0），回零堵转专用 */

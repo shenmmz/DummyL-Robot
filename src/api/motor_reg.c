@@ -159,19 +159,32 @@ ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms)
 }
 
 /* motor_clear_pos：清零当前位置
- * 写 0x00D2 = 0，把当前电机位置设为坐标原点
- * 注意：0x00D2 是 RAM 写，仅即时生效；断电保持（零点持久化）
- * 需在清零成功后追加 motor_save_params（0x00DC=1）。
+ * 写 0x00D2 = 0，把当前电机位置设为坐标原点。
+ * 注意：0x00D2 是【无记忆】RAM 寄存器（手册 §67 标注"WriteDWORD,无记忆"，
+ * 总表标 RO），仅即时生效、断电即丢，且不在 0x00DC 断电保存范围内
+ * （手册 §70：0x00DC 只保存"所有带记忆寄存器"）。
+ * 因此：零点无法持久化，本系统上电必须重新回零；且禁止在清零后追加
+ * motor_save_params(0x00DC=1)——既存不住零点，又会把回零期临时关闭的
+ * 报警/限位等危险值一并固化进 flash（详见 motor_save_params 注释）。
  * 返回：ERR_NONE 成功 */
 ErrCode motor_clear_pos(Robot *robot, int joint)
 {
     return motor_write_i32(robot, joint, LEESN_REG_SET_POS, 0);
 }
 
-/* motor_save_params：断电保存 RAM 参数（立三 Bug8 修复）
- * 写 0x00DC = 1，将当前位置等 RAM 参数写入驱动器 flash，断电不丢。
- * 调用时机：位置清零(0x00D2)成功之后、连续运行速度(0x009A)改定之后。
- * 保存写 flash 需要时间，调用后应间隔数十 ms 再发后续命令。
+/* motor_save_params：断电保存【记忆】寄存器（0x00DC = 1）
+ * 手册 §70：1=保存。仅对"带记忆寄存器"生效，0x00D2（当前位置）不在其中。
+ *
+ * 【禁止在回零清零路径调用】三条理由：
+ *   1) 存不住零点——0x00D2 无记忆，保存对零点无效；
+ *   2) 有副作用——回零期间 0x000B/0x000C 超差报警被关、0x0010 偏差预警
+ *      被放宽到 10000、0x006D 限位被关，此刻保存会把该危险状态固化进
+ *      flash，导致下次上电带"报警关闭+限位失效"启动；
+ *   3) 有代价——保存约耗时 0.1s 且期间关断电机输出（手册 §70 注 1），
+ *      flash 擦写寿命约 10 万次。
+ *
+ * 本函数仅用于显式参数整定落盘（如改定 0x009A 连续运行速度、细分、限位
+ * 等后持久化），调用前须确认所有【记忆】寄存器已处于期望值。
  * 返回：ERR_NONE 成功 */
 ErrCode motor_save_params(Robot *robot, int joint)
 {
