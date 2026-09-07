@@ -16,6 +16,7 @@
 
 #include "control/robot.h"
 #include "control/robot_internal.h"
+#include "api/motor_reg.h"
 #include "control/home.h"
 #include "control/monitor.h"
 #include "comm/serial_win.h"
@@ -219,6 +220,107 @@ static int cmd_scan(Robot *robot)
     return 0;
 }
 
+/* cmd_diag：回零诊断读数 —— 辨识"真堵转"与"传动打滑/跳齿"
+ * 背景：闭环电机的 0x0004 是编码器位置。顶死后若它仍按满速累加，说明电机轴真的
+ * 还在转，那不是堵转而是同步带跳齿/传动打滑（伴随皮带响声）。此时无论怎么调电流
+ * 阈值都判不到"位置停涨"，且继续顶会磨坏皮带 —— 必须先解决机械侧。
+ * 判定要点：
+ *   实际速度(0x00D6) ≈ 设定速度 且 电流高            → 电机轴在转 = 打滑/跳齿
+ *   实际速度 ≈ 0 且 位置偏差(0x0011) 持续累积        → 命令走、电机没转 = 真堵转
+ * 顺带输出细分(0x0024) 与配置 ENCODER_STEPS_PER_REV 的对比，确认角度换算口径。
+ * joint_only：1..6 只查该轴并连续采样 3 次（看增量）；0 = 全轴各采样 1 次。 */
+static int cmd_diag(Robot *robot, int joint_only)
+{
+    int j, lo, hi, samples, s;
+
+    if (joint_only >= 1 && joint_only <= 6) {
+        lo = hi = joint_only;
+        samples = 3;
+    } else {
+        lo = 1; hi = 6; samples = 1;
+    }
+
+    printf("\n回零诊断读数（闭环判据）\n");
+    printf("  配置细分 ENCODER_STEPS_PER_REV = %d\n\n", (int)ENCODER_STEPS_PER_REV);
+    printf("  %-6s %-15s %-9s %-11s %-10s %-11s %-8s %s\n",
+           "关节", "细分(实际/配置)", "编码器线数", "实际速度rpm", "位置偏差",
+           "位置(步)", "电流mA", "状态字");
+    printf("  ------ --------------- --------- ----------- ---------- ----------- -------- --------\n");
+
+    for (j = lo; j <= hi; j++) {
+        int32_t prev_pos = 0;
+        int     prev_err = 0;
+        int     have_prev = 0;
+
+        if (robot_is_masked(robot, j)) {
+            printf("  %-6d 已屏蔽\n", j);
+            continue;
+        }
+        for (s = 0; s < samples; s++) {
+            uint32_t st32 = 0;
+            int32_t subdiv, pos, spd_raw;
+            int     enc_lines, pos_err, cur, pos_ok = 0;
+            char    tag[16], subdiv_txt[32], enc_txt[16], spd_txt[16];
+            char    err_txt[16], pos_txt[16], cur_txt[16];
+
+            if (motor_read_status(robot, j, &st32) != ERR_NONE) {
+                printf("  %-6d 离线\n", j);
+                break;
+            }
+            subdiv    = motor_read_subdivision(robot, j);
+            enc_lines = motor_read_enc_lines(robot, j);
+            spd_raw   = motor_read_speed_raw(robot, j);
+            pos_err   = motor_read_pos_err(robot, j);
+            pos       = motor_read_position(robot, j, &pos_ok);
+            cur       = motor_read_current(robot, j);
+
+            if (samples > 1) snprintf(tag, sizeof(tag), "%d#%d", j, s + 1);
+            else             snprintf(tag, sizeof(tag), "%d", j);
+
+            if (subdiv < 0) {
+                snprintf(subdiv_txt, sizeof(subdiv_txt), "读失败");
+            } else if (subdiv == (int32_t)ENCODER_STEPS_PER_REV) {
+                snprintf(subdiv_txt, sizeof(subdiv_txt), "%d 一致", (int)subdiv);
+            } else {
+                snprintf(subdiv_txt, sizeof(subdiv_txt), "%d/%d 不符",
+                         (int)subdiv, (int)ENCODER_STEPS_PER_REV);
+            }
+            if (enc_lines >= 0) snprintf(enc_txt, sizeof(enc_txt), "%d", enc_lines);
+            else                snprintf(enc_txt, sizeof(enc_txt), "—");
+            if (spd_raw >= 0)   snprintf(spd_txt, sizeof(spd_txt), "%.2f", (double)spd_raw / 100.0);
+            else                snprintf(spd_txt, sizeof(spd_txt), "—");
+            if (pos_err >= 0)   snprintf(err_txt, sizeof(err_txt), "%d", pos_err);
+            else                snprintf(err_txt, sizeof(err_txt), "—");
+            if (pos_ok)         snprintf(pos_txt, sizeof(pos_txt), "%d", (int)pos);
+            else                snprintf(pos_txt, sizeof(pos_txt), "—");
+            if (cur >= 0)       snprintf(cur_txt, sizeof(cur_txt), "%d", cur);
+            else                snprintf(cur_txt, sizeof(cur_txt), "—");
+
+            printf("  %-6s %-15s %-9s %-11s %-10s %-11s %-8s 0x%06X\n",
+                   tag, subdiv_txt, enc_txt, spd_txt, err_txt, pos_txt, cur_txt,
+                   (unsigned)(st32 & 0xFFFFFFu));
+
+            if (have_prev && pos_ok && pos_err >= 0 && prev_err >= 0) {
+                printf("        └ Δ位置=%+d 步, Δ偏差=%+d 步（%dms 内）\n",
+                       (int)(pos - prev_pos), pos_err - prev_err,
+                       (samples > 1) ? 400 : 0);
+            }
+            if (pos_ok)   prev_pos = pos;
+            if (pos_err >= 0) prev_err = pos_err;
+            have_prev = 1;
+
+            if (samples > 1 && s < samples - 1) Sleep(400);
+        }
+    }
+    if (samples > 1) {
+        printf("\n  判定提示：\n");
+        printf("    实际速度≈设定速度 且 电流高、Δ位置≈额定步数 → 电机轴仍在转 = 打滑/跳齿（机械问题）\n");
+        printf("    实际速度≈0、Δ位置≈0 且 Δ偏差持续累积        → 命令走电机不转 = 真堵转（判据侧可解）\n");
+    }
+    printf("\n");
+    return 0;
+}
+
 /* main：程序入口，初始化机器人并进入交互命令循环 */
 int main(int argc, char **argv)
 {
@@ -407,6 +509,9 @@ int main(int argc, char **argv)
         }
         case CMD_SCAN:
             cmd_scan(robot);
+            break;
+        case CMD_DIAG:
+            cmd_diag(robot, cmd.joint);
             break;
         case CMD_CALIB:
             LOG_INFO("单关节调试功能未启用");

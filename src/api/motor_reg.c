@@ -306,15 +306,63 @@ ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
 
 /* ================= 状态读取（扩展） ================= */
 
-/* motor_read_speed：读取实时速度
- * 读 0x0019（INT32，单位 0.01rpm），转换为 rpm 返回
- * 失败返回 -1 */
+/* motor_read_speed：读取实时速度（rpm，取整）
+ * 读 0x00D6~0x00D7（INT32，单位 0.01rpm），失败返回 -1。
+ * 【修正】原实现读 0x0019 有两处错：①0x0019 是 INT16，按 INT32 读会把相邻的
+ * 0x001A(实时电流) 拼进高 16 位，得到 325714 之类的垃圾值；②手册注明 0x0019
+ * 在 SV118 及以上固件语义变为"实际给定电流"，不再是速度。改读 0x00D6。 */
 int motor_read_speed(Robot *robot, int joint)
 {
     int32_t val;
-    if (motor_read_i32(robot, joint, LEESN_REG_SPEED_RT, &val) != ERR_NONE)
+    if (motor_read_i32(robot, joint, LEESN_REG_SPEED_ACT, &val) != ERR_NONE)
         return -1;
     return (int)LEESN_VELREG_TO_RPM(val);
+}
+
+/* motor_read_speed_raw：读取实时速度原始值（0.01rpm），保留小数精度
+ * 低速回零时 60rpm 以内用 rpm 取整足够，但顶死瞬间的残余转速需要 0.01rpm 精度，
+ * 故单独提供原始值接口。失败返回 -1。 */
+int32_t motor_read_speed_raw(Robot *robot, int joint)
+{
+    int32_t val;
+    if (motor_read_i32(robot, joint, LEESN_REG_SPEED_ACT, &val) != ERR_NONE)
+        return -1;
+    return val;
+}
+
+/* motor_read_subdivision：读取细分（每转脉冲数）
+ * 读 0x0024~0x0025（UINT32 pulses/rev，出厂默认 4000），失败返回 -1。
+ * 用途：确认 ENCODER_STEPS_PER_REV 配置与驱动器实际值是否一致。
+ * 不一致会让全部 DEG2STEPS/STEPS2DEG 角度换算按比例失真。 */
+int32_t motor_read_subdivision(Robot *robot, int joint)
+{
+    int32_t val;
+    if (motor_read_i32(robot, joint, LEESN_REG_SUBDIV, &val) != ERR_NONE)
+        return -1;
+    return val;
+}
+
+/* motor_read_pos_err：读取实际位置偏差值（命令位置 − 编码器位置）
+ * 读 0x0011（UINT16 pulses），失败返回 -1。
+ * 诊断意义：真堵转时命令在走而电机轴不转，偏差持续累积；
+ * 打滑/跳齿时电机轴跟着转，偏差维持在低位。 */
+int motor_read_pos_err(Robot *robot, int joint)
+{
+    uint16_t val;
+    if (motor_read_u16(robot, joint, LEESN_REG_POS_ERR, &val) != ERR_NONE)
+        return -1;
+    return (int)val;
+}
+
+/* motor_read_enc_lines：读取编码器线数（CPR）
+ * 读 0x000F（UINT16，出厂 1000），失败返回 -1。
+ * 每转脉冲数 = 线数 × 4（4 倍频），可交叉验证 0x0024 细分值。 */
+int motor_read_enc_lines(Robot *robot, int joint)
+{
+    uint16_t val;
+    if (motor_read_u16(robot, joint, LEESN_REG_ENC_LINES, &val) != ERR_NONE)
+        return -1;
+    return (int)val;
 }
 
 /* motor_read_alarm：读取报警代码

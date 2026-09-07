@@ -120,8 +120,21 @@ ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps);
 
 /* ================= 状态读取（扩展） ================= */
 
-/* 读实时速度 rpm（0x0019，INT32，单位 0.01rpm），失败返回 -1 */
+/* 读实时速度 rpm（0x00D6~0x00D7，INT32，单位 0.01rpm），失败返回 -1
+ * 【修正】勿读 0x0019：它是 INT16，且 SV118+ 固件语义变为"实际给定电流" */
 int motor_read_speed(Robot *robot, int joint);
+
+/* 读实时速度原始值（0x01rpm），顶死瞬间残余转速需要此精度，失败返回 -1 */
+int32_t motor_read_speed_raw(Robot *robot, int joint);
+
+/* 读细分/每转脉冲数（0x0024~0x0025，UINT32，出厂 4000），失败返回 -1 */
+int32_t motor_read_subdivision(Robot *robot, int joint);
+
+/* 读实际位置偏差值（0x0011，命令位置−编码器位置，pulses），失败返回 -1 */
+int motor_read_pos_err(Robot *robot, int joint);
+
+/* 读编码器线数 CPR（0x000F，出厂 1000；每转脉冲=线数×4），失败返回 -1 */
+int motor_read_enc_lines(Robot *robot, int joint);
 
 /* 读报警代码（0x00A3），0=正常，>0=报警代码，失败返回 -1 */
 int motor_read_alarm(Robot *robot, int joint);

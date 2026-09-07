@@ -39,9 +39,21 @@ typedef struct ModbusFrame ModbusFrame;
 #define LEESN_REG_ERR_PREWARN 0x0010  /* 位置偏差预警 (UINT16, RW，单位 Full step(1.8°)，值域1~65535，默认20) */
 #define LEESN_REG_SERIAL_TIMEOUT 0x0008 /* 串口超时设置 (UINT16, RW，单位 10ms，0=取消) */
 #define LEESN_REG_BAUD_CODE   0x0009  /* 通讯参数 (UINT16, RW，低 8 位波特率码，出厂 12=115200) */
-#define LEESN_REG_SPEED_RT    0x0019  /* 实时速度 (INT32, 0.01 rpm, RO) */
+#define LEESN_REG_ENC_LINES   0x000F  /* 编码器线数 (UINT16, RW，出厂 1000 CPR，【记忆】) */
+#define LEESN_REG_POS_ERR     0x0011  /* 实际位置偏差值 (UINT16 pulses, RW)
+                                       * 命令位置与编码器位置的偏差。闭环堵转时会持续累积，
+                                       * 是区分"真堵转"与"传动打滑"的关键观测量：
+                                       *   偏差持续累积 → 命令在走、电机轴没转（真堵转）
+                                       *   偏差≈0 而位置在涨 → 电机轴确实在转（打滑/跳齿） */
+#define LEESN_REG_SPEED_16    0x0019  /* 实时速度 (INT16 rpm, RO)
+                                       * 手册注明语义随固件版本变化：≤SV112 为实时速度，
+                                       * ≥SV118 为"实际给定电流"。且仅 16 位，按 INT32 读
+                                       * 会把 0x001A(电流) 拼进高 16 位得到垃圾值。
+                                       * 【勿用】读实时速度请用 LEESN_REG_SPEED_ACT(0x00D6)。 */
 #define LEESN_REG_CURRENT     0x001A  /* 实时电流 (UINT16 mA, RO) */
 #define LEESN_REG_SUBDIV      0x0024  /* 细分（每转脉冲数）(UINT32, RW，出厂默认 4000) */
+#define LEESN_REG_LAG_MAX     0x0046  /* 滞后脉冲数最大值 (UINT16 pulses, RO) */
+#define LEESN_REG_LEAD_MAX    0x0047  /* 超前脉冲数最大值 (UINT16 pulses, RO) */
 #define LEESN_REG_DEVICE_ADDR 0x0066  /* 驱动器基地址 (UINT16, RW，默认 1，多台逐台设置并 0x00DC 保存) */
 #define LEESN_REG_ADDR_SOURCE 0x0067  /* 驱动器地址源 (UINT16, RW，默认 0) */
 #define LEESN_REG_LIMIT       0x006D  /* 限位失效/有效 (UINT16, RW，出厂 0) */
@@ -61,6 +73,10 @@ typedef struct ModbusFrame ModbusFrame;
 #define LEESN_REG_JOG         0x00CA  /* 电机点动 (UINT16, WO: bit15方向/14~6速度/5停止方式/0启停) */
 #define LEESN_REG_SET_POS     0x00D2  /* 设置当前电机位置 (INT32 pulses, WO) */
 #define LEESN_REG_ENABLE      0x00D4  /* 脱机/使能/驱动重启 (UINT16, WO，命令值见下) */
+#define LEESN_REG_SPEED_ACT   0x00D6  /* 实时速度 (INT32, 0.01 rpm, RO)
+                                       * 这是手册明确的实时速度寄存器（DWORD，低字在前）。
+                                       * 与 0x0019 的区别：0x0019 为 INT16 且高版本固件语义变为
+                                       * 给定电流；0x00D6 恒为实时速度，单位 0.01rpm。 */
 #define LEESN_REG_VEL_RUN     0x00D8  /* 运行速度 (INT32, RW，0.01 rpm，默认 30000) */
 #define LEESN_REG_SAVE_CMD    0x00DC  /* 断电保存命令 (UINT16, WO：1=保存 0=恢复出厂) */
 #define LEESN_REG_REL_MOVE    0x00DE  /* 运行脉冲数 (INT32 pulses, WO，相对当前位置) */

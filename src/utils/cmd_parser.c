@@ -31,6 +31,8 @@ void cmd_print_help(void)
     printf("  unmask:N[,M,...]      恢复关节（可批量，例 unmask:2,3,4）\n");
     printf("  scan                  扫描总线电机\n");
     printf("  calib                 单关节手动调试\n");
+    printf("  diag [N]              回零诊断：细分/编码器线数/实际速度/位置偏差\n");
+    printf("                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n");
     printf("  help                  帮助\n");
     printf("  exit                  退出\n");
 }
@@ -208,6 +210,10 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_SCAN;
     } else if (strcmp(cmd, "calib") == 0) {
         out->type = CMD_CALIB;
+    } else if (strcmp(cmd, "diag") == 0) {
+        char *j = strtok_r(NULL, ":", &save);
+        out->type = CMD_DIAG;
+        out->joint = (j != NULL) ? atoi(j) : 0;   /* 0 = 全部关节 */
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {

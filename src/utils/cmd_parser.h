@@ -12,6 +12,7 @@
  *   status           查询所有关节状态
  *   scan             扫描总线电机
  *   calib            单关节手动调试
+ *   diag [N]         回零诊断：细分/编码器线数/实际速度/位置偏差（N 省略=全轴）
  *   help             命令帮助
  *   exit             退出
  */
@@ -32,6 +33,7 @@
 #define CMD_MASK     11
 #define CMD_UNMASK   12
 #define CMD_HOMEJ    13
+#define CMD_DIAG     14
 
 typedef struct {
     int      type;       /* CMD_* */
