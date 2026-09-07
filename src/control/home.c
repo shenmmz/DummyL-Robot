@@ -115,10 +115,20 @@ static void home_restore(Robot *robot, int joint)
 static int32_t s_stall_last_pos[7];
 static int     s_stall_last_ok[7];
 
+/* 【标定临时】各轴采样时刻与本次堵转启动时刻：
+ *   周期 = 本帧与上一帧的时间差 → 真实轮询间隔，随并行轴数变化（单轴 ~7-10ms、
+ *          整机 4~5 轴 30~50ms），是定窗口点数与死区的基准量；
+ *   T+   = 启动后经过时间 → 识别加速段与顶死时刻，用于标定起步屏蔽窗与窗口时长。
+ * 待 A3 窗口化改造时并入环形缓冲（每点同时记 pos/cur/时刻），届时移除本组变量。 */
+static uint32_t s_last_tick_ms[7];
+static uint32_t s_stall_t0_ms[7];
+
 static void home_stall_start(Robot *robot, int joint)
 {
     StallHome *p = &stall[joint];
     s_stall_last_ok[joint] = 0;   /* 新一次堵转，清位置缓存 */
+    s_last_tick_ms[joint]  = 0;   /* 清周期基准（首帧周期显示 0） */
+    s_stall_t0_ms[joint]   = GetTickCount();   /* 【标定】起步时刻 */
     /* 关超差报警：顶死改由 home_check_stall 电流+停涨判定，不再报警锁存 */
     if (motor_disable_pos_err_alarm(robot, joint) != ERR_NONE) {
         LOG_WARN("关节%d 关闭超差报警失败，顶死仍会报警锁存", joint);
@@ -151,6 +161,13 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     int cur, cur_ok, pos_ok = 0, stopped;
     int32_t pos = 0, delta = 0;
     int threshold = stall[joint].stall_current;
+    uint32_t now_ms, period_ms = 0, elaps_ms = 0;
+
+    /* 【标定】周期 = 与上一帧间隔（随并行轴数变化）；T+ = 启动后经过时间 */
+    now_ms = GetTickCount();
+    if (s_last_tick_ms[joint] != 0) period_ms = now_ms - s_last_tick_ms[joint];
+    s_last_tick_ms[joint] = now_ms;
+    if (s_stall_t0_ms[joint] != 0)  elaps_ms  = now_ms - s_stall_t0_ms[joint];
 
     if (motor_read_status(robot, joint, &st) != ERR_NONE) return 0;
     cur_ok = 1;
@@ -160,12 +177,14 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
 
     /* 兜底1：驱动器报警（关报警未生效或其它报警） */
     if (st & LEESN_STAT_ALARM) {
-        LOG_INFO("关节%d 驱动器报警(bit21)，判定堵转到位", joint);
+        LOG_INFO("关节%d T+%ums 周期=%ums [兜底1-bit21] 驱动器报警，判定堵转到位",
+                 joint, elaps_ms, period_ms);
         return 1;
     }
     /* 兜底2：位置超差（阈值寄存器写 0 未生效时仍会触发） */
     if (st & LEESN_STAT_OVERRUN) {
-        LOG_INFO("关节%d 位置超差(bit10)，判定堵转到位", joint);
+        LOG_INFO("关节%d T+%ums 周期=%ums [兜底2-bit10] 位置超差，判定堵转到位",
+                 joint, elaps_ms, period_ms);
         return 1;
     }
 
@@ -180,8 +199,9 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
 
     /* 主判据A：电流顶高 + 位置停涨，双条件确认顶死（驱动器持续顶着型） */
     if (threshold > 0 && cur > threshold && stopped) {
-        LOG_INFO("关节%d 电流超阈值(%dmA>%dmA)且位置停涨(Δ=%d)，判定堵转到位",
-                 joint, cur, threshold, pos_ok ? (int)delta : -99999);
+        LOG_INFO("关节%d T+%ums 周期=%ums [A型] 电流超阈值(%dmA>%dmA)且位置停涨(Δ=%d)，判定堵转到位",
+                 joint, elaps_ms, period_ms, cur, threshold,
+                 pos_ok ? (int)delta : -99999);
         return 1;
     }
 
@@ -190,8 +210,9 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
      * 位置停涨+RUN_ACTIVE 已排除运动帧读失败误判 */
     if (cur < STALL_CUTOFF_MA && stopped &&
         (st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) {
-        LOG_INFO("关节%d 运行中电流归零/读失败(%smA<%dmA)且位置停涨，判定堵转到位(输出被切断)",
-                 joint, cur_ok ? "0" : "ERR", STALL_CUTOFF_MA);
+        LOG_INFO("关节%d T+%ums 周期=%ums [B型] 电流归零/读失败(%smA<%dmA)且位置停涨(Δ=%d)，判定到位(输出被切断)",
+                 joint, elaps_ms, period_ms, cur_ok ? "0" : "ERR",
+                 STALL_CUTOFF_MA, pos_ok ? (int)delta : -99999);
         return 1;
     }
 
@@ -201,8 +222,11 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
         s_stall_last_ok[joint] = 1;
     }
 
-    LOG_INFO("关节%d 状态=0x%08X 电流=%dmA 位置=%d (阈值=%dmA)",
-             joint, (unsigned)st, cur_ok ? cur : -1, pos_ok ? (int)pos : -99999, threshold);
+    LOG_INFO("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 位置=%d 帧差=%d (阈值=%dmA)",
+             joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
+             pos_ok ? (int)pos : -99999,
+             (pos_ok && s_stall_last_ok[joint]) ? (int)delta : -99999,
+             threshold);
     return 0;
 }
 
@@ -752,11 +776,18 @@ ErrCode robot_home(Robot *robot)
             }
         }
 
-        /* 每轮六轴电流统一快照（- = 未启动/已完成/读取失败） */
+        /* 每轮六轴电流统一快照（- = 未启动/已完成/读取失败）
+         * 【标定】附带在跑轴数：轮询周期随该数变化（1 轴 ~7-10ms / 5 轴 30~50ms），
+         * 日志里能直接把"周期变化"与"轴数减少"对上，便于标定窗口点数与死区 */
         {
             char snap[160];
             size_t off = 0;
-            off += (size_t)snprintf(snap + off, sizeof(snap) - off, "实时电流");
+            int nrun = 0;
+            for (j = 1; j <= 6; j++) {
+                if (active[j] && !sdone[j] && !sfail[j]) nrun++;
+            }
+            off += (size_t)snprintf(snap + off, sizeof(snap) - off,
+                                    "实时电流[在跑%d轴]", nrun);
             for (j = 1; j <= 6; j++) {
                 if (cur_now[j] < 0)
                     off += (size_t)snprintf(snap + off, sizeof(snap) - off, " %d=-", j);
