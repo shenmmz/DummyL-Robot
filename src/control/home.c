@@ -349,9 +349,30 @@ static void home_stall_done(Robot *robot, int joint)
      * 注：0x00D2 为【无记忆】RAM 寄存器，零点不跨断电保持，上电须重新回零。
      * 禁止在此追加 motor_save_params(0x00DC=1)——既存不住零点，又会把回零期
      * 临时关闭的报警/限位固化进 flash，理由见 motor_reg.h 声明处。 */
-    clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
-    Sleep(30);
-    pos = motor_read_position(robot, joint, &pos_ok);
+    /* 清零诊断：实测 1/3/4/5 号轴 clear_pos 后 0x0004 并非 0（-27289 / -32055 /
+     * +7937 / +42796），而 2/6 号轴正常（45 / 1）。为区分"0x00D2 未生效"与
+     * "清零后被外力/位置环拖走"，记录清零前位置 + 清零后多帧采样：
+     *   清后首帧 ≈ 清前值  → 0x00D2 完全未生效（语义或执行条件问题）
+     *   清后首帧 ≈ 0、后续帧递增 → 清零成功，之后位置被拖走
+     *   清后首帧 = 无关值  → 写入动作本身引起的跳变 */
+    {
+        int ok0 = 0, okk = 0, k;
+        int32_t p0 = motor_read_position(robot, joint, &ok0);
+
+        clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
+        Sleep(30);
+        pos = motor_read_position(robot, joint, &pos_ok);
+        LOG_INFO("关节%d 清零诊断: 清前=%d 清后=%d (写0x00D2%s)",
+                 joint, ok0 ? (int)p0 : -99999, pos_ok ? (int)pos : -99999,
+                 clear_ok ? "成功" : "失败");
+        for (k = 1; k <= 2; k++) {
+            int32_t pk;
+            Sleep(60);
+            pk = motor_read_position(robot, joint, &okk);
+            LOG_INFO("关节%d 清零诊断: +%dms 位置=%d", joint, 30 + k * 60,
+                     okk ? (int)pk : -99999);
+        }
+    }
     if (!clear_ok) {
         LOG_ERROR("关节%d 堵转清零失败，后续退让 move_abs 将基于旧零点，位置会错", joint);
     } else {
@@ -727,6 +748,10 @@ static ErrCode home_joint6(Robot *robot)
  * "指令发出却未运动 / 半途停住"的位置差，可区分真到位与假到位。 */
 #define HOME_INPOS_TOL_STEPS   100
 
+/* 清零后位置可接受偏差（脉冲）：正常清零后 0x0004 应≈0（2/6 号轴实测 45/1）。
+ * 超过此值说明 0x00D2 零点未生效，需告警暴露（约 0.36°@减速比50）。 */
+#define HOME_ZERO_TOL_STEPS    500
+
 /* home_inpos_query：校验 movej 真到位 = 无报警+退出运行+位置在目标±容差，
  * 防"指令发出但没转/半途停住"误判。返回 1=到位 / 0=未到位 / -1=报警超差 / -2=读失败 */
 static int home_inpos_query(Robot *robot, int joint, int32_t target_steps)
@@ -766,25 +791,40 @@ static void home_goto_pose(Robot *robot)
         if (robot_is_masked(robot, j)) continue;
         if (p->forward_deg == 0.0) continue;
 
-        /* 发指令前快照状态/位置并暴露异常，防电机没动却被轮询误判为到位 */
-        tgt[j] = DEG2STEPS(p->forward_deg, reductions[j - 1]);
+        /* 发指令前快照状态/位置并暴露异常，防电机没动却被轮询误判为到位。
+         * 【相对位移】实测清零后 0x0004 常非 0（0x00D2 未必生效），若仍按
+         * "绝对目标=DEG2STEPS(forward_deg)" 发令，实际行程会被起点偏移吃掉，
+         * 甚至反向：关节4 曾因起点 +6.8° 大于目标 +5° 而倒走 1.8° 撞回硬限位。
+         * 故改为以【清零后实际位置】为基准发相对位移，保证行程恒为 forward_deg。 */
         {
             uint32_t st;
-            int32_t pos;
-            int pos_ok, st_ok;
+            int32_t pos = 0;
+            int32_t delta = DEG2STEPS(p->forward_deg, reductions[j - 1]);
+            int pos_ok = 0, st_ok;
+
             st_ok = (motor_read_status(robot, j, &st) == ERR_NONE);
             pos = motor_read_position(robot, j, &pos_ok);
             if (st_ok && pos_ok) {
-                LOG_INFO("关节%d movej 前: 状态=0x%08X 报警=%d 位置=%d 目标=%d 差=%d",
+                tgt[j] = pos + delta;
+                if (pos > HOME_ZERO_TOL_STEPS || pos < -(int32_t)HOME_ZERO_TOL_STEPS) {
+                    LOG_WARN("关节%d 清零后位置非0(%d步≈%.2f°)：0x00D2 零点可能未生效，"
+                             "本次已改用相对位移保证行程，但后续绝对定位仍带此偏置",
+                             j, (int)pos,
+                             (double)pos * 360.0 /
+                             ((double)reductions[j - 1] * (double)ENCODER_STEPS_PER_REV));
+                }
+                LOG_INFO("关节%d movej 前: 状态=0x%08X 报警=%d 位置=%d 行程=%d 绝对目标=%d",
                          j, (unsigned)st, motor_read_alarm(robot, j), (int)pos,
-                         (int)tgt[j], (int)(tgt[j] - pos));
+                         (int)delta, (int)tgt[j]);
             } else {
-                LOG_WARN("关节%d movej 前: 状态读%s 位置读%s，无法确认就绪",
-                         j, st_ok ? "OK" : "失败", pos_ok ? "OK" : "失败");
+                tgt[j] = delta;   /* 读不到位置：退回绝对目标（保持原行为） */
+                LOG_WARN("关节%d movej 前: 状态读%s 位置读%s，退回绝对目标 %d",
+                         j, st_ok ? "OK" : "失败", pos_ok ? "OK" : "失败", (int)delta);
             }
         }
-        LOG_INFO("关节%d movej 到 %.1f°", j, p->forward_deg);
-        if (robot_movej(robot, j, p->forward_deg, (double)p->speed_rpm) != ERR_NONE) {
+        LOG_INFO("关节%d 相对移动 %.1f°（绝对目标 %d）", j, p->forward_deg, (int)tgt[j]);
+        if (motor_set_speed(robot, j, p->speed_rpm) != ERR_NONE ||
+            motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
             LOG_WARN("关节%d 发 movej 失败", j);
             continue;
         }
