@@ -294,6 +294,32 @@ ErrCode motor_read_status(Robot *robot, int joint, uint32_t *status)
     return ERR_NONE;
 }
 
+/* motor_read_pos_status：一次事务同时取回位置与状态
+ * 读 0x0004 起 4 个寄存器：0x0004~0x0005=位置(INT32)、0x0006~0x0007=状态(UINT32)。
+ * 【提速】二者地址连续，原为两次独立事务，合并后每轮采样事务数 3→2，
+ * 轮询周期按比例下降（堵转判定快慢直接取决于每轮事务数）。
+ * 【正确性】位置与状态同源同帧，消除顶死瞬间"位置已停/状态仍在运行"的错位，
+ * 原两次读取的时刻差会让 A/B 型判据自相矛盾。
+ * 字节序：低 16 位寄存器在前、字内高字节在前。 */
+ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *status)
+{
+    uint8_t frame[16];
+    ModbusFrame resp;
+    uint16_t p_lo, p_hi, s_lo, s_hi;
+    size_t len = modbus_build_read(joint_slave(joint), LEESN_REG_POS, 4, frame);
+    ErrCode rc = robot_request(robot, frame, len, &resp);
+
+    if (rc != ERR_NONE) return rc;
+    if (resp.data_len < 8) return ERR_LEN;
+    p_lo = ((uint16_t)resp.data[0] << 8) | (uint16_t)resp.data[1];
+    p_hi = ((uint16_t)resp.data[2] << 8) | (uint16_t)resp.data[3];
+    s_lo = ((uint16_t)resp.data[4] << 8) | (uint16_t)resp.data[5];
+    s_hi = ((uint16_t)resp.data[6] << 8) | (uint16_t)resp.data[7];
+    *pos    = (int32_t)(((uint32_t)p_hi << 16) | (uint32_t)p_lo);
+    *status = ((uint32_t)s_hi << 16) | (uint32_t)s_lo;
+    return ERR_NONE;
+}
+
 /* ================= 运动控制 ================= */
 
 /* motor_move_abs：绝对位置运动
@@ -340,6 +366,16 @@ int32_t motor_read_subdivision(Robot *robot, int joint)
     if (motor_read_i32(robot, joint, LEESN_REG_SUBDIV, &val) != ERR_NONE)
         return -1;
     return val;
+}
+
+/* motor_write_subdivision：写细分（每转脉冲数）
+ * 写 0x0024~0x0025（UINT32 pulses/rev，出厂默认 4000）。
+ * 用途：程序启动时按从站 ID 把驱动器细分对齐到 ENCODER_STEPS_PER_REV，
+ * 保证 DEG2STEPS/STEPS2DEG 角度换算与实际机械一致。
+ * 注：RAM 生效、断电丢失（0x0024 记忆与否见手册），需固化另调 motor_save_params。 */
+ErrCode motor_write_subdivision(Robot *robot, int joint, int32_t per_rev)
+{
+    return motor_write_i32(robot, joint, LEESN_REG_SUBDIV, per_rev);
 }
 
 /* motor_read_pos_err：读取实际位置偏差值（命令位置 − 编码器位置）

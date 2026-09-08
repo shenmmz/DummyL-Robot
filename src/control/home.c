@@ -25,38 +25,36 @@ typedef struct {
     int    stall_current; /* 堵转判定电流 mA，0=仅靠状态字判定 */
     double forward_deg;   /* 堵转后移动角度（绝对角度），0=不移动 */
     int    stall_mode;    /* 判据模式，见 STALL_MODE_* */
-    int    over_frames;   /* 纯电流模式：滞后计数命中阈值（帧），0=用默认 */
 } StallHome;
 
 /* 判据模式：
  * DUAL     —— 电流超阈值【且】位置停涨（原双确认判据）。
  *             适用于能真正顶死、编码器随之停转的轴。
- * CURONLY  —— 纯电流：超阈值经滞后计数确认即命中，不看位置。
+ * CURONLY  —— 纯电流：超阈值单帧即命中（到位即停），不看位置。
  *             适用于传动打滑/跳齿的轴：此时输出轴已被机械卡住、电机轴仍在转，
  *             编码器位置恒按满速累加，"位置停涨"永不成立，纯属无效条件。 */
 #define STALL_MODE_DUAL     0
 #define STALL_MODE_CURONLY  1
 
-/* 纯电流模式默认命中计数（帧）。单轴轮询实测 250ms/帧 → 3 帧 ≈ 750ms。 */
-#define STALL_OVER_FRAMES_DEFAULT   3
-
 /* 纯电流模式起步屏蔽：加速段之外再屏蔽的时长（ms），躲启动浪涌电流。
  * 总屏蔽 = accel_ms + 本值（关节2: 300+500 = 800ms）。 */
 #define STALL_SHIELD_EXTRA_MS      500
 
-/* 滞后计数上限：防止长时间缓慢累加越过阈值，也让计数在振荡下收敛更快 */
-#define STALL_OVER_CNT_MAX           8
+/* 纯电流(CURONLY)轴二次顶靠确认参数：首次超阈不直接判到位，
+ * 先反向退让 back_deg、再以 speed_rpm/2 半速重新顶靠，二次超阈才算到位。
+ * 高速直顶冲击大且到位瞬间易打滑/回弹导致回零漂移，慢速复顶更稳、到位更准。 */
+#define STALL_RETRY_BACK_DEG           5.0    /* 反向退让角度(°) */
+#define STALL_RETRY_BACK_TIMEOUT_MS    5000   /* 退让到位等待上限(ms) */
 
 /* 堵转电流阈值 (mA) 为实机标定真值。
- * 关节2 = 550 的取值依据（home:2 实测）：匀速 456mA、堵转区间 612~1349mA，
- * 取中留出双向裕量；原 480 距匀速仅 24mA(5%)，姿态/负载一变就会误判。 */
+ * 关节2 = 550 的取值依据（home:2 实测）：匀速 456mA（波动上限 505）、堵转区间 612~1349mA，
+ * 取中留出双向裕量；单帧即停要求阈值显著高于正常波动，原 480 距匀速仅 24mA(5%)必误判。 */
 static StallHome stall[6] = {
-    [1] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = +1, .stall_current = 480, .forward_deg = -90.0 },
-    [2] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 550, .forward_deg = +50.0,
-            .stall_mode = STALL_MODE_CURONLY, .over_frames = 3 },  /* 传动跳齿轴：位置不停涨，改纯电流判据 */
-    [3] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = +1, .stall_current = 480, .forward_deg = -50.0 },
-    [4] = { .speed_rpm = 60,   .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 400, .forward_deg = +5.0 },
-    [5] = { .speed_rpm = 100,  .accel_ms = 300, .decel_ms = 400, .dir = -1, .stall_current = 360, .forward_deg = +50.0 },
+    [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0 },
+    [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0,.stall_mode = STALL_MODE_CURONLY },  /* 传动跳齿轴：位置不停涨，纯电流超阈即停 */    
+    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0 },
+    [4] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 400, .forward_deg = +5.0 },
+    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 360, .forward_deg = +50.0 },
 };
 
 /* 关节6 传感器回零参数 */
@@ -139,12 +137,6 @@ static void home_restore(Robot *robot, int joint)
 static int32_t s_stall_last_pos[7];
 static int     s_stall_last_ok[7];
 
-/* 纯电流模式滞后计数：本帧超阈值 +1、未超 -1（下限 0），累计达标即命中。
- * 用"滞后计数"而非"连续 N 帧"的原因：跳齿时电流周期性跌落（实测 612~1349mA 振荡），
- * 连续计数会被单帧跌落清零而永远命中不了 —— 与位置停涨判据是同一类失效。
- * 正常匀速电流恒定低于阈值，计数恒为 0；偶发尖峰 +1 后即 -1，够不到阈值。 */
-static int     s_over_cnt[7];
-
 /* 【标定临时】各轴采样时刻与本次堵转启动时刻：
  *   周期 = 本帧与上一帧的时间差 → 真实轮询间隔，随并行轴数变化（单轴 ~7-10ms、
  *          整机 4~5 轴 30~50ms），是定窗口点数与死区的基准量；
@@ -153,11 +145,15 @@ static int     s_over_cnt[7];
 static uint32_t s_last_tick_ms[7];
 static uint32_t s_stall_t0_ms[7];
 
+/* CURONLY 轴二次顶靠确认标记：1=已执行过"反向退让+半速重启"，再次超阈即判到位。
+ * 仅纯电流模式使用；每次 home_stall_start 复位 */
+static int s_stall_retried[7];
+
 static void home_stall_start(Robot *robot, int joint)
 {
     StallHome *p = &stall[joint];
+    s_stall_retried[joint] = 0;   /* 新一次堵转，清除半速重试标记 */
     s_stall_last_ok[joint] = 0;   /* 新一次堵转，清位置缓存 */
-    s_over_cnt[joint]      = 0;   /* 清纯电流滞后计数（新一次堵转从 0 起算） */
     s_last_tick_ms[joint]  = 0;   /* 清周期基准（首帧周期显示 0） */
     s_stall_t0_ms[joint]   = GetTickCount();   /* 【标定】起步时刻 */
     /* 关超差报警：顶死改由 home_check_stall 电流+停涨判定，不再报警锁存 */
@@ -177,21 +173,20 @@ static void home_stall_start(Robot *robot, int joint)
     motor_set_speed(robot, joint, p->speed_rpm);
     Sleep(20);
     motor_run(robot, joint, p->dir);
-    LOG_INFO("关节%d 堵转启动 (方向=%+d, %drpm, 加速%dms/减速%dms, 阈值=%dmA, 判据=%s, 需%d帧, 屏蔽%dms)",
+    LOG_INFO("关节%d 堵转启动 (方向=%+d, %drpm, 加速%dms/减速%dms, 阈值=%dmA, 判据=%s, 屏蔽%dms)",
              joint, p->dir, p->speed_rpm, p->accel_ms, p->decel_ms, p->stall_current,
              (p->stall_mode == STALL_MODE_CURONLY) ? "纯电流" : "电流+位置停涨",
-             (p->stall_mode == STALL_MODE_CURONLY)
-                 ? ((p->over_frames > 0) ? p->over_frames : STALL_OVER_FRAMES_DEFAULT) : 1,
              (p->stall_mode == STALL_MODE_CURONLY)
                  ? (int)(p->accel_ms + STALL_SHIELD_EXTRA_MS) : 0);
 }
 
-/* home_check_stall：判堵转到位。返回 1=命中 / 0=运行中。
+/* home_check_stall：判堵转到位。返回 1=命中 / 2=CURONLY 首次超阈需退让半速二次确认 / 0=运行中。
  * 前置：已关 0x000B/C 报警、放宽 0x0010。判据分级兜底：
  * ①报警 bit21 ②超差 bit10 ③电流+位置停涨确认：A 超阈值&停涨（顶着型）/
  * B 电流归零或读失败&停涨&RUN_ACTIVE（固件切断型）；位置停涨排除运动帧误判。
- * ③' 若该轴 stall_mode = STALL_MODE_CURONLY，则跳过 A/B，改走纯电流滞后计数
- *     （传动打滑/跳齿轴：位置永不停涨，故判据不含位置项）。
+ * ③' 若该轴 stall_mode = STALL_MODE_CURONLY，则跳过 A/B，改走纯电流超阈即停
+ *     （传动打滑/跳齿轴：位置永不停涨，故判据不含位置项）；首次超阈返回 2 触发
+ *     退让+半速复顶，二次超阈返回 1。
  * 出参 cur_out：读到电流后立即写回本帧 mA(-1=读失败)，供主循环电流快照 */
 static int home_check_stall(Robot *robot, int joint, int *cur_out)
 {
@@ -207,7 +202,13 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     s_last_tick_ms[joint] = now_ms;
     if (s_stall_t0_ms[joint] != 0)  elaps_ms  = now_ms - s_stall_t0_ms[joint];
 
-    if (motor_read_status(robot, joint, &st) != ERR_NONE) return 0;
+    /* 位置+状态合并读（0x0004 起 4 寄存器，1 事务拿全）：
+     * 原为 status、position 两次独立事务，合并后每轮采样事务数 3→2，轮询周期按比例下降；
+     * 且二者同源同帧，消除顶死瞬间"位置已停 / 状态仍在运行"的采样错位。 */
+    pos_ok = 0;
+    if (motor_read_pos_status(robot, joint, &pos, &st) != ERR_NONE) return 0;
+    pos_ok = 1;
+
     cur_ok = 1;
     cur = motor_read_current(robot, joint);
     if (cur < 0 || cur > 3000) { cur_ok = 0; cur = 0; }
@@ -226,10 +227,10 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
         return 1;
     }
 
-    /* 读位置帧判停涨：顶死即挡停、先于电流变化出现，与电流判据组合排除偶发读失败误判 */
-    pos = motor_read_position(robot, joint, &pos_ok);
+    /* 帧判停涨：顶死即挡停、先于电流变化出现，与电流判据组合排除偶发读失败误判
+     * （位置已在上方随状态一帧读出，此处不再单独发事务） */
     stopped = 0;
-    if (pos_ok && s_stall_last_ok[joint]) {
+    if (s_stall_last_ok[joint]) {
         delta = pos - s_stall_last_pos[joint];
         stopped = (delta >= -STALL_POS_STOP_DELTA) &&
                   (delta <=  STALL_POS_STOP_DELTA);
@@ -238,25 +239,22 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     /* 纯电流判据（STALL_MODE_CURONLY）：跳齿/打滑轴专用。
      * 此类轴输出轴已被机械卡住、电机轴仍在转，编码器位置恒按满速累加，
      * "位置停涨"永不成立，是完全无效的条件，故本模式彻底不看位置。
-     * 起步屏蔽窗（加速段+STALL_SHIELD_EXTRA_MS）内不计数，躲启动浪涌；
-     * 电流读失败时计数保持不变（不增不减），避免通信抖动造成漏判。
-     * 命中后直接返回，不再走 A/B 型。 */
+     * 起步屏蔽窗（加速段+STALL_SHIELD_EXTRA_MS）内不判定，躲启动浪涌；
+     * 顶死电流冲高极快（实机首帧即达 1000+mA），单帧超阈即命中、不累计等待。
+     * 二次确认：首次超阈返回 2（由上层反向退让+半速重新顶靠），
+     * 半速复顶再次超阈才返回 1（判定到位），规避高速直顶的冲击/打滑漂移；
+     * 电流读失败帧不判定，不会误判到位。命中后不再走 A/B 型。 */
     if (stall[joint].stall_mode == STALL_MODE_CURONLY) {
-        int need = (stall[joint].over_frames > 0) ? stall[joint].over_frames
-                                                  : STALL_OVER_FRAMES_DEFAULT;
         uint32_t shield_ms = (uint32_t)stall[joint].accel_ms + STALL_SHIELD_EXTRA_MS;
 
-        if (threshold > 0 && cur_ok && elaps_ms >= shield_ms) {
-            if (cur > threshold) {
-                if (s_over_cnt[joint] < STALL_OVER_CNT_MAX) s_over_cnt[joint]++;
-            } else if (s_over_cnt[joint] > 0) {
-                s_over_cnt[joint]--;
+        if (threshold > 0 && cur_ok && elaps_ms >= shield_ms && cur > threshold) {
+            if (!s_stall_retried[joint]) {
+                LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 电流超阈值(%dmA>%dmA)，反向退让半速二次确认",
+                         joint, elaps_ms, period_ms, cur, threshold);
+                return 2;
             }
-        }
-        if (s_over_cnt[joint] >= need) {
-            LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 电流超阈值累计%d帧(需%d帧, 阈值%dmA, 本帧%dmA)，判定堵转到位",
-                     joint, elaps_ms, period_ms, s_over_cnt[joint], need,
-                     threshold, cur);
+            LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 半速复顶电流仍超阈值(%dmA>%dmA)，判定堵转到位",
+                     joint, elaps_ms, period_ms, cur, threshold);
             return 1;
         }
         /* 未命中：位置在本模式仅作观测（诊断用），不参与判定 */
@@ -264,9 +262,8 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
             s_stall_last_pos[joint] = pos;
             s_stall_last_ok[joint] = 1;
         }
-        LOG_INFO("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 计数=%d/%d 位置=%d 帧差=%d (阈值=%dmA)",
+        LOG_INFO("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 位置=%d 帧差=%d (阈值=%dmA)",
                  joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
-                 s_over_cnt[joint], need,
                  pos_ok ? (int)pos : -99999,
                  (pos_ok && s_stall_last_ok[joint]) ? (int)delta : -99999,
                  threshold);
@@ -387,12 +384,85 @@ static int home_wait_inpos(Robot *robot, int joint, int timeout_ms)
     return 0;
 }
 
+/* home_stall_retry：CURONLY 轴首次超阈后的二次顶靠确认。
+ * ① 压短减速退出连续运行（顶死中 move_abs 会被忽略，必须先 stop_slow）
+ * ② 读当前位置，反向退让 STALL_RETRY_BACK_DEG（未清零坐标系下 move_abs 绝对定位）
+ * ③ 以 speed_rpm/2 半速重新朝限位方向连续运行，等二次超阈由 check_stall 判到位。
+ * 半速启动有加速浪涌，须重置 s_stall_t0_ms/s_last_tick_ms 让起步屏蔽窗重新生效。
+ * 返回 1=已进入半速复顶；0=执行异常（无法退让，直接半速原地复顶或保持状态）。 */
+static int home_stall_retry(Robot *robot, int joint)
+{
+    const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+    StallHome *p = &stall[joint];
+    int pos_ok = 0;
+    int32_t pos, target;
+    int half_rpm = p->speed_rpm / 2;
+    int moved = 0;
+
+    /* ① 退出连续运行：压短减速再停，防按原减速持续压紧报警 */
+    if (motor_set_profile(robot, joint, p->accel_ms, 50) != ERR_NONE) {
+        LOG_WARN("关节%d 半速重试前压短减速失败，仍按原减速停止", joint);
+    }
+    if (motor_stop_slow(robot, joint) != ERR_NONE) {
+        LOG_WARN("关节%d 半速重试前减速停止失败，退让 move_abs 可能被忽略", joint);
+    }
+    Sleep(150);
+    if (motor_set_profile(robot, joint, p->accel_ms, p->decel_ms) != ERR_NONE) {
+        LOG_WARN("关节%d 半速重试恢复减速时间失败", joint);
+    }
+
+    /* ② 反向退让：目标 = 当前脉冲 - dir*DEG2STEPS(STALL_RETRY_BACK_DEG)；读不到位置则跳过退让直接半速复顶 */
+    pos = motor_read_position(robot, joint, &pos_ok);
+    if (pos_ok) {
+        target = pos - p->dir * DEG2STEPS(STALL_RETRY_BACK_DEG, reductions[joint - 1]);
+        if (motor_set_speed(robot, joint, p->speed_rpm) == ERR_NONE &&
+            motor_move_abs(robot, joint, target) == ERR_NONE) {
+            LOG_INFO("关节%d 首次超阈：反向退让 %.1f°（位置 %d -> %d）",
+                     joint, STALL_RETRY_BACK_DEG, (int)pos, (int)target);
+            moved = 1;
+        } else {
+            LOG_WARN("关节%d 反向退让指令失败，跳过退让直接半速复顶", joint);
+        }
+    } else {
+        LOG_WARN("关节%d 退让前读位置失败，跳过退让直接半速复顶", joint);
+    }
+    if (moved) {
+        int rc = home_wait_inpos(robot, joint, STALL_RETRY_BACK_TIMEOUT_MS);
+        if (rc != 1) {
+            LOG_WARN("关节%d 反向退让 %.1f° 未到位(rc=%d)，仍按半速复顶继续",
+                     joint, STALL_RETRY_BACK_DEG, rc);
+        }
+    }
+
+    /* ③ 半速重启连续运行（Bug1：速度源 0x009A 与 0x00D8 双写，否则按记忆速度跑） */
+    if (motor_set_speed16(robot, joint, half_rpm) != ERR_NONE) {
+        LOG_WARN("关节%d 写半速速度源0x009A失败，仍按驱动器记忆速度运行", joint);
+    }
+    motor_set_speed(robot, joint, half_rpm);
+    Sleep(20);
+    if (motor_run(robot, joint, p->dir) != ERR_NONE) {
+        LOG_WARN("关节%d 半速重启连续运行失败", joint);
+    }
+    s_stall_retried[joint] = 1;
+    /* 重启后加速浪涌需重新屏蔽：重置起步时刻与帧基准、清位置缓存 */
+    s_stall_t0_ms[joint]   = GetTickCount();
+    s_last_tick_ms[joint]  = 0;
+    s_stall_last_ok[joint] = 0;
+    LOG_INFO("关节%d 已以半速(%drpm)重新顶靠，等待二次确认", joint, half_rpm);
+    return 1;
+}
+
 /* home_wait_stall：轮询等堵转命中（home_check_stall）。返回 1=命中 / 0=超时 */
 static int home_wait_stall(Robot *robot, int joint, int timeout_ms)
 {
     uint32_t start_ms = GetTickCount();
     while ((GetTickCount() - start_ms) < (uint32_t)timeout_ms) {
-        if (home_check_stall(robot, joint, NULL)) return 1;
+        int rc = home_check_stall(robot, joint, NULL);
+        if (rc == 1) return 1;
+        if (rc == 2) {              /* CURONLY 首次超阈：退让后半速复顶后继续轮询 */
+            home_stall_retry(robot, joint);
+            continue;
+        }
         Sleep(HOME_STALL_POLL_MS);
     }
     return 0;
@@ -835,9 +905,15 @@ ErrCode robot_home(Robot *robot)
 
         /* 堵转组轮询（4 号由 3 号到位事件加入 active） */
         for (j = 1; j <= 5; j++) {
+            int rc;
             if (!active[j] || sdone[j] || sfail[j]) continue;
             all_done = 0;
-            if (!home_check_stall(robot, j, &cur_now[j])) continue;
+            rc = home_check_stall(robot, j, &cur_now[j]);
+            if (rc == 2) {           /* CURONLY 首次超阈：退让后半速复顶后继续轮询 */
+                home_stall_retry(robot, j);
+                continue;
+            }
+            if (rc == 0) continue;
             home_stall_done(robot, j);
             sdone[j] = 1;
             LOG_INFO("关节%d 堵转回零完成", j);

@@ -89,4 +89,8 @@ target_link_libraries(control PUBLIC
 
 # ---------- 应用: CLI 主程序 ----------
 add_executable(dummyrobot src/main.c)
+# winmm：timeBeginPeriod/timeEndPeriod（抬高系统定时器精度，压低堵转轮询周期）
 target_link_libraries(dummyrobot PRIVATE control utils)
+if(WIN32)
+    target_link_libraries(dummyrobot PRIVATE winmm)
+endif()

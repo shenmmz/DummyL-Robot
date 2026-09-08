@@ -61,6 +61,56 @@ ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *o
     return rc;
 }
 
+/* robot_apply_subdivision：按从站 ID 逐轴写入细分，使驱动器 0x0024
+ * 对齐 ENCODER_STEPS_PER_REV（RAM 生效断电丢失，每次上电写入）。
+ * 逐轴写+读回校验；屏蔽/离线轴跳过，失败不阻断启动。 */
+void robot_apply_subdivision(Robot *robot)
+{
+    int i, ok_cnt = 0, fail_cnt = 0;
+
+    if (robot == NULL) {
+        return;
+    }
+    for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
+        int joint = i + 1;
+        int32_t rb;
+
+        if (robot->masked[i]) {
+            LOG_INFO("关节%d 已屏蔽，跳过细分写入", joint);
+            continue;
+        }
+        if (!robot->online[i]) {
+            LOG_WARN("关节%d 离线，跳过细分写入", joint);
+            continue;
+        }
+        if (motor_write_subdivision(robot, joint, ENCODER_STEPS_PER_REV) != ERR_NONE) {
+            LOG_WARN("关节%d 写细分 %d 失败，角度换算将失真", joint,
+                     (int)ENCODER_STEPS_PER_REV);
+            fail_cnt++;
+            continue;
+        }
+        rb = motor_read_subdivision(robot, joint);
+        if (rb == ENCODER_STEPS_PER_REV) {
+            LOG_INFO("关节%d 细分已对齐：%d 脉冲/转", joint, (int)rb);
+            ok_cnt++;
+        } else if (rb < 0) {
+            LOG_WARN("关节%d 写细分成功但读回失败，实际值未知", joint);
+            fail_cnt++;
+        } else {
+            LOG_ERROR("关节%d 细分写入后读回 %d，与配置 %d 不符", joint,
+                      (int)rb, (int)ENCODER_STEPS_PER_REV);
+            fail_cnt++;
+        }
+    }
+    if (fail_cnt > 0) {
+        LOG_WARN("细分对齐完成：成功 %d 轴，失败 %d 轴（角度换算可能失真）",
+                 ok_cnt, fail_cnt);
+    } else {
+        LOG_INFO("细分对齐完成：%d 轴均 = %d 脉冲/转", ok_cnt,
+                 (int)ENCODER_STEPS_PER_REV);
+    }
+}
+
 /* robot_init：初始化机器人，注入的 CommOps 打开总线，失败返回 NULL */
 Robot *robot_init(const char *port_name, uint32_t baudrate)
 {
@@ -118,6 +168,11 @@ Robot *robot_init(const char *port_name, uint32_t baudrate)
             }
         }
     }
+
+    /* 按从站 ID 把细分对齐到 ENCODER_STEPS_PER_REV（RAM 生效、断电丢失，
+     * 每次启动必须写；失败不阻断启动，后续角度换算可能失真） */
+    robot_apply_subdivision(r);
+
     return r;
 }
 

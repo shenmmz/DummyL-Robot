@@ -31,6 +31,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <mmsystem.h>   /* timeBeginPeriod/timeEndPeriod：抬高系统定时器精度 */
 #endif
 
 #define INI_PATH "config/robot_config.ini"
@@ -313,6 +314,28 @@ static int cmd_diag(Robot *robot, int joint_only)
         }
     }
     if (samples > 1) {
+        int k;
+        int32_t tp;
+        uint32_t ts, t0, dt_pos = 0, dt_cur = 0;
+
+        /* 总线测速：堵转轮询周期 ≈ 每轮事务数 × 单事务耗时。
+         * 事务数是可控项（位置+状态合并后已由 3→2），这里量化单事务耗时下限。 */
+        t0 = GetTickCount();
+        for (k = 0; k < 20; k++) (void)motor_read_pos_status(robot, lo, &tp, &ts);
+        dt_pos = GetTickCount() - t0;
+        t0 = GetTickCount();
+        for (k = 0; k < 20; k++) (void)motor_read_current(robot, lo);
+        dt_cur = GetTickCount() - t0;
+
+        printf("\n  总线测速（关节%d，各 20 次）：\n", lo);
+        printf("    位置+状态合并读  %u ms / 20 次 = %.1f ms/次\n",
+               (unsigned)dt_pos, (double)dt_pos / 20.0);
+        printf("    电流读            %u ms / 20 次 = %.1f ms/次\n",
+               (unsigned)dt_cur, (double)dt_cur / 20.0);
+        printf("    堵转轮询周期 ≈ %.1f ms（2 事务/轮）\n",
+               (double)dt_pos / 20.0 + (double)dt_cur / 20.0);
+    }
+    if (samples > 1) {
         printf("\n  判定提示：\n");
         printf("    实际速度≈设定速度 且 电流高、Δ位置≈额定步数 → 电机轴仍在转 = 打滑/跳齿（机械问题）\n");
         printf("    实际速度≈0、Δ位置≈0 且 Δ偏差持续累积        → 命令走电机不转 = 真堵转（判据侧可解）\n");
@@ -333,6 +356,10 @@ int main(int argc, char **argv)
 
 #ifdef _WIN32
     SetConsoleOutputCP(65001); /* 控制台 UTF-8，保证中文正常显示 */
+    /* 抬高系统定时器精度到 1ms：Windows 默认 15.6ms，Sleep(n) 中 n<16 一律睡满约 15.6ms。
+     * 堵转轮询每轮含多次 Sleep(2)（Modbus 帧间隔）与 Sleep(1)（轮询节拍），
+     * 默认精度下每轮白耗数十 ms，直接抬高轮询周期、拖慢堵转判定。 */
+    timeBeginPeriod(1);
 #endif
 
     log_set_level(LOG_LEVEL_INFO);
@@ -537,6 +564,9 @@ int main(int argc, char **argv)
         mon = NULL;
     }
     robot_close(robot);
+#ifdef _WIN32
+    timeEndPeriod(1);   /* 与 main 开头的 timeBeginPeriod(1) 配对 */
+#endif
     printf("已退出。\n");
     return 0;
 }

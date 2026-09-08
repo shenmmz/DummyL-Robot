@@ -63,6 +63,10 @@ int robot_read_speed_rpm(Robot *robot, int joint);
 /* 读取关节报警代码（0x00A3），失败返回 -1 */
 int robot_read_alarm(Robot *robot, int joint);
 
+/* 按从站 ID 逐轴写入细分，对齐驱动器 0x0024 与 ENCODER_STEPS_PER_REV；
+ * robot_init 内部自动调用，屏蔽/离线轴跳过，失败不阻断启动。 */
+void robot_apply_subdivision(Robot *robot);
+
 /* 屏蔽/恢复关节（1=屏蔽）：屏蔽后所有操作自动跳过该关节，不发指令、不轮询。
  * 返回 ErrCode：ERR_NONE / ERR_ARG */
 ErrCode robot_mask(Robot *robot, int joint);

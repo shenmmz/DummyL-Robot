@@ -87,7 +87,10 @@ SerialPort *serial_open(const char *port_name, uint32_t baudrate)
 
     /* 读写超时 */
     memset(&timeouts, 0, sizeof(timeouts));
-    timeouts.ReadIntervalTimeout = 10;
+    /* ReadIntervalTimeout：帧内相邻字节最大间隔，超过即认为一帧结束并让 ReadFile 返回。
+     * 115200 下字节间隔约 0.087ms，USB-RS485 以 1ms 粒度上送，取 5ms 已足够宽松；
+     * 原值 10ms 会让每次读取在收完响应后白白多等，直接叠加到堵转轮询周期上。 */
+    timeouts.ReadIntervalTimeout = 5;
     timeouts.ReadTotalTimeoutMultiplier = 1;
     timeouts.ReadTotalTimeoutConstant = 100;
     timeouts.WriteTotalTimeoutMultiplier = 1;

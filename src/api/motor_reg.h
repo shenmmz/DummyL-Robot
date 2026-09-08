@@ -111,6 +111,10 @@ int32_t motor_read_position(Robot *robot, int joint, int *ok);
  * 软限位、原点、使能电平(bit16)、报警(bit21) 等全部标志（位定义见 robot_internal.h） */
 ErrCode motor_read_status(Robot *robot, int joint, uint32_t *status);
 
+/* 一次事务同时读位置(0x0004~5)与状态(0x0006~7)：每轮采样事务数 3→2，
+ * 并消除两者分帧读取的时刻差。失败返回非 ERR_NONE */
+ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *status);
+
 /* ================= 运动控制 ================= */
 
 /* 绝对位置运动（0x00E8~0x00E9，INT32 脉冲）
@@ -129,6 +133,12 @@ int32_t motor_read_speed_raw(Robot *robot, int joint);
 
 /* 读细分/每转脉冲数（0x0024~0x0025，UINT32，出厂 4000），失败返回 -1 */
 int32_t motor_read_subdivision(Robot *robot, int joint);
+
+/* 写细分/每转脉冲数（0x0024~0x0025，UINT32）
+ * 驱动器收到后位置/运动命令的脉冲口径立即按新值换算（RAM 生效）。
+ * 注意：0x0024 改动默认不落 flash，断电丢失，须每次上电后写入；
+ * 需固化时再调 motor_save_params（有副作用，见该函数声明）。 */
+ErrCode motor_write_subdivision(Robot *robot, int joint, int32_t per_rev);
 
 /* 读实际位置偏差值（0x0011，命令位置−编码器位置，pulses），失败返回 -1 */
 int motor_read_pos_err(Robot *robot, int joint);
