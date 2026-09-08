@@ -31,4 +31,9 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
  * 返回 ErrCode：ERR_NONE 成功 / ERR_ARG / ERR_MASKED（目标轴被屏蔽）/ ERR_TIMEOUT */
 ErrCode robot_home_single(Robot *robot, int joint);
 
+/* 力矩碰撞回原点诊断（torque:N:L）：关节 joint 以等级 level(0~255) 启动碰撞回原点，
+ * 每 200ms 打印状态字/电流/位置，检测到 bit15(HOMED) 或退出 RUN_ACTIVE 即停并收尾。
+ * 仅观察、不清零/转角，用于标定力矩等级与确认到位判据。返回 ErrCode。 */
+ErrCode robot_torque_probe(Robot *robot, int joint, int level);
+
 #endif /* HOME_H */

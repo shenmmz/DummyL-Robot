@@ -155,4 +155,12 @@ ErrCode motor_clear_alarm(Robot *robot, int joint);
 /* 读驱动器地址（0x0066），用于检测电机是否在线，失败返回 -1 */
 int motor_read_device_addr(Robot *robot, int joint);
 
+/* 设定力矩模式 + 等级（0x009E，手册第49节）。mode:1碰撞回原点/2抓取/3恒力矩运行/4恒力矩保持；
+ * level:0~255 力矩等级。仅设定，不启动；清模式传 mode=0。返回 ERR_NONE 成功。 */
+ErrCode motor_set_torque_mode(Robot *robot, int joint, int mode, int level);
+
+/* 执行力矩模式（0x00CB）：dir>0正向/<0反向；offset 偏移脉冲数；run 0停止/1运行。
+ * 先 motor_set_torque_mode 设模式等级，再本函数启停。返回 ERR_NONE 成功。 */
+ErrCode motor_torque_run(Robot *robot, int joint, int dir, int offset, int run);
+
 #endif /* MOTOR_REG_H */

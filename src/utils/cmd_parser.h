@@ -34,6 +34,7 @@
 #define CMD_UNMASK   12
 #define CMD_HOMEJ    13
 #define CMD_DIAG     14
+#define CMD_TORQUE   15   /* 力矩碰撞回原点诊断：torque:N:L 在关节 N 上以等级 L 试撞 */
 
 typedef struct {
     int      type;       /* CMD_* */
@@ -42,6 +43,7 @@ typedef struct {
     int      joint_count;/* 批量个数；0 = 未使用批量 */
     double   angle_deg;  /* movej 目标角度（度） */
     double   speed_rpm;  /* movej 可选速度（rpm），0 表示使用默认 */
+    int      torque_level; /* torque:N:L 中的力矩等级 L（0~255） */
     char     raw[128];   /* 原始输入 */
 } ParsedCmd;
 

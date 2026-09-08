@@ -33,6 +33,8 @@ void cmd_print_help(void)
     printf("  calib                 单关节手动调试\n");
     printf("  diag [N]              回零诊断：细分/编码器线数/实际速度/位置偏差\n");
     printf("                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n");
+    printf("  torque:N:L            力矩碰撞回原点诊断：关节 N 以等级 L(0~255) 试撞，\n");
+    printf("                         每 200ms 打印 状态字/电流/位置，用于观察到位信号\n");
     printf("  help                  帮助\n");
     printf("  exit                  退出\n");
 }
@@ -214,6 +216,27 @@ int cmd_parse(const char *line, ParsedCmd *out)
         char *j = strtok_r(NULL, ":", &save);
         out->type = CMD_DIAG;
         out->joint = (j != NULL) ? atoi(j) : 0;   /* 0 = 全部关节 */
+    } else if (strcmp(cmd, "torque") == 0) {
+        char *j = strtok_r(NULL, ":", &save);
+        char *l = strtok_r(NULL, ":", &save);
+        int joint, level;
+        if (j == NULL || l == NULL) {
+            LOG_WARN("用法: torque:关节号:等级  例 torque:4:120 在4轴以等级120试撞");
+            return CMD_UNKNOWN;
+        }
+        joint = atoi(j);
+        level = atoi(l);
+        if (joint < 1 || joint > 6) {
+            LOG_WARN("关节号须在 1..6 之间");
+            return CMD_UNKNOWN;
+        }
+        if (level < 0 || level > 255) {
+            LOG_WARN("力矩等级须在 0..255 之间");
+            return CMD_UNKNOWN;
+        }
+        out->type = CMD_TORQUE;
+        out->joint = joint;
+        out->torque_level = level;
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {

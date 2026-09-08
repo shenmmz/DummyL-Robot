@@ -430,3 +430,39 @@ int motor_read_device_addr(Robot *robot, int joint)
         return -1;
     return (int)val;
 }
+
+/* ================= 力矩模式（手册第 49 节，仅闭环） ================= */
+
+/* motor_set_torque_mode：设定力矩模式 + 等级，不启动运动
+ * 写 0x009E（UINT16，记忆）。
+ * mode   - 模式位：1=碰撞回原点 / 2=抓取物体 / 3=恒力矩运行 / 4=恒力矩保持
+ * level  - 力矩等级 0~255（0 最小，255 最大）。手册：值过小会导致电机不动或
+ *         达不到目标速度，需根据结构阻力整定。
+ * 返回：ERR_NONE 成功，level 越界返回 ERR_ARG。
+ * 注意：仅设定，须再调 motor_torque_run 才执行；清力矩模式写 motor_set_torque_mode(..,0)。 */
+ErrCode motor_set_torque_mode(Robot *robot, int joint, int mode, int level)
+{
+    uint16_t val;
+    if (level < 0 || level > 255) return ERR_ARG;
+    if (mode < 0 || mode > 15)    return ERR_ARG;
+    val = (uint16_t)(((mode & 0x0F) << 8) | (level & 0xFF));
+    return motor_write_u16(robot, joint, LEESN_REG_TORQUE_CFG, val);
+}
+
+/* motor_torque_run：执行力矩模式（含方向/偏移脉冲/启停）
+ * 写 0x00CB（UINT16，记忆）。
+ * dir    - >0 正向 / <0 反向（恒力矩保持模式忽略）
+ * offset - 偏移脉冲数（碰撞回原点=碰撞后偏移量作原点；抓取=松开夹子脉冲；恒力矩保持=最大纠偏脉冲）
+ * run    - 0 停止 / 1 运行
+ * 返回：ERR_NONE 成功。
+ * 时序：先 motor_set_torque_mode 设模式与等级，再本函数启停。碰撞回原点用
+ * run=1 后电机以系统速度顶向限位，力矩到顶自动停（完成信号机制见 home.c 判定）。 */
+ErrCode motor_torque_run(Robot *robot, int joint, int dir, int offset, int run)
+{
+    uint16_t val;
+    int d = (dir < 0) ? 1 : 0;
+    if (offset < 0 || offset > 0x3FFF) return ERR_ARG;
+    if (run != 0 && run != 1)         return ERR_ARG;
+    val = (uint16_t)(((d & 0x1) << 15) | ((offset & 0x3FFF) << 1) | (run & 0x1));
+    return motor_write_u16(robot, joint, LEESN_REG_TORQUE_EXEC, val);
+}

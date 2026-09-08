@@ -25,6 +25,8 @@ typedef struct {
     int    stall_current; /* 堵转判定电流 mA，0=仅靠状态字判定 */
     double forward_deg;   /* 堵转后移动角度（绝对角度），0=不移动 */
     int    stall_mode;    /* 判据模式，见 STALL_MODE_* */
+    int    torque_level;  /* 碰撞回原点力矩等级 0~255（0=不启用，沿用纯电流堵转顶限位；
+                              >0=改用 0x009E 力矩模式顶限位，到等级即停，更柔和可控） */
 } StallHome;
 
 /* 判据模式：
@@ -33,6 +35,12 @@ typedef struct {
  * CUR_ONCE —— 纯电流 + 单次即停：屏蔽窗后超阈单帧直接判到位（返回 1），
  *           不做退让、不做半速复顶。用于行程短、无需复顶确认的轴（关节4）。 */
 #define STALL_MODE_CUR_ONCE 2
+
+/* 力矩模式位（写 0x009E BIT15~8）：手册第 49 节 */
+#define TORQUE_MODE_HOME  1        /* 碰撞回原点 */
+#define TORQUE_MODE_GRAB  2        /* 抓取物体 */
+#define TORQUE_MODE_HOLD_RUN 3     /* 恒力矩运行 */
+#define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
 
 /* 纯电流模式起步屏蔽：加速段之外再屏蔽的时长（ms），躲启动浪涌电流。
  * 总屏蔽 = accel_ms + 本值（关节2: 300+500 = 800ms）。 */
@@ -176,6 +184,25 @@ static void home_stall_start(Robot *robot, int joint)
         LOG_WARN("关节%d 放宽位置偏差预警失败，顶死仍会提前切断输出", joint);
     }
     motor_set_profile(robot, joint, p->accel_ms, p->decel_ms);
+    if (p->torque_level > 0) {
+        /* 碰撞回原点力矩模式（手册第49节）：以设定等级恒力矩顶限位，到等级即停，
+         * 比纯电流连续运行顶限位更柔和可控。撞到位后由 home_check_stall 读状态字
+         * 判 bit15(HOMED) / 退出 RUN_ACTIVE 确认，再走 home_stall_done。 */
+        if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, p->torque_level) != ERR_NONE) {
+            LOG_WARN("关节%d 设碰撞回原点力矩等级%d失败，退回连续运行顶限位", joint, p->torque_level);
+            goto fallback_run;
+        }
+        Sleep(20);
+        if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
+            LOG_WARN("关节%d 启动碰撞回原点力矩模式失败，退回连续运行顶限位", joint);
+            goto fallback_run;
+        }
+        LOG_INFO("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA 兜底, 判据=%s, 屏蔽%ums)",
+                 joint, p->dir, p->torque_level, p->stall_current,
+                 home_stall_mode_name(p->stall_mode), home_stall_shield_ms(p));
+        return;
+    }
+fallback_run:
     /* Bug1：连续运行(0x00C8)速度源是 0x009A，与 0x00D8 不同源，须双写否则按记忆速度运行 */
     if (motor_set_speed16(robot, joint, p->speed_rpm) != ERR_NONE) {
         LOG_WARN("关节%d 写连续运行速度源0x009A失败，仍按驱动器记忆速度运行", joint);
@@ -236,6 +263,23 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
      * （位置已在上方随状态一帧读出，此处不再单独发事务） */
     if (s_stall_last_ok[joint]) delta = pos - s_stall_last_pos[joint];
 
+    /* 力矩模式（碰撞回原点）到位判据：驱动器以设定等级恒力矩顶限位，到等级即停，
+     * 状态字 bit15(HOMED) 置位、或退出 RUN_ACTIVE 即视为撞到位。
+     * 起步屏蔽窗内不判，躲启动段；之后任一信号即判到位（不再退让复顶）。
+     * 电流超阈仍作兜底（下方统一分支），防止状态字信号不灵。 */
+    if (stall[joint].torque_level > 0 && elaps_ms >= shield_ms) {
+        if (st & LEESN_STAT_HOMED) {
+            LOG_INFO("关节%d T+%ums 周期=%ums [力矩-碰撞] 状态字bit15 HOMED 置位，判定到位",
+                     joint, elaps_ms, period_ms);
+            return 1;
+        }
+        if ((st & LEESN_STAT_RUN_MASK) != LEESN_STAT_RUN_ACTIVE) {
+            LOG_INFO("关节%d T+%ums 周期=%ums [力矩-碰撞] 退出 RUN_ACTIVE，判定到位",
+                     joint, elaps_ms, period_ms);
+            return 1;
+        }
+    }
+
     /* 主判据：电流超阈（全部轴统一，不看位置）。
      * 起步屏蔽窗（加速段+STALL_SHIELD_EXTRA_MS）内不判定，躲启动浪涌。
      * 二选一：
@@ -281,6 +325,14 @@ static void home_stall_done(Robot *robot, int joint)
     int32_t pos;
     int clear_ok;
     int alarm;
+
+    /* 力矩模式收尾：先停力矩执行、再清力矩模式(写0x009E=0)。
+     * 0x009E/0x00CB 为记忆寄存器，不清会残留力矩模式、干扰后续位置模式运动，
+     * 故撞到位后必须显式退出。 */
+    if (stall[joint].torque_level > 0) {
+        motor_torque_run(robot, joint, 0, 0, 0);     /* 停止力矩执行 */
+        motor_set_torque_mode(robot, joint, 0, 0);   /* 清除力矩模式 */
+    }
     StallHome *p = &stall[joint];
 
     /* 退出连续运行：否则绝对定位(0x00E8)不执行；压短减速再停，防按原减速持续压紧报警 */
@@ -499,6 +551,84 @@ static void home_stall_forward(Robot *robot, int joint)
     } else if (rc < 0) {
         LOG_WARN("关节%d 退让 %.1f° 报警/异常", joint, p->forward_deg);
     }
+}
+
+/* robot_torque_probe：碰撞回原点力矩模式诊断（torque:N:L）。
+ * 在关节 joint 上以力矩等级 level 启动碰撞回原点，每 200ms 打印状态字/电流/位置，
+ * 直到检测到 bit15(HOMED) 或退出 RUN_ACTIVE（即手册所述"撞到位"），或超时 15s。
+ * 全程只读与打印，不执行清零/转角，撞到位后停止力矩模式并退出，便于人工观察信号。
+ * 用途：标定力矩等级与确认到位判据前，先实机采集一帧"到位瞬间"的寄存器值。 */
+ErrCode robot_torque_probe(Robot *robot, int joint, int level)
+{
+    uint32_t st;
+    int cur, cur_ok, pos_ok;
+    int32_t pos;
+    uint32_t start_ms, now_ms;
+    int seen_homed = 0, seen_stop = 0;
+    StallHome *p = &stall[joint];
+
+    if (robot == NULL) return ERR_ARG;
+    if (joint < 1 || joint > 6) return ERR_ARG;
+    if (level < 0 || level > 255) return ERR_ARG;
+
+    LOG_INFO("=== 力矩碰撞回原点诊断：关节%d 等级=%d 方向=%+d ===", joint, level, p->dir);
+
+    if (home_arm(robot, joint) != ERR_NONE) {
+        LOG_WARN("关节%d arm 失败", joint);
+        return ERR_PORT;
+    }
+    /* 诊断期间放宽偏差预警，避免顶死被 bit10 提前切断（同 home_stall_start） */
+    motor_set_pos_err_prewarn(robot, joint, STALL_PREWARN_STEPS);
+    motor_disable_pos_err_alarm(robot, joint);
+    if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, level) != ERR_NONE) {
+        LOG_WARN("关节%d 设力矩模式失败", joint);
+        home_restore(robot, joint);
+        return ERR_PORT;
+    }
+    Sleep(20);
+    if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
+        LOG_WARN("关节%d 启动力矩碰撞失败", joint);
+        motor_set_torque_mode(robot, joint, 0, 0);
+        home_restore(robot, joint);
+        return ERR_PORT;
+    }
+
+    start_ms = GetTickCount();
+    LOG_INFO("T+ms 状态字 电流mA 位置 备注");
+    while ((now_ms = GetTickCount()) - start_ms < 15000) {
+        uint32_t elaps = now_ms - start_ms;
+        cur = motor_read_current(robot, joint);
+        cur_ok = (cur >= 0 && cur <= 3000);
+        pos_ok = (motor_read_pos_status(robot, joint, &pos, &st) == ERR_NONE);
+        if (!pos_ok) {
+            LOG_INFO("%ums ? ? ? [读失败]", elaps);
+            Sleep(200); continue;
+        }
+        {
+            const char *tag = "";
+            if (st & LEESN_STAT_ALARM)        tag = " [报警]";
+            else if (st & LEESN_STAT_OVERRUN) tag = " [超差]";
+            else if (st & LEESN_STAT_HOMED)  { tag = " [HOMED]"; seen_homed = 1; }
+            else if ((st & LEESN_STAT_RUN_MASK) != LEESN_STAT_RUN_ACTIVE) { tag = " [退出RUN]"; seen_stop = 1; }
+            LOG_INFO("%ums 0x%08X %dmA %d%s%s", elaps, (unsigned)st,
+                     cur_ok ? cur : -1, (int)pos, tag,
+                     (st & LEESN_STAT_RUN_ACTIVE) ? " RUN" : "");
+            if (seen_homed || seen_stop) {
+                LOG_INFO("关节%d 检测到到位信号（%s），停止力矩并退出诊断",
+                         joint, seen_homed ? "bit15 HOMED" : "退出 RUN_ACTIVE");
+                break;
+            }
+        }
+        Sleep(200);
+    }
+
+    /* 收尾：停力矩执行并清力矩模式，避免记忆态卡在力矩模式 */
+    motor_torque_run(robot, joint, 0, 0, 0);
+    motor_set_torque_mode(robot, joint, 0, 0);
+    home_restore(robot, joint);
+    LOG_INFO("=== 力矩碰撞诊断结束：关节%d 等级=%d（HOMED=%d 退出RUN=%d）===",
+             joint, level, seen_homed, seen_stop);
+    return ERR_NONE;
 }
 
 /* ====================== 关节6：传感器回零 ====================== */
@@ -885,11 +1015,13 @@ ErrCode robot_home(Robot *robot)
         if (robot_is_masked(robot, j)) {
             LOG_INFO("  关节%d: 已屏蔽", j);
         } else {
-            LOG_INFO("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f° 判据=%s",
+            LOG_INFO("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f° 判据=%s 力矩=%d%s",
                      j, stall[j].speed_rpm, stall[j].accel_ms, stall[j].decel_ms,
                      stall[j].dir, stall[j].stall_current,
                      stall[j].forward_deg,
-                     home_stall_mode_name(stall[j].stall_mode));
+                     home_stall_mode_name(stall[j].stall_mode),
+                     stall[j].torque_level,
+                     stall[j].torque_level > 0 ? "(碰撞回原点)" : "(纯电流顶限位)");
         }
     }
     if (!robot_is_masked(robot, 6)) {

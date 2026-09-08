@@ -81,6 +81,13 @@ typedef struct ModbusFrame ModbusFrame;
 #define LEESN_REG_SAVE_CMD    0x00DC  /* 断电保存命令 (UINT16, WO：1=保存 0=恢复出厂) */
 #define LEESN_REG_REL_MOVE    0x00DE  /* 运行脉冲数 (INT32 pulses, WO，相对当前位置) */
 #define LEESN_REG_ABS_MOVE    0x00E8  /* 运行到绝对位置 (INT32 pulses, WO，运行/停止都可执行) */
+#define LEESN_REG_TORQUE_CFG  0x009E  /* 力矩模式设定 (UINT16, RW，记忆)
+                                       * BIT15~8：模式(1碰撞回原点/2抓取/3恒力矩运行/4恒力矩保持)
+                                       * BIT7~0：力矩等级 0~255（0 最小，255 最大） */
+#define LEESN_REG_TORQUE_EXEC 0x00CB  /* 力矩模式执行 (UINT16, WO，记忆)
+                                       * BIT15：方向(0正/1反，恒力矩保持无意义)
+                                       * BIT14~1：偏移脉冲数(碰撞回原点=碰撞后偏移量作原点)
+                                       * BIT0：0停止/1运行 */
 
 /* 状态寄存器 0x0006 位定义（UINT32） */
 #define LEESN_STAT_INPUT(n)   (1u << (n))   /* bit0~7：X0~X7 输入口状态，1=有输入 */

@@ -540,6 +540,14 @@ int main(int argc, char **argv)
         case CMD_DIAG:
             cmd_diag(robot, cmd.joint);
             break;
+        case CMD_TORQUE: {
+            monitor_stop(mon);
+            ErrCode rc = robot_torque_probe(robot, cmd.joint, cmd.torque_level);
+            if (rc != ERR_NONE) LOG_ERROR("力矩碰撞诊断失败：%s", err_str(rc));
+            if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
+                LOG_WARN("诊断后监控线程重启失败");
+            break;
+        }
         case CMD_CALIB:
             LOG_INFO("单关节调试功能未启用");
             break;
