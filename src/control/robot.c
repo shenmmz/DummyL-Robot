@@ -91,7 +91,6 @@ void robot_apply_subdivision(Robot *robot)
         }
         rb = motor_read_subdivision(robot, joint);
         if (rb == ENCODER_STEPS_PER_REV) {
-            LOG_INFO("关节%d 细分已对齐：%d 脉冲/转", joint, (int)rb);
             ok_cnt++;
         } else if (rb < 0) {
             LOG_WARN("关节%d 写细分成功但读回失败，实际值未知", joint);
@@ -105,9 +104,6 @@ void robot_apply_subdivision(Robot *robot)
     if (fail_cnt > 0) {
         LOG_WARN("细分对齐完成：成功 %d 轴，失败 %d 轴（角度换算可能失真）",
                  ok_cnt, fail_cnt);
-    } else {
-        LOG_INFO("细分对齐完成：%d 轴均 = %d 脉冲/转", ok_cnt,
-                 (int)ENCODER_STEPS_PER_REV);
     }
 }
 

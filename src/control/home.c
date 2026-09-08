@@ -45,7 +45,9 @@ typedef struct {
  * 力矩模式把接触力封顶（撞限位时电流≈该等级保持电流），但本机固件不报 HOMED/退出RUN，
  * 故"撞到位"只能靠 stall_current 电流超阈判定。阈值须低于该等级保持电流、高于推靠巡航电流。
  * 下方 torque_level=120 为未标定试探值，须用 torque:N:L 逐轴标定并同步下调 stall_current。 */
-static StallHome stall[6] = {
+/* stall[7]：索引 0 不用，1~5 对应关节 1~5（关节 6 为传感器回零，不在此表） */
+static StallHome stall[7] = {
+    [0] = { 0 },   /* 占位，未使用 */
     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0, .torque_level = 120 },
     [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0, .torque_level = 120 },
     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0, .torque_level = 120 },
@@ -67,6 +69,11 @@ static int    home_timeout_ms  = 60000;//设置回零超时时间
 /* 堵转轮询采样周期 ms：顶死电流爬升极快，周期越短越早命中；
  * 实际节拍由读事务耗时(~7~10ms/轮)主导，已贴近 RS485 物理下限，再小无收益 */
 #define HOME_STALL_POLL_MS  1
+
+/* 起步屏蔽窗 ms：躲过启动瞬间浪涌电流误判。
+ * 说明：即使电机初始位置就在堵转位置，屏蔽窗结束后电流仍超阈，仍能正确判到位，
+ * 只是延迟很短时间，不影响零点正确性。 */
+#define HOME_STALL_MASK_MS   20
 
 /* 传感器输入位（状态寄存器 0x0006 的 bit0=IN0, bit1=IN1） */
 #define SENSOR_IN0  0x0001u
@@ -116,7 +123,8 @@ static void home_restore(Robot *robot, int joint)
     }
 }
 
-/* home_stall_start：启动堵转回零 —— 关超差报警 → 设加速度 → 设速度 → 按方向运行 */
+/* home_stall_start：启动堵转回零 —— 关超差报警 → 设加速度 → 设速度 → 按方向运行
+ * 返回 ERR_NONE 成功，失败返回对应错误码 */
 
 /* 回零期间把偏差预警 0x0010 放宽到 10000 步（不能写 0；默认 20 步会让顶死瞬间
  * bit10 抢先切断输出，电流判据来不及命中）；放宽后仍约 2s 预警兜底切断输出 */
@@ -134,12 +142,20 @@ static int     s_stall_last_ok[7];
 static uint32_t s_last_tick_ms[7];
 static uint32_t s_stall_t0_ms[7];
 
-static void home_stall_start(Robot *robot, int joint)
+/* 起步屏蔽窗截止时刻（ms）：T < mask_end 时不判堵转，躲过加速浪涌 */
+static uint32_t s_stall_mask_end_ms[7];
+
+static ErrCode home_stall_start(Robot *robot, int joint)
 {
     StallHome *p = &stall[joint];
+
     s_stall_last_ok[joint] = 0;   /* 新一次堵转，清位置缓存 */
     s_last_tick_ms[joint]  = 0;   /* 清周期基准（首帧周期显示 0） */
     s_stall_t0_ms[joint]   = GetTickCount();   /* 【标定】起步时刻 */
+
+    /* 起步屏蔽窗 = HOME_STALL_MASK_MS，躲过启动瞬间浪涌 */
+    s_stall_mask_end_ms[joint] = s_stall_t0_ms[joint] + HOME_STALL_MASK_MS;
+
     /* 关超差报警：顶死改由 home_check_stall 电流超阈判定，不再报警锁存 */
     if (motor_disable_pos_err_alarm(robot, joint) != ERR_NONE) {
         LOG_WARN("关节%d 关闭超差报警失败，顶死仍会报警锁存", joint);
@@ -156,25 +172,26 @@ static void home_stall_start(Robot *robot, int joint)
      * 纯电流连续运行回零模式已移除，torque_level 必须 >0，否则无法回零。 */
     if (p->torque_level <= 0) {
         LOG_ERROR("关节%d torque_level=%d 未配置，纯电流回零已移除，无法回零", joint, p->torque_level);
-        return;
+        return ERR_ARG;
     }
     if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, p->torque_level) != ERR_NONE) {
         LOG_ERROR("关节%d 设碰撞回原点力矩等级%d失败，回零中止", joint, p->torque_level);
-        return;
+        return ERR_PORT;
     }
     Sleep(20);
     if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
         LOG_ERROR("关节%d 启动碰撞回原点力矩模式失败，回零中止", joint);
-        return;
+        return ERR_PORT;
     }
-    LOG_INFO("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA 兜底)",
-             joint, p->dir, p->torque_level, p->stall_current);
+    LOG_INFO("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA, 起步屏蔽%dms)",
+             joint, p->dir, p->torque_level, p->stall_current, HOME_STALL_MASK_MS);
+    return ERR_NONE;
 }
 
 /* home_check_stall：判堵转到位。返回 1=命中（堵转/到位） / 0=运行中。
  * 前置：已关 0x000B/C 报警、放宽 0x0010。判据：
  *   ① 兜底：驱动器报警(bit21) 或 位置超差(bit10) → 判到位；
- *   ② 主判据：电流超阈(>stall_current) → 单帧即判到位（不再退让/半速复顶）。
+ *   ② 主判据：电流超阈(>stall_current) → 单帧即判到位（起步屏蔽窗内不判）。
  *      回零统一走碰撞回原点力矩模式（手册第49节），但本机固件在力矩模式下
  *      不报 HOMED/退出RUN，故电流超阈才是唯一可靠触发（阈值须低于该等级保持电流）。
  * 出参 cur_out：读到电流后立即写回本帧 mA(-1=读失败)，供主循环电流快照 */
@@ -203,17 +220,32 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     if (motor_read_pos_status(robot, joint, &pos, &st) != ERR_NONE) return 0;
     pos_ok = 1;
 
-    /* 兜底1：驱动器报警（关报警未生效或其它报警） */
+    /* 兜底1：驱动器报警（关报警未生效或其它报警） —— 屏蔽窗内也生效，
+     * 因为启动瞬间真报警需要立即响应，不能被屏蔽窗挡住 */
     if (st & LEESN_STAT_ALARM) {
         LOG_INFO("关节%d T+%ums 周期=%ums [兜底1-bit21] 驱动器报警，判定堵转到位",
                  joint, elaps_ms, period_ms);
         return 1;
     }
-    /* 兜底2：位置超差（阈值寄存器写 0 未生效时仍会触发） */
+    /* 兜底2：位置超差（阈值寄存器写 0 未生效时仍会触发） —— 屏蔽窗内也生效 */
     if (st & LEESN_STAT_OVERRUN) {
         LOG_INFO("关节%d T+%ums 周期=%ums [兜底2-bit10] 位置超差，判定堵转到位",
                  joint, elaps_ms, period_ms);
         return 1;
+    }
+
+    /* 起步屏蔽窗内：主判据不生效，只记录基线，防加速浪涌误判
+     * （兜底报警/超差仍生效，因为那是真故障） */
+    if (s_stall_t0_ms[joint] != 0 && now_ms < s_stall_mask_end_ms[joint]) {
+        if (pos_ok) {
+            s_stall_last_pos[joint] = pos;
+            s_stall_last_ok[joint] = 1;
+        }
+        LOG_INFO("关节%d T+%ums 周期=%ums [起步屏蔽] 状态=0x%08X 电流=%dmA 位置=%d (阈值=%dmA, 屏蔽剩%ums)",
+                 joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
+                 pos_ok ? (int)pos : -99999, threshold,
+                 (unsigned)(s_stall_mask_end_ms[joint] - now_ms));
+        return 0;
     }
 
     /* 帧差：仅作日志观测（判断电机是否还在转、是否在打滑），不再参与判定
@@ -221,7 +253,6 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     if (s_stall_last_ok[joint]) delta = pos - s_stall_last_pos[joint];
 
     /* 主判据：电流超阈（全部轴统一，不看位置），单帧即判到位。
-     * 起步不再屏蔽（加速浪涌电流按实测不超阈）。
      * 实测（home:1 力矩等级120）：推靠途中电流明显低于阈值（~180~440mA，随轴/负载），
      * 顶到限位瞬间飙到~1500mA（=该等级保持电流）且位置随即钉死。故本机固件在力矩模式下
      * 并不置 HOMED/退出RUN（上方力矩信号块在本机不生效），电流超阈才是力矩模式可靠的到位判据，
@@ -333,26 +364,58 @@ static void home_stall_done(Robot *robot, int joint)
     }
 }
 
-/* home_wait_inpos：等待运动到位，须"曾 RUN_ACTIVE 且现退出、无报警"，
- * 防未启动/报警停机误判。返回 1=到位 / 0=超时 / -1=报警异常 */
-static int home_wait_inpos(Robot *robot, int joint, int timeout_ms)
+/* 转角到位位置容差（脉冲）：闭环步进到位后实际位置应等于命令目标；
+ * 给 ±100 步抖动/量化余量（约 0.09°~0.18°，视减速比），远小于
+ * "指令发出却未运动 / 半途停住"的位置差，可区分真到位与假到位。 */
+#define HOME_INPOS_TOL_STEPS   100
+
+/* home_inpos_query：校验 movej 真到位 = 无报警+退出运行+位置在目标±容差，
+ * 防"指令发出但没转/半途停住"误判。返回 1=到位 / 0=未到位 / -1=报警超差 / -2=读失败 */
+static int home_inpos_query(Robot *robot, int joint, int32_t target_steps)
+{
+    uint32_t st;
+    int32_t pos;
+    int pos_ok;
+
+    if (motor_read_status(robot, joint, &st) != ERR_NONE) return -2;
+    if (st & (LEESN_STAT_ALARM | LEESN_STAT_OVERRUN)) return -1;
+    if ((st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) return 0;
+
+    pos = motor_read_position(robot, joint, &pos_ok);
+    if (!pos_ok) return -2;
+    if (pos >= target_steps - HOME_INPOS_TOL_STEPS &&
+        pos <= target_steps + HOME_INPOS_TOL_STEPS) {
+        return 1;
+    }
+    return 0;
+}
+
+/* home_wait_inpos：等待运动到位，使用严格判据（无报警+退出运行+位置在容差内），
+ * 防未启动/半途停机误判。返回 1=到位 / 0=超时 / -1=报警异常 */
+static int home_wait_inpos(Robot *robot, int joint, int32_t target_steps, int timeout_ms)
 {
     uint32_t start_ms = GetTickCount();
     int saw_active = 0;
 
     while ((GetTickCount() - start_ms) < (uint32_t)timeout_ms) {
-        uint32_t st;
-        if (motor_read_status(robot, joint, &st) != ERR_NONE) {
-            Sleep(200); continue;
-        }
-        if (st & LEESN_STAT_ALARM) return -1;
-        if ((st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) {
-            saw_active = 1;
-            Sleep(200);
+        int q = home_inpos_query(robot, joint, target_steps);
+        if (q == 1) {
+            if (saw_active) return 1;        /* 曾启动、现已到位 → 成功 */
+            /* 没见过 ACTIVE 但已到位：可能目标=当前位置，也可能没启动。
+             * 再等几帧确认不是初始状态巧合。 */
+            Sleep(20);
+            if (home_inpos_query(robot, joint, target_steps) == 1) return 1;
             continue;
         }
-        if (saw_active) return 1;   /* 曾启动、现已退出且无报警 → 到位 */
-        Sleep(200);                 /* 未见 ACTIVE：启动延迟，继续等待 */
+        if (q == -1) return -1;            /* 报警/超差 */
+        if (q == 0) {
+            uint32_t st;
+            if (motor_read_status(robot, joint, &st) == ERR_NONE &&
+                (st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) {
+                saw_active = 1;
+            }
+        }
+        Sleep(200);
     }
     return 0;
 }
@@ -372,7 +435,8 @@ static int home_wait_stall(Robot *robot, int joint, int timeout_ms)
 /* home_stall_forward：堵转清零后退让 forward_deg（仅非 0 轴），避免久顶硬限位。
  * 【相对位移】与整机路径 home_goto_pose 保持同一口径：实测清零后 0x0004 常非 0
  * （0x00D2 未必生效），按绝对目标发令会被起点偏移吃掉行程、甚至反向撞回限位，
- * 故以清零后实际位置为基准发相对位移，保证行程恒为 forward_deg。 */
+ * 故以清零后实际位置为基准发相对位移，保证行程恒为 forward_deg。
+ * 使用严格到位判据（home_inpos_query：状态 + 位置容差）。 */
 static void home_stall_forward(Robot *robot, int joint)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
@@ -403,11 +467,18 @@ static void home_stall_forward(Robot *robot, int joint)
         return;
     }
 
-    rc = home_wait_inpos(robot, joint, home_timeout_ms);
+    rc = home_wait_inpos(robot, joint, target, home_timeout_ms);
     if (rc == 0) {
-        LOG_WARN("关节%d 退让 %.1f° 超时", joint, p->forward_deg);
+        int pos2_ok = 0;
+        int32_t pos2 = motor_read_position(robot, joint, &pos2_ok);
+        LOG_WARN("关节%d 退让 %.1f° 超时（目标=%d 位置=%d 差=%d）",
+                 joint, p->forward_deg, (int)target,
+                 pos2_ok ? (int)pos2 : -99999,
+                 pos2_ok ? (int)(target - pos2) : -99999);
     } else if (rc < 0) {
         LOG_WARN("关节%d 退让 %.1f° 报警/异常", joint, p->forward_deg);
+    } else {
+        LOG_INFO("关节%d 退让到位（%.1f°）", joint, p->forward_deg);
     }
 }
 
@@ -512,7 +583,12 @@ typedef struct {
     int done;                /* 已过 on->off 沿，待清零 */
     int failed;              /* 失败/超时（已急停） */
     int last_cur;            /* 最近一帧读到的电流 mA（供主循环电流快照） */
+    int pos_fail_cnt;        /* 位置读失败连续计数，用于 SEN_FWD_LEAVE 保护 */
 } SensorCtx;
+
+/* 位置读失败连续阈值：SEN_FWD_LEAVE 阶段连续读不到位置时急停，
+ * 防止位置判据失效导致电机一直转出去 */
+#define SEN_POS_FAIL_MAX   10
 
 /* sensor6_set_rpm：双写 0x009A+0x00D8 速度源（Bug1：连续运行只认 0x009A，
  * 单写 0x00D8 会按驱动器记忆速度运行） */
@@ -537,6 +613,7 @@ static ErrCode sensor6_start(Robot *robot, SensorCtx *c)
     c->done = 0;
     c->failed = 0;
     c->last_cur = 0;
+    c->pos_fail_cnt = 0;
 
     rc = home_arm(robot, 6);
     if (rc != ERR_NONE) {
@@ -590,6 +667,24 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     if (cur < 0 || cur > 3000) cur = 0;
     c->last_cur = cur;
     pos = motor_read_position(robot, 6, &pos_ok);
+
+    /* SEN_FWD_LEAVE 阶段位置读失败保护：
+     * 该阶段依赖位置判据判断是否开够 3°，若位置持续读失败电机将一直正转。
+     * 连续 SEN_POS_FAIL_MAX 次读失败则急停，防止超出行程。 */
+    if (ph == SEN_FWD_LEAVE) {
+        if (!pos_ok) {
+            c->pos_fail_cnt++;
+            if (c->pos_fail_cnt >= SEN_POS_FAIL_MAX) {
+                LOG_WARN("关节6 正向开3°阶段位置读连续失败%d次，急停保护",
+                         SEN_POS_FAIL_MAX);
+                c->failed = 1;
+                motor_estop(robot, 6);
+                return -1;
+            }
+        } else {
+            c->pos_fail_cnt = 0;
+        }
+    }
 
     LOG_INFO("关节6 IN0=%d IN1=%d 电流=%dmA 位置=%d 阶段=%s",
              in0, in1, cur, pos_ok ? (int)pos : -99999, sensor_phase_name(ph));
@@ -725,36 +820,11 @@ static ErrCode home_joint6(Robot *robot)
     return c.done ? ERR_NONE : ERR_TIMEOUT;
 }
 
-/* 转角到位位置容差（脉冲）：闭环步进到位后实际位置应等于命令目标；
- * 给 ±100 步抖动/量化余量（约 0.09°~0.18°，视减速比），远小于
- * "指令发出却未运动 / 半途停住"的位置差，可区分真到位与假到位。 */
-#define HOME_INPOS_TOL_STEPS   100
-
-/* home_inpos_query：校验 movej 真到位 = 无报警+退出运行+位置在目标±容差，
- * 防"指令发出但没转/半途停住"误判。返回 1=到位 / 0=未到位 / -1=报警超差 / -2=读失败 */
-static int home_inpos_query(Robot *robot, int joint, int32_t target_steps)
-{
-    uint32_t st;
-    int32_t pos;
-    int pos_ok;
-
-    if (motor_read_status(robot, joint, &st) != ERR_NONE) return -2;
-    if (st & (LEESN_STAT_ALARM | LEESN_STAT_OVERRUN)) return -1;
-    if ((st & LEESN_STAT_RUN_MASK) == LEESN_STAT_RUN_ACTIVE) return 0;
-
-    pos = motor_read_position(robot, joint, &pos_ok);
-    if (!pos_ok) return -2;
-    if (pos >= target_steps - HOME_INPOS_TOL_STEPS &&
-        pos <= target_steps + HOME_INPOS_TOL_STEPS) {
-        return 1;
-    }
-    return 0;
-}
-
 /* ====================== 公开接口 ====================== */
 
 /* home_goto_pose：全轴回零后统一 movej 到 forward_deg。
- * 先一次性发全部 movej 再统一轮询；单轴异常只结算自身不拖累其余轴 */
+ * 先一次性发全部 movej 再统一轮询；单轴异常只结算自身不拖累其余轴。
+ * 注意：调用前应已恢复限位/报警保护，转角过程有完整保护。 */
 static void home_goto_pose(Robot *robot)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
@@ -853,7 +923,8 @@ static void home_goto_pose(Robot *robot)
 
 /* robot_home：整机回零（并行 + 事件联动）
  * ①{1,2,3,5}堵转与 6 传感器并行归零 ②3 号到位后启动 4 号（依赖 3 停稳防干涉）
- * ③全轴成功后统一转角 forward_deg，有失败轴则跳过 */
+ * ③全轴成功后统一转角 forward_deg，有失败轴则跳过
+ * 返回 ERR_NONE 全部成功 / ERR_TIMEOUT 有轴失败或超时 / ERR_ARG 参数错误 */
 ErrCode robot_home(Robot *robot)
 {
     const int group_stall[] = {1, 2, 3, 5};
@@ -864,6 +935,7 @@ ErrCode robot_home(Robot *robot)
     uint32_t start_ms;
     int j, all_ok;
     int cur_now[7] = {-1, -1, -1, -1, -1, -1, -1};  /* 1~6 本帧电流 mA；-1=未启动/已完成/读取失败 */
+    int any_fail = 0;
 
     if (robot == NULL) return ERR_ARG;
 
@@ -894,15 +966,25 @@ ErrCode robot_home(Robot *robot)
         if (robot_is_masked(robot, jj)) continue;
         if (home_arm(robot, jj) != ERR_NONE) {
             LOG_WARN("关节%d arm 失败，跳过", jj);
+            sfail[jj] = 1;
+            any_fail = 1;
             continue;
         }
-        home_stall_start(robot, jj);
+        if (home_stall_start(robot, jj) != ERR_NONE) {
+            LOG_WARN("关节%d 堵转启动失败，跳过", jj);
+            sfail[jj] = 1;
+            any_fail = 1;
+            continue;
+        }
         active[jj] = 1;
         Sleep(10);
     }
     if (!robot_is_masked(robot, 6)) {
         if (sensor6_start(robot, &c6) == ERR_NONE) {
             active[6] = 1;
+        } else {
+            sfail[6] = 1;
+            any_fail = 1;
         }
     }
 
@@ -918,7 +1000,7 @@ ErrCode robot_home(Robot *robot)
         if (active[6] && !sdone[6] && !sfail[6]) {
             int r = sensor6_tick(robot, &c6);
             if (r == 1)       sdone[6] = 1;
-            else if (r == -1) sfail[6] = 1;
+            else if (r == -1) { sfail[6] = 1; any_fail = 1; }
             else              all_done = 0;
             cur_now[6] = c6.last_cur;   /* tick 帧内已更新 last_cur */
         }
@@ -935,12 +1017,14 @@ ErrCode robot_home(Robot *robot)
             LOG_INFO("关节%d 堵转回零完成", j);
             if (j == 3 && !active[4] && !robot_is_masked(robot, 4)) {
                 /* 阶段2：3 号到位 -> 立即启动 4 号 */
-                if (home_arm(robot, 4) == ERR_NONE) {
-                    home_stall_start(robot, 4);
+                if (home_arm(robot, 4) == ERR_NONE &&
+                    home_stall_start(robot, 4) == ERR_NONE) {
                     active[4] = 1;
                     LOG_INFO("关节3 到位，立即启动关节4 堵转归零");
                 } else {
-                    LOG_WARN("关节4 arm 失败，跳过（未归零）");
+                    LOG_WARN("关节4 arm/启动失败，跳过（未归零）");
+                    sfail[4] = 1;
+                    any_fail = 1;
                 }
             }
         }
@@ -976,15 +1060,18 @@ ErrCode robot_home(Robot *robot)
         LOG_WARN("关节%d 堵转回零超时", j);
         motor_estop(robot, j);
         sfail[j] = 1;
+        any_fail = 1;
     }
     if (active[6] && !sdone[6]) {
         sfail[6] = 1;   /* 未在 tick 超时分支收尾的兜底 */
+        any_fail = 1;
     }
     if (active[6]) {
         sensor6_finish(robot, &c6);   /* done->清零校验；失败->急停；统一恢复 6 轴限位 */
     }
 
-    /* 阶段3：全轴回零成功后统一转角，有失败轴则跳过防乱跑 */
+    /* 阶段3：全轴回零成功后统一转角，有失败轴则跳过防乱跑。
+     * 转角前先恢复 1~5 轴的限位/报警/预警保护，转角过程有完整保护。 */
     all_ok = 1;
     for (j = 1; j <= 6; j++) {
         if (robot_is_masked(robot, j)) continue;
@@ -994,21 +1081,27 @@ ErrCode robot_home(Robot *robot)
         }
     }
     if (all_ok) {
+        /* 转角前恢复 1~5 轴保护（限位/超差报警/偏差预警），
+         * 保证转角过程中限位和超差保护生效，6 轴已在 sensor6_finish 恢复 */
+        for (j = 1; j <= 5; j++) {
+            if (robot_is_masked(robot, j)) continue;
+            home_restore(robot, j);
+            Sleep(20);
+        }
         LOG_INFO("回零：全部轴归零完成，统一转角到 forward_deg...");
         home_goto_pose(robot);
     } else {
         LOG_WARN("回零：存在未归零/失败轴，跳过统一转角");
+        /* 失败场景也要恢复 1~5 轴保护（6 轴已在 sensor6_finish 恢复） */
+        for (j = 1; j <= 5; j++) {
+            if (robot_is_masked(robot, j)) continue;
+            home_restore(robot, j);
+            Sleep(20);
+        }
     }
 
-    /* 恢复限位 */
-    for (j = 1; j <= 5; j++) {
-        if (robot_is_masked(robot, j)) continue;
-        home_restore(robot, j);
-        Sleep(20);
-    }
-
-    LOG_INFO("回零流程结束");
-    return ERR_NONE;
+    LOG_INFO("回零流程结束：%s", any_fail ? "存在失败轴" : "全部成功");
+    return any_fail ? ERR_TIMEOUT : ERR_NONE;
 }
 
 /* robot_home_single：单轴独立回零（home:N）：arm→堵转→判到位→清零→退让 forward_deg；
@@ -1037,7 +1130,12 @@ ErrCode robot_home_single(Robot *robot, int joint)
         return rc;
     }
 
-    home_stall_start(robot, joint);
+    rc = home_stall_start(robot, joint);
+    if (rc != ERR_NONE) {
+        LOG_WARN("关节%d 堵转启动失败：%s", joint, err_str(rc));
+        home_restore(robot, joint);
+        return rc;
+    }
 
     /* 等待堵转到位 */
     hit = home_wait_stall(robot, joint, home_timeout_ms);
@@ -1092,7 +1190,9 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
         } else {
             LOG_INFO("关节%d 自动运动到 %.1f° ...", joint, angle_deg);
             {
-                int wr = home_wait_inpos(robot, joint, home_timeout_ms);
+                const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+                int32_t target = DEG2STEPS(angle_deg, reductions[joint - 1]);
+                int wr = home_wait_inpos(robot, joint, target, home_timeout_ms);
                 if (wr == 1) {
                     LOG_INFO("关节%d 到位（%.1f°）", joint, angle_deg);
                 } else if (wr == 0) {
