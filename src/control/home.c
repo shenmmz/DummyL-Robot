@@ -34,25 +34,13 @@ typedef struct {
 #define TORQUE_MODE_GRAB  2        /* 抓取物体 */
 #define TORQUE_MODE_HOLD_RUN 3     /* 恒力矩运行 */
 #define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
-
-/* 清零后位置可接受偏差（脉冲）：正常清零后 0x0004 应≈0（2/6 号轴实测 45/1）。
- * 超过此值说明 0x00D2 零点未生效，需告警暴露（约 0.36°@减速比50）。
- * 单轴 home_stall_forward 与整机 home_goto_pose 共用，故定义在此处。 */
 #define HOME_ZERO_TOL_STEPS    500
-
-/* 堵转电流阈值 (mA) 为实机标定真值，也是力矩模式撞限位时的到位触发阈值。
- * 扭矩等级(1~255)为硬件整定参数，与 stall_current 不是同一体系：
- * 力矩模式把接触力封顶（撞限位时电流≈该等级保持电流），但本机固件不报 HOMED/退出RUN，
- * 故"撞到位"只能靠 stall_current 电流超阈判定。阈值须低于该等级保持电流、高于推靠巡航电流。
- * 下方 torque_level=120 为未标定试探值，须用 torque:N:L 逐轴标定并同步下调 stall_current。 */
-/* stall[7]：索引 0 不用，1~5 对应关节 1~5（关节 6 为传感器回零，不在此表） */
 static StallHome stall[7] = {
-    [0] = { 0 },   /* 占位，未使用 */
     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0, .torque_level = 120 },
-    [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0, .torque_level = 120 },
-    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0, .torque_level = 120 },
-    [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 100, .forward_deg = +2.0, .torque_level = 120 },
-    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 360, .forward_deg = +50.0, .torque_level = 120 },
+    [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = 90.0, .torque_level = 120 },
+    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -60.0, .torque_level = 120 },
+    [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 6.0, .torque_level = 120 },
+    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 90.0, .torque_level = 120 },
 };
 
 /* 关节6 传感器回零参数 */
@@ -73,7 +61,7 @@ static int    home_timeout_ms  = 60000;//设置回零超时时间
 /* 起步屏蔽窗 ms：躲过启动瞬间浪涌电流误判。
  * 说明：即使电机初始位置就在堵转位置，屏蔽窗结束后电流仍超阈，仍能正确判到位，
  * 只是延迟很短时间，不影响零点正确性。 */
-#define HOME_STALL_MASK_MS   20
+#define HOME_STALL_MASK_MS   150
 
 /* 传感器输入位（状态寄存器 0x0006 的 bit0=IN0, bit1=IN1） */
 #define SENSOR_IN0  0x0001u
@@ -166,6 +154,10 @@ static ErrCode home_stall_start(Robot *robot, int joint)
         LOG_WARN("关节%d 放宽位置偏差预警失败，顶死仍会提前切断输出", joint);
     }
     motor_set_profile(robot, joint, p->accel_ms, p->decel_ms);
+    /* 设接近速度：力矩模式的接近速度由 0x00D8 决定，上电默认 300rpm。
+     * 每次回零前显式写入 speed_rpm，保证每次运行速度一致，
+     * 避免"上电第一次快、之后慢"的不一致现象。 */
+    motor_set_speed(robot, joint, p->speed_rpm);
     /* 碰撞回原点力矩模式（手册第49节）：以设定等级恒力矩顶限位，到等级即停，
      * 比纯电流连续运行顶限位更柔和可控。撞到位由 home_check_stall 电流超阈判定
      * （本机固件力矩模式下不报 HOMED/退出RUN，电流才是唯一可靠触发）。
@@ -621,6 +613,9 @@ static ErrCode sensor6_start(Robot *robot, SensorCtx *c)
         return rc;
     }
     motor_set_profile(robot, 6, sensor.accel_ms, sensor.accel_ms);
+    /* 预设快速速度：双写 0x009A+0x00D8，确保回零启动时速度就是配置值，
+     * 不依赖驱动器默认值或上次残留值，避免上电第一次速度不一致。 */
+    sensor6_set_rpm(robot, sensor.fast_rpm);
 
     LOG_INFO("关节6 传感器回零启动 (快速%drpm/慢速%drpm/极慢%drpm)",
              sensor.fast_rpm, sensor.slow_rpm, sensor.crawl_rpm);

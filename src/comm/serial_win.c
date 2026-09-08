@@ -20,6 +20,7 @@
 struct SerialPort {
     HANDLE h;
     COMMTIMEOUTS timeouts;
+    uint32_t last_read_timeout;   /* 上次设置的读超时，避免重复调用 SetCommTimeouts */
     char name[64];
 };
 
@@ -88,18 +89,20 @@ SerialPort *serial_open(const char *port_name, uint32_t baudrate)
     /* 读写超时 */
     memset(&timeouts, 0, sizeof(timeouts));
     /* ReadIntervalTimeout：帧内相邻字节最大间隔，超过即认为一帧结束并让 ReadFile 返回。
-     * 115200 下字节间隔约 0.087ms，USB-RS485 以 1ms 粒度上送，取 5ms 已足够宽松；
-     * 原值 10ms 会让每次读取在收完响应后白白多等，直接叠加到堵转轮询周期上。 */
-    timeouts.ReadIntervalTimeout = 5;
-    timeouts.ReadTotalTimeoutMultiplier = 1;
+     * 115200 下字节间隔约 0.087ms，USB-RS485 以 1ms 粒度上送，取 2ms 足够；
+     * 此值越小，读完一帧后返回越快，轮询周期越短。 */
+    timeouts.ReadIntervalTimeout = 2;
+    timeouts.ReadTotalTimeoutMultiplier = 0;
     timeouts.ReadTotalTimeoutConstant = 100;
-    timeouts.WriteTotalTimeoutMultiplier = 1;
+    timeouts.WriteTotalTimeoutMultiplier = 0;
     timeouts.WriteTotalTimeoutConstant = 100;
     if (!SetCommTimeouts(port->h, &timeouts)) {
         fprintf(stderr, "[串口] SetCommTimeouts 失败\n");
         serial_close(port);
         return NULL;
     }
+    port->timeouts = timeouts;
+    port->last_read_timeout = timeouts.ReadTotalTimeoutConstant;
 
     PurgeComm(port->h, PURGE_RXCLEAR | PURGE_TXCLEAR);
     return port;
@@ -135,20 +138,21 @@ int serial_write(SerialPort *port, const uint8_t *data, size_t len)
 int serial_read(SerialPort *port, uint8_t *buf, size_t max_len, uint32_t timeout_ms)
 {
     DWORD got = 0;
-    COMMTIMEOUTS t;
+    BOOL ok;
 
     if (port == NULL || port->h == INVALID_HANDLE_VALUE || port->h == NULL) {
         return -1;
     }
-    /* 每次读取前按调用方超时调整 */
-    t = port->timeouts;
-    t.ReadTotalTimeoutConstant = timeout_ms;
-    SetCommTimeouts(port->h, &t);
-
-    if (!ReadFile(port->h, buf, (DWORD)max_len, &got, NULL)) {
-        return -1;
+    /* 只有超时值变化时才重设，避免每次都走系统调用（USB串口上开销不小） */
+    if (timeout_ms != port->last_read_timeout) {
+        COMMTIMEOUTS t = port->timeouts;
+        t.ReadTotalTimeoutConstant = timeout_ms;
+        SetCommTimeouts(port->h, &t);
+        port->last_read_timeout = timeout_ms;
     }
-    return (int)got;
+
+    ok = ReadFile(port->h, buf, (DWORD)max_len, &got, NULL);
+    return ok ? (int)got : -1;
 }
 
 /* serial_set_timeout：设置串口读写超时并生效 */
@@ -165,6 +169,7 @@ void serial_set_timeout(SerialPort *port, uint32_t read_ms, uint32_t write_ms)
     t.WriteTotalTimeoutMultiplier = 1;
     t.WriteTotalTimeoutConstant = write_ms;
     port->timeouts = t;
+    port->last_read_timeout = read_ms;
     SetCommTimeouts(port->h, &t);
 }
 

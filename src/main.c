@@ -464,9 +464,6 @@ int main(int argc, char **argv)
         LOG_WARN("监控线程启动失败，继续运行");
         monitor_destroy(mon);
         mon = NULL;
-    } else {
-        LOG_INFO("后台监控线程已启动：周期 %d ms 巡检六轴状态/电流/报警",
-                 (int)MONITOR_DEFAULT_INTERVAL_MS);
     }
 
     while (running) {
