@@ -40,13 +40,15 @@ typedef struct {
 #define HOME_ZERO_TOL_STEPS    500
 
 /* 堵转电流阈值 (mA) 为实机标定真值。
- * 关节1~5 默认走纯电流+二次确认（退让→半速复顶），关节4 走单次即停。 */
+ * 扭矩等级(0~255)为硬件整定参数，与 stall_current 不是同一体系：0=不启用（沿用纯电流），
+ * >0=碰撞回原点力矩模式（手册第49节），到等级即停、更柔和可控。下方 120 为未标定试探值，
+ * 启用后须用 torque:N:L 实测"撞到位瞬间的信号"并逐轴调整。 */
 static StallHome stall[6] = {
-    [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0 },
-    [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0 },
-    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0 },
-    [4] = { .speed_rpm = 60,   .accel_ms = 80, .decel_ms = 100, .dir = -1, .stall_current = 100, .forward_deg = +2.0 },
-    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 360, .forward_deg = +50.0 },
+    [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0, .torque_level = 120 },
+    [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0, .torque_level = 120 },
+    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0, .torque_level = 120 },
+    [4] = { .speed_rpm = 60,   .accel_ms = 80, .decel_ms = 100, .dir = -1, .stall_current = 100, .forward_deg = +2.0, .torque_level = 120 },
+    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 360, .forward_deg = +50.0, .torque_level = 120 },
 };
 
 /* 关节6 传感器回零参数 */
@@ -240,9 +242,11 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     }
 
     /* 主判据：电流超阈（全部轴统一，不看位置），单帧即判到位。
-     * 起步不再屏蔽（加速浪涌电流按实测不超阈，且力矩模式下电流由等级封顶）。
+     * 起步不再屏蔽（加速浪涌电流按实测不超阈）。
+     * 力矩模式(torque_level>0)下电流由等级封顶、整段推靠电流都偏高，纯电流兜底会在
+     * 撞限位前误触发，故此时禁用电流兜底——到位只认上方力矩信号(HOMED/退出RUN)。
      * 电流读失败帧不判定，不会误判到位。 */
-    if (threshold > 0 && cur_ok && cur > threshold) {
+    if (threshold > 0 && cur_ok && cur > threshold && stall[joint].torque_level == 0) {
         LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 电流超阈值(%dmA>%dmA)，判定堵转到位",
                  joint, elaps_ms, period_ms, cur, threshold);
         return 1;
