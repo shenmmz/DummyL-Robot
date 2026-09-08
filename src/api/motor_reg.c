@@ -194,7 +194,7 @@ ErrCode motor_save_params(Robot *robot, int joint)
 /* motor_disable_pos_err_alarm：关闭位置超差报警（回零堵转专用）
  * 写 0x000B=0（动态误差）/ 0x000C=0（静态误差）。
  * 关闭后顶死不再触发超差报警切断输出，电流保持顶出状态，
- * 配合 home_check_stall 的"电流超阈值+位置停涨"判据使用。
+ * 配合 home_check_stall 的纯电流判据使用。
  * RAM 即时生效，断电/复位后恢复记忆值（默认 200/100）。
  * 返回：ERR_NONE 成功 */
 ErrCode motor_disable_pos_err_alarm(Robot *robot, int joint)

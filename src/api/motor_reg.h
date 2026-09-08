@@ -90,7 +90,7 @@ ErrCode motor_restore_pos_err_alarm(Robot *robot, int joint);
 
 /* 设置位置偏差预警（0x0010，值域 1~65535，默认 20）
  * 回零堵转期间临时放宽该值（无法写 0 取消），让顶死瞬间驱动器保持输出，
- * 给"电流超阈值+位置停涨"检测留出窗口；回零结束后写回 20 恢复保护 */
+ * 给纯电流检测留出窗口；回零结束后写回 20 恢复保护 */
 ErrCode motor_set_pos_err_prewarn(Robot *robot, int joint, uint16_t steps);
 
 /* 设置限位使能（0x006D，enable=1有效 0=失效）
