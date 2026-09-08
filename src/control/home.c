@@ -243,10 +243,12 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
 
     /* 主判据：电流超阈（全部轴统一，不看位置），单帧即判到位。
      * 起步不再屏蔽（加速浪涌电流按实测不超阈）。
-     * 力矩模式(torque_level>0)下电流由等级封顶、整段推靠电流都偏高，纯电流兜底会在
-     * 撞限位前误触发，故此时禁用电流兜底——到位只认上方力矩信号(HOMED/退出RUN)。
+     * 实测（home:1 力矩等级120）：推靠途中电流≈巡航440mA，顶到限位瞬间飙到~1500mA
+     * （=该等级保持电流）且位置随即钉死。故本机固件在力矩模式下并不置 HOMED/退出RUN
+     * （上方力矩信号块在本机不生效），电流超阈才是力矩模式可靠的到位判据，不再对
+     * torque_level>0 禁用；电流/力矩信号并存、任一命中即到位。
      * 电流读失败帧不判定，不会误判到位。 */
-    if (threshold > 0 && cur_ok && cur > threshold && stall[joint].torque_level == 0) {
+    if (threshold > 0 && cur_ok && cur > threshold) {
         LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 电流超阈值(%dmA>%dmA)，判定堵转到位",
                  joint, elaps_ms, period_ms, cur, threshold);
         return 1;
