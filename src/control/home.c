@@ -36,11 +36,11 @@ typedef struct {
 #define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
 #define HOME_ZERO_TOL_STEPS    500
 static StallHome stall[7] = {
-    [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0, .torque_level = 120 },
-    [2] = { .speed_rpm = 150,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 480, .forward_deg = 90.0, .torque_level = 120 },
-    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -60.0, .torque_level = 120 },
+    [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -180.0, .torque_level = 120 },
+    [2] = { .speed_rpm = 150,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 480, .forward_deg = 73.5, .torque_level = 120 },
+    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -88.0, .torque_level = 120 },
     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 6.0, .torque_level = 120 },
-    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 90.0, .torque_level = 120 },
+    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 114.0, .torque_level = 120 },
 };
 
 /* 关节6 传感器回零参数 */
