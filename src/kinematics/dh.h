@@ -4,10 +4,10 @@
 /*
  * DH 建模与正运动学（FK）
  * 采用标准 DH 约定，关节角输入为角度（度），内部转弧度计算。
- * DH 参数表定义于 config/dh_params.h（DH_TABLE，待用户确认）。
+ * DH 参数表定义于 kinematics/dh_params.h。
  */
 
-#include "config/dh_params.h"
+#include "kinematics/dh_params.h"
 
 #define DH_EPS 1e-9
 

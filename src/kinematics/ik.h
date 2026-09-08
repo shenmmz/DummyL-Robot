@@ -12,7 +12,7 @@
  * 随后按关节软限位筛选，再按"当前关节位置加权变化最小"选择最优解。
  */
 
-#include "config/dh_params.h"
+#include "kinematics/dh_params.h"
 
 #define IK_MAX_SOLUTIONS 8
 
