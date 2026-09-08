@@ -44,6 +44,11 @@ typedef struct {
 #define STALL_RETRY_BACK_DEG           5.0    /* 反向退让角度(°) */
 #define STALL_RETRY_BACK_TIMEOUT_MS    5000   /* 退让到位等待上限(ms) */
 
+/* 清零后位置可接受偏差（脉冲）：正常清零后 0x0004 应≈0（2/6 号轴实测 45/1）。
+ * 超过此值说明 0x00D2 零点未生效，需告警暴露（约 0.36°@减速比50）。
+ * 单轴 home_stall_forward 与整机 home_goto_pose 共用，故定义在此处。 */
+#define HOME_ZERO_TOL_STEPS    500
+
 /* 堵转电流阈值 (mA) 为实机标定真值。
  * 关节1~5 默认走纯电流+二次确认（退让→半速复顶），关节4 走单次即停。 */
 static StallHome stall[6] = {
@@ -454,21 +459,45 @@ static int home_wait_stall(Robot *robot, int joint, int timeout_ms)
     return 0;
 }
 
-/* home_stall_forward：堵转清零后退让到 forward_deg（仅非 0 轴），避免久顶硬限位 */
+/* home_stall_forward：堵转清零后退让 forward_deg（仅非 0 轴），避免久顶硬限位。
+ * 【相对位移】与整机路径 home_goto_pose 保持同一口径：实测清零后 0x0004 常非 0
+ * （0x00D2 未必生效），按绝对目标发令会被起点偏移吃掉行程、甚至反向撞回限位，
+ * 故以清零后实际位置为基准发相对位移，保证行程恒为 forward_deg。 */
 static void home_stall_forward(Robot *robot, int joint)
 {
+    const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
     StallHome *p = &stall[joint];
+    int32_t delta, pos = 0, target;
+    int pos_ok = 0, rc;
 
     if (p->forward_deg == 0.0) return;
-    LOG_INFO("关节%d 堵转后移动到 %.1f°", joint, p->forward_deg);
-    robot_movej(robot, joint, p->forward_deg, (double)p->speed_rpm);
-    {
-        int rc = home_wait_inpos(robot, joint, home_timeout_ms);
-        if (rc == 0) {
-            LOG_WARN("关节%d 退让到 %.1f° 超时", joint, p->forward_deg);
-        } else if (rc < 0) {
-            LOG_WARN("关节%d 退让到 %.1f° 报警/异常", joint, p->forward_deg);
-        }
+
+    delta  = DEG2STEPS(p->forward_deg, reductions[joint - 1]);
+    pos    = motor_read_position(robot, joint, &pos_ok);
+    target = pos_ok ? (pos + delta) : delta;   /* 读不到位置：退回绝对目标 */
+    if (!pos_ok) {
+        LOG_WARN("关节%d 转角前读位置失败，退回绝对目标 %d", joint, (int)delta);
+    } else if (pos > HOME_ZERO_TOL_STEPS || pos < -(int32_t)HOME_ZERO_TOL_STEPS) {
+        LOG_WARN("关节%d 清零后位置非0(%d步≈%.2f°)：0x00D2 零点可能未生效，"
+                 "本次已改用相对位移保证行程，但后续绝对定位仍带此偏置",
+                 joint, (int)pos,
+                 (double)pos * 360.0 /
+                 ((double)reductions[joint - 1] * (double)ENCODER_STEPS_PER_REV));
+    }
+
+    LOG_INFO("关节%d 堵转后相对移动 %.1f°（位置 %d -> 绝对目标 %d）",
+             joint, p->forward_deg, (int)pos, (int)target);
+    if (motor_set_speed(robot, joint, p->speed_rpm) != ERR_NONE ||
+        motor_move_abs(robot, joint, target) != ERR_NONE) {
+        LOG_WARN("关节%d 转角指令发送失败，停在清零点", joint);
+        return;
+    }
+
+    rc = home_wait_inpos(robot, joint, home_timeout_ms);
+    if (rc == 0) {
+        LOG_WARN("关节%d 退让 %.1f° 超时", joint, p->forward_deg);
+    } else if (rc < 0) {
+        LOG_WARN("关节%d 退让 %.1f° 报警/异常", joint, p->forward_deg);
     }
 }
 
@@ -712,10 +741,6 @@ static ErrCode home_joint6(Robot *robot)
  * 给 ±100 步抖动/量化余量（约 0.09°~0.18°，视减速比），远小于
  * "指令发出却未运动 / 半途停住"的位置差，可区分真到位与假到位。 */
 #define HOME_INPOS_TOL_STEPS   100
-
-/* 清零后位置可接受偏差（脉冲）：正常清零后 0x0004 应≈0（2/6 号轴实测 45/1）。
- * 超过此值说明 0x00D2 零点未生效，需告警暴露（约 0.36°@减速比50）。 */
-#define HOME_ZERO_TOL_STEPS    500
 
 /* home_inpos_query：校验 movej 真到位 = 无报警+退出运行+位置在目标±容差，
  * 防"指令发出但没转/半途停住"误判。返回 1=到位 / 0=未到位 / -1=报警超差 / -2=读失败 */
