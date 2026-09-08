@@ -37,7 +37,7 @@ typedef struct {
 #define HOME_ZERO_TOL_STEPS    500
 static StallHome stall[7] = {
     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0, .torque_level = 120 },
-    [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = 90.0, .torque_level = 120 },
+    [2] = { .speed_rpm = 150,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 480, .forward_deg = 90.0, .torque_level = 120 },
     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -60.0, .torque_level = 120 },
     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 6.0, .torque_level = 120 },
     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 90.0, .torque_level = 120 },
@@ -922,7 +922,7 @@ static void home_goto_pose(Robot *robot)
  * 返回 ERR_NONE 全部成功 / ERR_TIMEOUT 有轴失败或超时 / ERR_ARG 参数错误 */
 ErrCode robot_home(Robot *robot)
 {
-    const int group_stall[] = {1, 2, 3, 5};
+    const int group_stall[] = {2, 3, 5, 1};
     uint8_t active[7] = {0};    /* 已启动参与回零的轴 */
     uint8_t sdone[7] = {0};     /* 已回零成功 */
     uint8_t sfail[7] = {0};     /* 回零失败/超时 */
@@ -955,7 +955,7 @@ ErrCode robot_home(Robot *robot)
     LOG_INFO("================");
 
     /* 阶段1：{1,2,3,5} 并行堵转归零 与 关节6 传感器回零 同时启动 */
-    LOG_INFO("回零：{1,2,3,5} 堵转 + 关节6 传感器 并行归零...");
+    LOG_INFO("回零：{2,3,5,1} 堵转 + 关节6 传感器 并行归零...");
     for (int gi = 0; gi < (int)(sizeof(group_stall) / sizeof(group_stall[0])); gi++) {
         int jj = group_stall[gi];
         if (robot_is_masked(robot, jj)) continue;
