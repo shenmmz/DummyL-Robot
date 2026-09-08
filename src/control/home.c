@@ -53,7 +53,7 @@ static StallHome stall[6] = {
     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0 },
     [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0,.stall_mode = STALL_MODE_CURONLY },  /* 传动跳齿轴：位置不停涨，纯电流超阈即停 */    
     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0 },
-    [4] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 360, .forward_deg = +5.0 },
+    [4] = { .speed_rpm = 60,   .accel_ms = 80, .decel_ms = 100, .dir = -1, .stall_current = 100, .forward_deg = +5.0,.stall_mode = STALL_MODE_CURONLY },  /* 与关节2 同：改纯电流判据 */
     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 360, .forward_deg = +50.0 },
 };
 
