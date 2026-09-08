@@ -1,6 +1,6 @@
 /*
  * home.c —— 回零实现
- * 关节1-5：堵转回零（顶硬限位→纯电流判据→清零→movej 到 forward_deg）
+ * 关节1-5：碰撞回原点力矩模式回零（顶硬限位→电流超阈判到位→清零→movej 到 forward_deg）
  * 关节6：IN0/IN1 传感器回零（零点=IN0 正向 on→off 沿，兼容三种初始位置）
  * 寄存器操作统一走 motor_reg API，不直接操作 Modbus 帧。
  */
@@ -24,8 +24,9 @@ typedef struct {
     int    dir;           /* 方向 +1正转 / -1反转 */
     int    stall_current; /* 堵转判定电流 mA，0=仅靠状态字判定 */
     double forward_deg;   /* 堵转后移动角度（绝对角度），0=不移动 */
-    int    torque_level;  /* 碰撞回原点力矩等级 0~255（0=不启用，沿用纯电流堵转顶限位；
-                             >0=改用 0x009E 力矩模式顶限位，到等级即停，更柔和可控） */
+    int    torque_level;  /* 碰撞回原点力矩等级 1~255（必填；0=未配置=错误，纯电流回零已移除）；
+                             走 0x009E 力矩模式顶限位，到等级即停，更柔和可控；
+                             撞到位由 home_check_stall 电流超阈判定（本机不报 HOMED/退出RUN） */
 } StallHome;
 
 /* 力矩模式位（写 0x009E BIT15~8）：手册第 49 节 */
@@ -39,15 +40,16 @@ typedef struct {
  * 单轴 home_stall_forward 与整机 home_goto_pose 共用，故定义在此处。 */
 #define HOME_ZERO_TOL_STEPS    500
 
-/* 堵转电流阈值 (mA) 为实机标定真值。
- * 扭矩等级(0~255)为硬件整定参数，与 stall_current 不是同一体系：0=不启用（沿用纯电流），
- * >0=碰撞回原点力矩模式（手册第49节），到等级即停、更柔和可控。下方 120 为未标定试探值，
- * 启用后须用 torque:N:L 实测"撞到位瞬间的信号"并逐轴调整。 */
+/* 堵转电流阈值 (mA) 为实机标定真值，也是力矩模式撞限位时的到位触发阈值。
+ * 扭矩等级(1~255)为硬件整定参数，与 stall_current 不是同一体系：
+ * 力矩模式把接触力封顶（撞限位时电流≈该等级保持电流），但本机固件不报 HOMED/退出RUN，
+ * 故"撞到位"只能靠 stall_current 电流超阈判定。阈值须低于该等级保持电流、高于推靠巡航电流。
+ * 下方 torque_level=120 为未标定试探值，须用 torque:N:L 逐轴标定并同步下调 stall_current。 */
 static StallHome stall[6] = {
     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -90.0, .torque_level = 120 },
     [2] = { .speed_rpm = 60,   .accel_ms = 100, .decel_ms = 150, .dir = -1, .stall_current = 510, .forward_deg = +50.0, .torque_level = 120 },
     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -50.0, .torque_level = 120 },
-    [4] = { .speed_rpm = 60,   .accel_ms = 80, .decel_ms = 100, .dir = -1, .stall_current = 100, .forward_deg = +2.0, .torque_level = 120 },
+    [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 100, .forward_deg = +2.0, .torque_level = 120 },
     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 360, .forward_deg = +50.0, .torque_level = 120 },
 };
 
@@ -138,7 +140,7 @@ static void home_stall_start(Robot *robot, int joint)
     s_stall_last_ok[joint] = 0;   /* 新一次堵转，清位置缓存 */
     s_last_tick_ms[joint]  = 0;   /* 清周期基准（首帧周期显示 0） */
     s_stall_t0_ms[joint]   = GetTickCount();   /* 【标定】起步时刻 */
-    /* 关超差报警：顶死改由 home_check_stall 纯电流判定，不再报警锁存 */
+    /* 关超差报警：顶死改由 home_check_stall 电流超阈判定，不再报警锁存 */
     if (motor_disable_pos_err_alarm(robot, joint) != ERR_NONE) {
         LOG_WARN("关节%d 关闭超差报警失败，顶死仍会报警锁存", joint);
     }
@@ -148,40 +150,33 @@ static void home_stall_start(Robot *robot, int joint)
         LOG_WARN("关节%d 放宽位置偏差预警失败，顶死仍会提前切断输出", joint);
     }
     motor_set_profile(robot, joint, p->accel_ms, p->decel_ms);
-    if (p->torque_level > 0) {
-        /* 碰撞回原点力矩模式（手册第49节）：以设定等级恒力矩顶限位，到等级即停，
-         * 比纯电流连续运行顶限位更柔和可控。撞到位后由 home_check_stall 读状态字
-         * 判 bit15(HOMED) / 退出 RUN_ACTIVE 确认，再走 home_stall_done。 */
-        if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, p->torque_level) != ERR_NONE) {
-            LOG_WARN("关节%d 设碰撞回原点力矩等级%d失败，退回连续运行顶限位", joint, p->torque_level);
-            goto fallback_run;
-        }
-        Sleep(20);
-        if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
-            LOG_WARN("关节%d 启动碰撞回原点力矩模式失败，退回连续运行顶限位", joint);
-            goto fallback_run;
-        }
-        LOG_INFO("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA 兜底)",
-                 joint, p->dir, p->torque_level, p->stall_current);
+    /* 碰撞回原点力矩模式（手册第49节）：以设定等级恒力矩顶限位，到等级即停，
+     * 比纯电流连续运行顶限位更柔和可控。撞到位由 home_check_stall 电流超阈判定
+     * （本机固件力矩模式下不报 HOMED/退出RUN，电流才是唯一可靠触发）。
+     * 纯电流连续运行回零模式已移除，torque_level 必须 >0，否则无法回零。 */
+    if (p->torque_level <= 0) {
+        LOG_ERROR("关节%d torque_level=%d 未配置，纯电流回零已移除，无法回零", joint, p->torque_level);
         return;
     }
-fallback_run:
-    /* Bug1：连续运行(0x00C8)速度源是 0x009A，与 0x00D8 不同源，须双写否则按记忆速度运行 */
-    if (motor_set_speed16(robot, joint, p->speed_rpm) != ERR_NONE) {
-        LOG_WARN("关节%d 写连续运行速度源0x009A失败，仍按驱动器记忆速度运行", joint);
+    if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, p->torque_level) != ERR_NONE) {
+        LOG_ERROR("关节%d 设碰撞回原点力矩等级%d失败，回零中止", joint, p->torque_level);
+        return;
     }
-    motor_set_speed(robot, joint, p->speed_rpm);
     Sleep(20);
-    motor_run(robot, joint, p->dir);
-    LOG_INFO("关节%d 堵转启动 (方向=%+d, %drpm, 加速%dms/减速%dms, 阈值=%dmA)",
-             joint, p->dir, p->speed_rpm, p->accel_ms, p->decel_ms, p->stall_current);
+    if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
+        LOG_ERROR("关节%d 启动碰撞回原点力矩模式失败，回零中止", joint);
+        return;
+    }
+    LOG_INFO("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA 兜底)",
+             joint, p->dir, p->torque_level, p->stall_current);
 }
 
 /* home_check_stall：判堵转到位。返回 1=命中（堵转/到位） / 0=运行中。
  * 前置：已关 0x000B/C 报警、放宽 0x0010。判据：
  *   ① 兜底：驱动器报警(bit21) 或 位置超差(bit10) → 判到位；
- *   ② 力矩模式(碰撞回原点)：torque_level>0 时，状态字 bit15(HOMED) 置位或退出 RUN_ACTIVE → 判到位；
- *   ③ 主判据：电流超阈(>stall_current) → 单帧即判到位（不再退让/半速复顶）。
+ *   ② 主判据：电流超阈(>stall_current) → 单帧即判到位（不再退让/半速复顶）。
+ *      回零统一走碰撞回原点力矩模式（手册第49节），但本机固件在力矩模式下
+ *      不报 HOMED/退出RUN，故电流超阈才是唯一可靠触发（阈值须低于该等级保持电流）。
  * 出参 cur_out：读到电流后立即写回本帧 mA(-1=读失败)，供主循环电流快照 */
 static int home_check_stall(Robot *robot, int joint, int *cur_out)
 {
@@ -225,31 +220,15 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
      * （位置已在上方随状态一帧读出，此处不再单独发事务） */
     if (s_stall_last_ok[joint]) delta = pos - s_stall_last_pos[joint];
 
-    /* 力矩模式（碰撞回原点）到位判据：驱动器以设定等级恒力矩顶限位，到等级即停，
-     * 状态字 bit15(HOMED) 置位、或退出 RUN_ACTIVE 即视为撞到位，单帧即判到位
-     * （不再退让/半速复顶）。电流超阈仍作兜底（下方统一分支），防止状态字信号不灵。 */
-    if (stall[joint].torque_level > 0) {
-        if (st & LEESN_STAT_HOMED) {
-            LOG_INFO("关节%d T+%ums 周期=%ums [力矩-碰撞] 状态字bit15 HOMED 置位，判定到位",
-                     joint, elaps_ms, period_ms);
-            return 1;
-        }
-        if ((st & LEESN_STAT_RUN_MASK) != LEESN_STAT_RUN_ACTIVE) {
-            LOG_INFO("关节%d T+%ums 周期=%ums [力矩-碰撞] 退出 RUN_ACTIVE，判定到位",
-                     joint, elaps_ms, period_ms);
-            return 1;
-        }
-    }
-
     /* 主判据：电流超阈（全部轴统一，不看位置），单帧即判到位。
      * 起步不再屏蔽（加速浪涌电流按实测不超阈）。
-     * 实测（home:1 力矩等级120）：推靠途中电流≈巡航440mA，顶到限位瞬间飙到~1500mA
-     * （=该等级保持电流）且位置随即钉死。故本机固件在力矩模式下并不置 HOMED/退出RUN
-     * （上方力矩信号块在本机不生效），电流超阈才是力矩模式可靠的到位判据，不再对
-     * torque_level>0 禁用；电流/力矩信号并存、任一命中即到位。
+     * 实测（home:1 力矩等级120）：推靠途中电流明显低于阈值（~180~440mA，随轴/负载），
+     * 顶到限位瞬间飙到~1500mA（=该等级保持电流）且位置随即钉死。故本机固件在力矩模式下
+     * 并不置 HOMED/退出RUN（上方力矩信号块在本机不生效），电流超阈才是力矩模式可靠的到位判据，
+     * 阈值须低于该等级保持电流、高于推靠巡航电流。
      * 电流读失败帧不判定，不会误判到位。 */
     if (threshold > 0 && cur_ok && cur > threshold) {
-        LOG_INFO("关节%d T+%ums 周期=%ums [纯电流] 电流超阈值(%dmA>%dmA)，判定堵转到位",
+        LOG_INFO("关节%d T+%ums 周期=%ums [电流超阈] 电流超阈值(%dmA>%dmA)，判定堵转到位",
                  joint, elaps_ms, period_ms, cur, threshold);
         return 1;
     }
@@ -899,7 +878,7 @@ ErrCode robot_home(Robot *robot)
                          stall[j].dir, stall[j].stall_current,
                          stall[j].forward_deg,
                          stall[j].torque_level,
-                         stall[j].torque_level > 0 ? "(碰撞回原点)" : "(纯电流顶限位)");
+                         "(碰撞回原点)");
         }
     }
     if (!robot_is_masked(robot, 6)) {
