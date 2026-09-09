@@ -1,10 +1,3 @@
-/*
- * main.c —— DummyL-Robot 命令行控制台主程序（应用入口层）
- * ------------------------------------------------------------
- * 职责仅限：初始化（串口选择 / robot_init / 监控线程）+ 命令循环。
- * 各命令的具体实现见 src/cli/commands.c（cmd_dispatch）。
- */
-
 #include "control/robot.h"
 #include "control/monitor.h"
 #include "comm/serial_win.h"

@@ -36,6 +36,9 @@ static int cmd_status(Robot *robot)
     /* 设为非阻塞输入模式 */
     GetConsoleMode(hStdin, &old_mode);
     SetConsoleMode(hStdin, old_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT));
+    /* 丢弃键入 "status" 命令时遗留的回车等输入事件：
+     * 否则 WaitForSingleObject 会立即返回，循环只跑一帧就当成"按任意键退出"。 */
+    FlushConsoleInputBuffer(hStdin);
 
     printf("持续刷新状态中（按任意键退出）...\n\n");
 
@@ -111,6 +114,8 @@ static int cmd_status(Robot *robot)
 
     /* 恢复控制台模式 */
     SetConsoleMode(hStdin, old_mode);
+    /* 丢弃用于退出的那次按键，避免它泄漏到主循环的 fgets 里被当成下一条命令 */
+    FlushConsoleInputBuffer(hStdin);
     printf("\n状态刷新已停止。\n");
     return 0;
 }
