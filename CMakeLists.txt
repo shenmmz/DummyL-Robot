@@ -68,6 +68,16 @@ add_library(utils STATIC
     src/utils/help_text.c
 )
 
+# ---------- 静态库: cli（命令实现与分发）----------
+# 原 main.c 中的命令逻辑（home/movej/enable/disable/status/scan/diag/
+# torque/mask/unmask/calib/help）整体迁入，main.c 只保留初始化与命令循环。
+add_library(cli STATIC
+    src/cli/commands.c
+)
+target_include_directories(cli PUBLIC src ${CMAKE_SOURCE_DIR})
+target_compile_options(cli PRIVATE -Wall -Wextra)
+target_link_libraries(cli PUBLIC control utils)
+
 # 公共头文件目录与警告选项
 # src 用于引用 comm/kinematics/... 子模块头；项目根用于引用 config/*.h
 foreach(lib comm kinematics trajectory api control utils)
@@ -90,7 +100,7 @@ target_link_libraries(control PUBLIC
 # ---------- 应用: CLI 主程序 ----------
 add_executable(dummyrobot src/main.c)
 # winmm：timeBeginPeriod/timeEndPeriod（抬高系统定时器精度，压低堵转轮询周期）
-target_link_libraries(dummyrobot PRIVATE control utils)
+target_link_libraries(dummyrobot PRIVATE control utils cli)
 if(WIN32)
     target_link_libraries(dummyrobot PRIVATE winmm)
 endif()
