@@ -7,11 +7,11 @@
  * 依赖模块：control/robot、config/robot_config、utils/logger
  */
 
+#include <stdio.h>
 #include "control/monitor.h"
 #include "control/robot_internal.h"
 #include "api/motor_reg.h"
 #include "config/robot_config.h"
-#include "utils/logger.h"
 
 #include <stdlib.h>
 #ifdef _WIN32
@@ -132,9 +132,9 @@ static void monitor_scan_joint(Monitor *m, int j)
     /* 在线状态翻转 */
     if (m->prev_online[idx] != -1 && m->prev_online[idx] != now_online) {
         if (now_online) {
-            LOG_INFO("关节%d 恢复在线", j);
+            printf("关节%d 恢复在线\n", j);
         } else {
-            LOG_WARN("关节%d 掉线（状态读取无响应）", j);
+            printf("[警告] 关节%d 掉线（状态读取无响应）\n", j);
         }
     }
     m->prev_online[idx] = now_online;
@@ -149,10 +149,10 @@ static void monitor_scan_joint(Monitor *m, int j)
         /* 报警置位/清除翻转 */
         if (m->prev_alarm[idx] != -1 && m->prev_alarm[idx] != alarm) {
             if (alarm) {
-                LOG_ERROR("关节%d 驱动器报警置位（状态字 bit21）", j);
+                printf("[错误] 关节%d 驱动器报警置位（状态字 bit21）\n", j);
                 need_code = 1;              /* 锁外补读报警代码 */
             } else {
-                LOG_INFO("关节%d 驱动器报警已清除", j);
+                printf("关节%d 驱动器报警已清除\n", j);
                 m->snap[idx].alarm_code = 0;
             }
         } else if (m->prev_alarm[idx] == -1 && alarm) {
@@ -162,16 +162,16 @@ static void monitor_scan_joint(Monitor *m, int j)
 
         /* 位置超差翻转（仅报置位） */
         if (m->prev_overrun[idx] != -1 && m->prev_overrun[idx] != overrun && overrun) {
-            LOG_WARN("关节%d 位置超差（状态字 bit10）", j);
+            printf("[警告] 关节%d 位置超差（状态字 bit10）\n", j);
         }
         m->prev_overrun[idx] = overrun;
 
         /* 软件限位翻转（仅报置位） */
         if (m->prev_neg[idx] != -1 && m->prev_neg[idx] != neg && neg) {
-            LOG_WARN("关节%d 到达软件负限位", j);
+            printf("[警告] 关节%d 到达软件负限位\n", j);
         }
         if (m->prev_pos[idx] != -1 && m->prev_pos[idx] != pos && pos) {
-            LOG_WARN("关节%d 到达软件正限位", j);
+            printf("[警告] 关节%d 到达软件正限位\n", j);
         }
         m->prev_neg[idx] = neg;
         m->prev_pos[idx] = pos;
@@ -180,7 +180,7 @@ static void monitor_scan_joint(Monitor *m, int j)
         if (m->stall_threshold_ma > 0 && cur >= 0) {
             latch = (cur > m->stall_threshold_ma) ? 1 : 0;
             if (!m->prev_stall[idx] && latch) {
-                LOG_ERROR("关节%d 堵转报警：电流 %d mA 超阈值 %d mA",
+                printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
                           j, cur, m->stall_threshold_ma);
             }
             m->prev_stall[idx] = latch;
@@ -193,10 +193,10 @@ static void monitor_scan_joint(Monitor *m, int j)
         EnterCriticalSection(&m->snap_lock);
         m->snap[idx].alarm_code = code;
         if (code > 0) {
-            LOG_ERROR("关节%d 驱动器报警：%s（代码 %d）",
+            printf("[错误] 关节%d 驱动器报警：%s（代码 %d）\n",
                       j, leesn_alarm_text(code), code);
         } else if (code < 0) {
-            LOG_WARN("关节%d 驱动器报警，报警代码读取失败", j);
+            printf("[警告] 关节%d 驱动器报警，报警代码读取失败\n", j);
         }
         /* code == 0：置位翻转后代码已被清除（如主流程已清警），非失败，静默 */
         LeaveCriticalSection(&m->snap_lock);
@@ -240,7 +240,7 @@ int monitor_check_alarm(Monitor *m, int joint)
         return 0;
     }
     if (code != 0) {
-        LOG_ERROR("关节%d 驱动器报警：%s（代码 %d）", joint, leesn_alarm_text(code), code);
+        printf("[错误] 关节%d 驱动器报警：%s（代码 %d）\n", joint, leesn_alarm_text(code), code);
     }
     return code;
 }
@@ -271,7 +271,7 @@ int monitor_check_stall(Monitor *m, int joint)
         return 0;
     }
     if (cur > m->stall_threshold_ma) {
-        LOG_ERROR("关节%d 堵转报警：电流 %d mA 超阈值 %d mA",
+        printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
                   joint, cur, m->stall_threshold_ma);
         return 1;
     }

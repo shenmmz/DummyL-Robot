@@ -63,7 +63,6 @@ add_library(control STATIC
 # ---------- 静态库: utils ----------
 # 精简中文日志 + 命令行解析 + 统一错误码
 add_library(utils STATIC
-    src/utils/logger.c
     src/utils/cmd_parser.c
     src/utils/err.c
 )
@@ -75,7 +74,7 @@ foreach(lib comm kinematics trajectory api control utils)
     target_compile_options(${lib} PRIVATE -Wall -Wextra)
 endforeach()
 
-# api 依赖 comm（Modbus 帧构造）和 utils（logger）
+# api 依赖 comm（Modbus 帧构造）
 target_link_libraries(api PUBLIC comm utils)
 
 # control 依赖 comm/kinematics/trajectory/api/utils

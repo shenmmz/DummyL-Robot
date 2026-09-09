@@ -7,7 +7,6 @@
  */
 
 #include "utils/cmd_parser.h"
-#include "utils/logger.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -35,8 +34,6 @@ void cmd_print_help(void)
     printf("                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n");
     printf("  torque:N:L            力矩碰撞回原点诊断：关节 N 以等级 L(0~255) 试撞，\n");
     printf("                         每 200ms 打印 状态字/电流/位置，用于观察到位信号\n");
-    printf("  debug                 切换回零逐帧调试日志（电流/位置/帧差/实时电流快照），\n");
-    printf("                         标定力矩等级与堵转阈值时打开看电流曲线，再输一次关闭\n");
     printf("  help                  帮助\n");
     printf("  exit                  退出\n");
 }
@@ -56,7 +53,7 @@ static int parse_joint_list(const char *s, ParsedCmd *out)
     while (tok != NULL) {
         int j = atoi(tok);
         if (j < 1 || j > 6) {
-            LOG_WARN("关节号须在 1..6 之间：%s", tok);
+            printf("[警告] 关节号须在 1..6 之间：%s\n", tok);
             return -1;
         }
         out->joints[n++] = j;
@@ -125,7 +122,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
         if (j != NULL) {
             int joint = atoi(j);
             if (joint < 1 || joint > 6) {
-                LOG_WARN("用法: home[:关节号]  例 home:1 单独回零1轴");
+                printf("[警告] 用法: home[:关节号]  例 home:1 单独回零1轴\n");
                 return CMD_UNKNOWN;
             }
             out->joint = joint;   /* 带关节号 = 单轴独立回零 */
@@ -139,13 +136,13 @@ int cmd_parse(const char *line, ParsedCmd *out)
         int joint;
         double angle;
         if (j == NULL || a == NULL) {
-            LOG_WARN("用法: homej:关节号:角度[:速度]");
+            printf("[警告] 用法: homej:关节号:角度[:速度]\n");
             return CMD_UNKNOWN;
         }
         joint = atoi(j);
         angle = atof(a);
         if (joint < 1 || joint > 6) {
-            LOG_WARN("关节号须在 1..6 之间");
+            printf("[警告] 关节号须在 1..6 之间\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_HOMEJ;
@@ -159,13 +156,13 @@ int cmd_parse(const char *line, ParsedCmd *out)
         int joint;
         double angle;
         if (j == NULL || a == NULL) {
-            LOG_WARN("用法: movej:关节号:角度[:速度]");
+            printf("[警告] 用法: movej:关节号:角度[:速度]\n");
             return CMD_UNKNOWN;
         }
         joint = atoi(j);
         angle = atof(a);
         if (joint < 1 || joint > 6) {
-            LOG_WARN("关节号须在 1..6 之间");
+            printf("[警告] 关节号须在 1..6 之间\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_MOVEJ;
@@ -175,7 +172,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "enable") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         if (j == NULL) {
-            LOG_WARN("用法: enable:关节号");
+            printf("[警告] 用法: enable:关节号\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_ENABLE;
@@ -183,7 +180,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "disable") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         if (j == NULL) {
-            LOG_WARN("用法: disable:关节号");
+            printf("[警告] 用法: disable:关节号\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_DISABLE;
@@ -193,7 +190,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "mask") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         if (j == NULL) {
-            LOG_WARN("用法: mask:关节号[,关节号...]  例 mask:2 或 mask:2,3,4");
+            printf("[警告] 用法: mask:关节号[,关节号...]  例 mask:2 或 mask:2,3,4\n");
             return CMD_UNKNOWN;
         }
         if (parse_joint_list(j, out) != 0) {
@@ -203,7 +200,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "unmask") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         if (j == NULL) {
-            LOG_WARN("用法: unmask:关节号[,关节号...]  例 unmask:2 或 unmask:2,3,4");
+            printf("[警告] 用法: unmask:关节号[,关节号...]  例 unmask:2 或 unmask:2,3,4\n");
             return CMD_UNKNOWN;
         }
         if (parse_joint_list(j, out) != 0) {
@@ -223,24 +220,22 @@ int cmd_parse(const char *line, ParsedCmd *out)
         char *l = strtok_r(NULL, ":", &save);
         int joint, level;
         if (j == NULL || l == NULL) {
-            LOG_WARN("用法: torque:关节号:等级  例 torque:4:120 在4轴以等级120试撞");
+            printf("[警告] 用法: torque:关节号:等级  例 torque:4:120 在4轴以等级120试撞\n");
             return CMD_UNKNOWN;
         }
         joint = atoi(j);
         level = atoi(l);
         if (joint < 1 || joint > 6) {
-            LOG_WARN("关节号须在 1..6 之间");
+            printf("[警告] 关节号须在 1..6 之间\n");
             return CMD_UNKNOWN;
         }
         if (level < 0 || level > 255) {
-            LOG_WARN("力矩等级须在 0..255 之间");
+            printf("[警告] 力矩等级须在 0..255 之间\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_TORQUE;
         out->joint = joint;
         out->torque_level = level;
-    } else if (strcmp(cmd, "debug") == 0) {
-        out->type = CMD_DEBUG;
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {

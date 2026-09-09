@@ -8,7 +8,6 @@
 #include "api/motor_reg.h"
 #include "control/robot_internal.h"
 #include "comm/modbus_rtu.h"
-#include "utils/logger.h"
 
 /* ================= 基本寄存器读写 ================= */
 

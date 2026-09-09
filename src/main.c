@@ -22,7 +22,6 @@
 #include "comm/serial_win.h"
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
-#include "utils/logger.h"
 #include "utils/cmd_parser.h"
 
 #include <stdio.h>
@@ -362,7 +361,6 @@ int main(int argc, char **argv)
     timeBeginPeriod(1);
 #endif
 
-    log_set_level(LOG_LEVEL_INFO);
     printf("DummyL-Robot 控制台 (C11 + MinGW)\n");
     printf("输入 help 查看命令，exit 退出。\n\n");
 
@@ -371,9 +369,9 @@ int main(int argc, char **argv)
     } else {
         int ini_loaded = ini_read_serial(INI_PATH, port, sizeof(port), &baud);
         if (ini_loaded) {
-            LOG_INFO("生效来源：ini（%s），串口 %s @ %lu 8N1", INI_PATH, port, baud);
+            printf("生效来源：ini（%s），串口 %s @ %lu 8N1\n", INI_PATH, port, baud);
         } else {
-            LOG_INFO("生效来源：默认（ini 缺失，回退 robot_config.h 默认值），串口 %s @ %lu 8N1", port, baud);
+            printf("生效来源：默认（ini 缺失，回退 robot_config.h 默认值），串口 %s @ %lu 8N1\n", port, baud);
         }
 
         char found_ports[16][64];
@@ -418,7 +416,7 @@ int main(int argc, char **argv)
         }
 
         if (port_count == 0) {
-            LOG_ERROR("未发现可用串口");
+            printf("[错误] 未发现可用串口\n");
             return 1;
         }
 
@@ -437,7 +435,7 @@ int main(int argc, char **argv)
                 if (sel >= 0 && sel < port_count) {
                     snprintf(port, sizeof(port), "%s", found_ports[sel]);
                 } else {
-                    LOG_ERROR("无效选择");
+                    printf("[错误] 无效选择\n");
                     return 1;
                 }
             } else {
@@ -452,16 +450,16 @@ int main(int argc, char **argv)
 
     robot = robot_init(port, (uint32_t)baud);
     if (robot == NULL) {
-        LOG_ERROR("初始化失败，请检查串口连接与 robot_config.ini");
+        printf("[错误] 初始化失败，请检查串口连接与 robot_config.ini\n");
         return 1;
     }
 
     /* 后台定时监控：程序启动即创建线程，按周期巡检六轴状态/电流/报警 */
     mon = monitor_create(robot, 0); /* 0=不启用电流堵转事件，只做状态监控 */
     if (mon == NULL) {
-        LOG_WARN("监控器创建失败，继续运行");
+        printf("[警告] 监控器创建失败，继续运行\n");
     } else if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS)) {
-        LOG_WARN("监控线程启动失败，继续运行");
+        printf("[警告] 监控线程启动失败，继续运行\n");
         monitor_destroy(mon);
         mon = NULL;
     }
@@ -481,32 +479,32 @@ int main(int argc, char **argv)
             monitor_stop(mon);
             ErrCode rc = (cmd.joint >= 1) ? robot_home_single(robot, cmd.joint)
                                           : robot_home(robot);
-            if (rc != ERR_NONE) LOG_ERROR("回零失败：%s", err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 回零失败：%s\n", err_str(rc));
             if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
-                LOG_WARN("回零后监控线程重启失败");
+                printf("[警告] 回零后监控线程重启失败\n");
             break;
         }
         case CMD_HOMEJ: {
             monitor_stop(mon);
             ErrCode rc = robot_home_joint(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
-            if (rc != ERR_NONE) LOG_ERROR("单轴回零失败：%s", err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 单轴回零失败：%s\n", err_str(rc));
             if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
-                LOG_WARN("回零后监控线程重启失败");
+                printf("[警告] 回零后监控线程重启失败\n");
             break;
         }
         case CMD_MOVEJ: {
             ErrCode rc = robot_movej(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
-            if (rc != ERR_NONE) LOG_ERROR("运动指令失败：%s", err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 运动指令失败：%s\n", err_str(rc));
             break;
         }
         case CMD_ENABLE: {
             ErrCode rc = robot_enable(robot, cmd.joint);
-            if (rc != ERR_NONE) LOG_ERROR("使能失败：%s", err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 使能失败：%s\n", err_str(rc));
             break;
         }
         case CMD_DISABLE: {
             ErrCode rc = robot_disable(robot, cmd.joint);
-            if (rc != ERR_NONE) LOG_ERROR("失能失败：%s", err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 失能失败：%s\n", err_str(rc));
             break;
         }
         case CMD_STATUS:
@@ -520,14 +518,14 @@ int main(int argc, char **argv)
                     ErrCode rc = is_mask ? robot_mask(robot, cmd.joints[k])
                                          : robot_unmask(robot, cmd.joints[k]);
                     if (rc != ERR_NONE) {
-                        LOG_ERROR("%s关节%d失败：%s", is_mask ? "屏蔽" : "恢复",
+                        printf("[错误] %s关节%d失败：%s\n", is_mask ? "屏蔽" : "恢复",
                                   cmd.joints[k], err_str(rc));
                     }
                 }
             } else {
                 ErrCode rc = is_mask ? robot_mask(robot, cmd.joint)
                                      : robot_unmask(robot, cmd.joint);
-                if (rc != ERR_NONE) LOG_ERROR("%s失败：%s", is_mask ? "屏蔽" : "恢复", err_str(rc));
+                if (rc != ERR_NONE) printf("[错误] %s失败：%s\n", is_mask ? "屏蔽" : "恢复", err_str(rc));
             }
             break;
         }
@@ -540,25 +538,13 @@ int main(int argc, char **argv)
         case CMD_TORQUE: {
             monitor_stop(mon);
             ErrCode rc = robot_torque_probe(robot, cmd.joint, cmd.torque_level);
-            if (rc != ERR_NONE) LOG_ERROR("力矩碰撞诊断失败：%s", err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 力矩碰撞诊断失败：%s\n", err_str(rc));
             if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
-                LOG_WARN("诊断后监控线程重启失败");
-            break;
-        }
-        case CMD_DEBUG: {
-            /* 回零/堵转逐帧日志(电流/位置/帧差/实时电流快照)在 INFO 级别下不打印，
-             * 标定力矩等级与堵转阈值时用它打开看电流曲线，再输一次 debug 关闭。 */
-            if (log_get_level() > LOG_LEVEL_DEBUG) {
-                log_set_level(LOG_LEVEL_DEBUG);
-                LOG_WARN("已打开调试日志（回零逐帧电流/位置/帧差、实时电流快照），再输 debug 关闭");
-            } else {
-                log_set_level(LOG_LEVEL_INFO);
-                LOG_WARN("已关闭调试日志，恢复 INFO 级别");
-            }
+                printf("[警告] 诊断后监控线程重启失败\n");
             break;
         }
         case CMD_CALIB:
-            LOG_INFO("单关节调试功能未启用");
+            printf("单关节调试功能未启用\n");
             break;
         case CMD_HELP:
             cmd_print_help();
@@ -569,7 +555,7 @@ int main(int argc, char **argv)
         case CMD_EMPTY:
             break;
         default:
-            LOG_WARN("未知命令，输入 help 查看帮助");
+            printf("[警告] 未知命令，输入 help 查看帮助\n");
             break;
         }
     }

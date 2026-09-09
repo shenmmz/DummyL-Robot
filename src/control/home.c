@@ -9,7 +9,6 @@
 #include "api/motor_reg.h"
 #include "control/robot_internal.h"   /* LEESN_STAT_* 状态位定义 */
 #include "config/robot_config.h"      /* DEG2STEPS */
-#include "utils/logger.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -93,21 +92,21 @@ static ErrCode home_arm(Robot *robot, int joint)
 static void home_restore(Robot *robot, int joint)
 {
     if (motor_enable(robot, joint) != ERR_NONE) {
-        LOG_WARN("关节%d 恢复使能失败", joint);
+        printf("[警告] 关节%d 恢复使能失败\n", joint);
     }
     Sleep(30);
     if (motor_set_limit(robot, joint, 1) != ERR_NONE) {   /* 开启限位 */
-        LOG_WARN("关节%d 恢复限位失败", joint);
+        printf("[警告] 关节%d 恢复限位失败\n", joint);
     }
     /* 恢复超差报警：回零期间被关闭（0x000B/0x000C=0），
      * 结束后写回默认 200/100，恢复正常运动的超差保护 */
     if (motor_restore_pos_err_alarm(robot, joint) != ERR_NONE) {
-        LOG_WARN("关节%d 恢复超差报警失败", joint);
+        printf("[警告] 关节%d 恢复超差报警失败\n", joint);
     }
     /* 恢复位置偏差预警默认值 0x0010=20：回零期间被临时放宽(STALL_PREWARN_STEPS)，
      * 结束后写回，恢复正常运动的失步预警保护 */
     if (motor_set_pos_err_prewarn(robot, joint, 20) != ERR_NONE) {
-        LOG_WARN("关节%d 恢复位置偏差预警失败", joint);
+        printf("[警告] 关节%d 恢复位置偏差预警失败\n", joint);
     }
 }
 
@@ -119,8 +118,6 @@ static void home_restore(Robot *robot, int joint)
 #define STALL_PREWARN_STEPS   10000
 
 /* 各轴上一帧位置缓存（仅供日志帧差观测，不参与判定） */
-static int32_t s_stall_last_pos[7];
-static int     s_stall_last_ok[7];
 
 /* 【标定临时】各轴采样时刻与本次堵转启动时刻：
  *   周期 = 本帧与上一帧的时间差 → 真实轮询间隔，随并行轴数变化（单轴 ~7-10ms、
@@ -137,7 +134,6 @@ static ErrCode home_stall_start(Robot *robot, int joint)
 {
     StallHome *p = &stall[joint];
 
-    s_stall_last_ok[joint] = 0;   /* 新一次堵转，清位置缓存 */
     s_last_tick_ms[joint]  = 0;   /* 清周期基准（首帧周期显示 0） */
     s_stall_t0_ms[joint]   = GetTickCount();   /* 【标定】起步时刻 */
 
@@ -146,12 +142,12 @@ static ErrCode home_stall_start(Robot *robot, int joint)
 
     /* 关超差报警：顶死改由 home_check_stall 电流超阈判定，不再报警锁存 */
     if (motor_disable_pos_err_alarm(robot, joint) != ERR_NONE) {
-        LOG_WARN("关节%d 关闭超差报警失败，顶死仍会报警锁存", joint);
+        printf("[警告] 关节%d 关闭超差报警失败，顶死仍会报警锁存\n", joint);
     }
     /* 放宽偏差预警到 STALL_PREWARN_STEPS（0x0010 写不了 0，默认 20 步会让顶死瞬间
      * bit10 抢先切断输出、电流判据来不及命中）；挡不住时由兜底2(bit10 超差) 收尾 */
     if (motor_set_pos_err_prewarn(robot, joint, STALL_PREWARN_STEPS) != ERR_NONE) {
-        LOG_WARN("关节%d 放宽位置偏差预警失败，顶死仍会提前切断输出", joint);
+        printf("[警告] 关节%d 放宽位置偏差预警失败，顶死仍会提前切断输出\n", joint);
     }
     motor_set_profile(robot, joint, p->accel_ms, p->decel_ms);
     /* 设接近速度：力矩模式的接近速度由 0x00D8 决定，上电默认 300rpm。
@@ -163,19 +159,19 @@ static ErrCode home_stall_start(Robot *robot, int joint)
      * （本机固件力矩模式下不报 HOMED/退出RUN，电流才是唯一可靠触发）。
      * 纯电流连续运行回零模式已移除，torque_level 必须 >0，否则无法回零。 */
     if (p->torque_level <= 0) {
-        LOG_ERROR("关节%d torque_level=%d 未配置，纯电流回零已移除，无法回零", joint, p->torque_level);
+        printf("[错误] 关节%d torque_level=%d 未配置，纯电流回零已移除，无法回零\n", joint, p->torque_level);
         return ERR_ARG;
     }
     if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, p->torque_level) != ERR_NONE) {
-        LOG_ERROR("关节%d 设碰撞回原点力矩等级%d失败，回零中止", joint, p->torque_level);
+        printf("[错误] 关节%d 设碰撞回原点力矩等级%d失败，回零中止\n", joint, p->torque_level);
         return ERR_PORT;
     }
     Sleep(20);
     if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
-        LOG_ERROR("关节%d 启动碰撞回原点力矩模式失败，回零中止", joint);
+        printf("[错误] 关节%d 启动碰撞回原点力矩模式失败，回零中止\n", joint);
         return ERR_PORT;
     }
-    LOG_INFO("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA, 起步屏蔽%dms)",
+    printf("关节%d 碰撞回原点启动 (方向=%+d, 力矩等级=%d, 阈值=%dmA, 起步屏蔽%dms)\n",
              joint, p->dir, p->torque_level, p->stall_current, HOME_STALL_MASK_MS);
     return ERR_NONE;
 }
@@ -186,12 +182,12 @@ static ErrCode home_stall_start(Robot *robot, int joint)
  *   ② 主判据：电流超阈(>stall_current) → 单帧即判到位（起步屏蔽窗内不判）。
  *      回零统一走碰撞回原点力矩模式（手册第49节），但本机固件在力矩模式下
  *      不报 HOMED/退出RUN，故电流超阈才是唯一可靠触发（阈值须低于该等级保持电流）。
- * 出参 cur_out：读到电流后立即写回本帧 mA(-1=读失败)，供主循环电流快照 */
+ * 出参 cur_out：可选，读到电流时写回本帧 mA(-1=读失败)；不需要可传 NULL */
 static int home_check_stall(Robot *robot, int joint, int *cur_out)
 {
     uint32_t st;
-    int cur, cur_ok, pos_ok = 0;
-    int32_t pos = 0, delta = 0;
+    int cur, cur_ok;
+    int32_t pos = 0;
     int threshold = stall[joint].stall_current;
     uint32_t now_ms, period_ms = 0, elaps_ms = 0;
 
@@ -208,20 +204,18 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     if (cur_out) *cur_out = cur_ok ? cur : -1;
 
     /* 位置+状态合并读（0x0004 起 4 寄存器，1 事务拿全） */
-    pos_ok = 0;
     if (motor_read_pos_status(robot, joint, &pos, &st) != ERR_NONE) return 0;
-    pos_ok = 1;
 
     /* 兜底1：驱动器报警（关报警未生效或其它报警） —— 屏蔽窗内也生效，
      * 因为启动瞬间真报警需要立即响应，不能被屏蔽窗挡住 */
     if (st & LEESN_STAT_ALARM) {
-        LOG_INFO("关节%d T+%ums 周期=%ums [兜底1-bit21] 驱动器报警，判定堵转到位",
+        printf("关节%d T+%ums 周期=%ums [兜底1-bit21] 驱动器报警，判定堵转到位\n",
                  joint, elaps_ms, period_ms);
         return 1;
     }
     /* 兜底2：位置超差（阈值寄存器写 0 未生效时仍会触发） —— 屏蔽窗内也生效 */
     if (st & LEESN_STAT_OVERRUN) {
-        LOG_INFO("关节%d T+%ums 周期=%ums [兜底2-bit10] 位置超差，判定堵转到位",
+        printf("关节%d T+%ums 周期=%ums [兜底2-bit10] 位置超差，判定堵转到位\n",
                  joint, elaps_ms, period_ms);
         return 1;
     }
@@ -229,20 +223,8 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     /* 起步屏蔽窗内：主判据不生效，只记录基线，防加速浪涌误判
      * （兜底报警/超差仍生效，因为那是真故障） */
     if (s_stall_t0_ms[joint] != 0 && now_ms < s_stall_mask_end_ms[joint]) {
-        if (pos_ok) {
-            s_stall_last_pos[joint] = pos;
-            s_stall_last_ok[joint] = 1;
-        }
-        LOG_DEBUG("关节%d T+%ums 周期=%ums [起步屏蔽] 状态=0x%08X 电流=%dmA 位置=%d (阈值=%dmA, 屏蔽剩%ums)",
-                 joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
-                 pos_ok ? (int)pos : -99999, threshold,
-                 (unsigned)(s_stall_mask_end_ms[joint] - now_ms));
         return 0;
     }
-
-    /* 帧差：仅作日志观测（判断电机是否还在转、是否在打滑），不再参与判定
-     * （位置已在上方随状态一帧读出，此处不再单独发事务） */
-    if (s_stall_last_ok[joint]) delta = pos - s_stall_last_pos[joint];
 
     /* 主判据：电流超阈（全部轴统一，不看位置），单帧即判到位。
      * 实测（home:1 力矩等级120）：推靠途中电流明显低于阈值（~180~440mA，随轴/负载），
@@ -251,22 +233,11 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
      * 阈值须低于该等级保持电流、高于推靠巡航电流。
      * 电流读失败帧不判定，不会误判到位。 */
     if (threshold > 0 && cur_ok && cur > threshold) {
-        LOG_INFO("关节%d T+%ums 周期=%ums [电流超阈] 电流超阈值(%dmA>%dmA)，判定堵转到位",
+        printf("关节%d T+%ums 周期=%ums [电流超阈] 电流超阈值(%dmA>%dmA)，判定堵转到位\n",
                  joint, elaps_ms, period_ms, cur, threshold);
         return 1;
     }
 
-    /* 未命中：更新位置缓存，供下一帧帧差观测 */
-    if (pos_ok) {
-        s_stall_last_pos[joint] = pos;
-        s_stall_last_ok[joint] = 1;
-    }
-
-    LOG_DEBUG("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 位置=%d 帧差=%d (阈值=%dmA)",
-             joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
-             pos_ok ? (int)pos : -99999,
-             (pos_ok && s_stall_last_ok[joint]) ? (int)delta : -99999,
-             threshold);
     return 0;
 }
 
@@ -290,21 +261,21 @@ static void home_stall_done(Robot *robot, int joint)
 
     /* 退出连续运行：否则绝对定位(0x00E8)不执行；压短减速再停，防按原减速持续压紧报警 */
     if (motor_set_profile(robot, joint, p->accel_ms, 50) != ERR_NONE) {
-        LOG_WARN("关节%d 临时压短减速时间失败，仍按原减速停止", joint);
+        printf("[警告] 关节%d 临时压短减速时间失败，仍按原减速停止\n", joint);
     }
     if (motor_stop_slow(robot, joint) != ERR_NONE) {
-        LOG_WARN("关节%d 减速停止失败，后续退让 move_abs 可能被忽略", joint);
+        printf("[警告] 关节%d 减速停止失败，后续退让 move_abs 可能被忽略\n", joint);
     }
     Sleep(150);
     if (motor_set_profile(robot, joint, p->accel_ms, p->decel_ms) != ERR_NONE) {
-        LOG_WARN("关节%d 恢复减速时间失败，后续 movej 减速将偏短", joint);
+        printf("[警告] 关节%d 恢复减速时间失败，后续 movej 减速将偏短\n", joint);
     }
 
     /* 兜底：先清报警再清零（read_alarm 返回 -1 为读失败，仅处理 >0 真报警） */
     alarm = motor_read_alarm(robot, joint);
     if (alarm > 0) {
         int retry, cleared = 0;
-        LOG_WARN("关节%d 检测到驱动器报警 码=%d", joint, alarm);
+        printf("[警告] 关节%d 检测到驱动器报警 码=%d\n", joint, alarm);
         for (retry = 0; retry < 3; retry++) {
             if (motor_clear_alarm(robot, joint) == ERR_NONE) {
                 cleared = 1;
@@ -313,9 +284,9 @@ static void home_stall_done(Robot *robot, int joint)
             Sleep(50);   /* 清报警重试间隔 */
         }
         if (cleared) {
-            LOG_INFO("关节%d 已清除驱动器报警（原码=%d）", joint, alarm);
+            printf("关节%d 已清除驱动器报警（原码=%d）\n", joint, alarm);
         } else {
-            LOG_WARN("关节%d 清除驱动器报警失败，清零可能被驱动器拒绝", joint);
+            printf("[警告] 关节%d 清除驱动器报警失败，清零可能被驱动器拒绝\n", joint);
         }
         Sleep(10);
     }
@@ -337,21 +308,21 @@ static void home_stall_done(Robot *robot, int joint)
         clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
         Sleep(30);
         pos = motor_read_position(robot, joint, &pos_ok);
-        LOG_INFO("关节%d 清零诊断: 清前=%d 清后=%d (写0x00D2%s)",
+        printf("关节%d 清零诊断: 清前=%d 清后=%d (写0x00D2%s)\n",
                  joint, ok0 ? (int)p0 : -99999, pos_ok ? (int)pos : -99999,
                  clear_ok ? "成功" : "失败");
         for (k = 1; k <= 2; k++) {
             int32_t pk;
             Sleep(60);
             pk = motor_read_position(robot, joint, &okk);
-            LOG_INFO("关节%d 清零诊断: +%dms 位置=%d", joint, 30 + k * 60,
+            printf("关节%d 清零诊断: +%dms 位置=%d\n", joint, 30 + k * 60,
                      okk ? (int)pk : -99999);
         }
     }
     if (!clear_ok) {
-        LOG_ERROR("关节%d 堵转清零失败，后续退让 move_abs 将基于旧零点，位置会错", joint);
+        printf("[错误] 关节%d 堵转清零失败，后续退让 move_abs 将基于旧零点，位置会错\n", joint);
     } else {
-        LOG_INFO("关节%d 堵转清零成功，位置=%d",
+        printf("关节%d 堵转清零成功，位置=%d\n",
                  joint, pos_ok ? (int)pos : -99999);
     }
 }
@@ -442,20 +413,20 @@ static void home_stall_forward(Robot *robot, int joint)
     pos    = motor_read_position(robot, joint, &pos_ok);
     target = pos_ok ? (pos + delta) : delta;   /* 读不到位置：退回绝对目标 */
     if (!pos_ok) {
-        LOG_WARN("关节%d 转角前读位置失败，退回绝对目标 %d", joint, (int)delta);
+        printf("[警告] 关节%d 转角前读位置失败，退回绝对目标 %d\n", joint, (int)delta);
     } else if (pos > HOME_ZERO_TOL_STEPS || pos < -(int32_t)HOME_ZERO_TOL_STEPS) {
-        LOG_WARN("关节%d 清零后位置非0(%d步≈%.2f°)：0x00D2 零点可能未生效，"
+        printf("[警告] 关节%d 清零后位置非0(%d步≈%.2f°)：0x00D2 零点可能未生效，\n"
                  "本次已改用相对位移保证行程，但后续绝对定位仍带此偏置",
                  joint, (int)pos,
                  (double)pos * 360.0 /
                  ((double)reductions[joint - 1] * (double)ENCODER_STEPS_PER_REV));
     }
 
-    LOG_INFO("关节%d 堵转后相对移动 %.1f°（位置 %d -> 绝对目标 %d）",
+    printf("关节%d 堵转后相对移动 %.1f°（位置 %d -> 绝对目标 %d）\n",
              joint, p->forward_deg, (int)pos, (int)target);
     if (motor_set_speed(robot, joint, p->speed_rpm) != ERR_NONE ||
         motor_move_abs(robot, joint, target) != ERR_NONE) {
-        LOG_WARN("关节%d 转角指令发送失败，停在清零点", joint);
+        printf("[警告] 关节%d 转角指令发送失败，停在清零点\n", joint);
         return;
     }
 
@@ -463,14 +434,14 @@ static void home_stall_forward(Robot *robot, int joint)
     if (rc == 0) {
         int pos2_ok = 0;
         int32_t pos2 = motor_read_position(robot, joint, &pos2_ok);
-        LOG_WARN("关节%d 退让 %.1f° 超时（目标=%d 位置=%d 差=%d）",
+        printf("[警告] 关节%d 退让 %.1f° 超时（目标=%d 位置=%d 差=%d）\n",
                  joint, p->forward_deg, (int)target,
                  pos2_ok ? (int)pos2 : -99999,
                  pos2_ok ? (int)(target - pos2) : -99999);
     } else if (rc < 0) {
-        LOG_WARN("关节%d 退让 %.1f° 报警/异常", joint, p->forward_deg);
+        printf("[警告] 关节%d 退让 %.1f° 报警/异常\n", joint, p->forward_deg);
     } else {
-        LOG_INFO("关节%d 退让到位（%.1f°）", joint, p->forward_deg);
+        printf("关节%d 退让到位（%.1f°）\n", joint, p->forward_deg);
     }
 }
 
@@ -492,37 +463,37 @@ ErrCode robot_torque_probe(Robot *robot, int joint, int level)
     if (joint < 1 || joint > 6) return ERR_ARG;
     if (level < 0 || level > 255) return ERR_ARG;
 
-    LOG_INFO("=== 力矩碰撞回原点诊断：关节%d 等级=%d 方向=%+d ===", joint, level, p->dir);
+    printf("=== 力矩碰撞回原点诊断：关节%d 等级=%d 方向=%+d ===\n", joint, level, p->dir);
 
     if (home_arm(robot, joint) != ERR_NONE) {
-        LOG_WARN("关节%d arm 失败", joint);
+        printf("[警告] 关节%d arm 失败\n", joint);
         return ERR_PORT;
     }
     /* 诊断期间放宽偏差预警，避免顶死被 bit10 提前切断（同 home_stall_start） */
     motor_set_pos_err_prewarn(robot, joint, STALL_PREWARN_STEPS);
     motor_disable_pos_err_alarm(robot, joint);
     if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, level) != ERR_NONE) {
-        LOG_WARN("关节%d 设力矩模式失败", joint);
+        printf("[警告] 关节%d 设力矩模式失败\n", joint);
         home_restore(robot, joint);
         return ERR_PORT;
     }
     Sleep(20);
     if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
-        LOG_WARN("关节%d 启动力矩碰撞失败", joint);
+        printf("[警告] 关节%d 启动力矩碰撞失败\n", joint);
         motor_set_torque_mode(robot, joint, 0, 0);
         home_restore(robot, joint);
         return ERR_PORT;
     }
 
     start_ms = GetTickCount();
-    LOG_INFO("T+ms 状态字 电流mA 位置 备注");
+    printf("T+ms 状态字 电流mA 位置 备注\n");
     while ((now_ms = GetTickCount()) - start_ms < 15000) {
         uint32_t elaps = now_ms - start_ms;
         cur = motor_read_current(robot, joint);
         cur_ok = (cur >= 0 && cur <= 3000);
         pos_ok = (motor_read_pos_status(robot, joint, &pos, &st) == ERR_NONE);
         if (!pos_ok) {
-            LOG_INFO("%ums ? ? ? [读失败]", elaps);
+            printf("%ums ? ? ? [读失败]\n", elaps);
             Sleep(200); continue;
         }
         {
@@ -531,11 +502,11 @@ ErrCode robot_torque_probe(Robot *robot, int joint, int level)
             else if (st & LEESN_STAT_OVERRUN) tag = " [超差]";
             else if (st & LEESN_STAT_HOMED)  { tag = " [HOMED]"; seen_homed = 1; }
             else if ((st & LEESN_STAT_RUN_MASK) != LEESN_STAT_RUN_ACTIVE) { tag = " [退出RUN]"; seen_stop = 1; }
-            LOG_INFO("%ums 0x%08X %dmA %d%s%s", elaps, (unsigned)st,
+            printf("%ums 0x%08X %dmA %d%s%s\n", elaps, (unsigned)st,
                      cur_ok ? cur : -1, (int)pos, tag,
                      (st & LEESN_STAT_RUN_ACTIVE) ? " RUN" : "");
             if (seen_homed || seen_stop) {
-                LOG_INFO("关节%d 检测到到位信号（%s），停止力矩并退出诊断",
+                printf("关节%d 检测到到位信号（%s），停止力矩并退出诊断\n",
                          joint, seen_homed ? "bit15 HOMED" : "退出 RUN_ACTIVE");
                 break;
             }
@@ -547,22 +518,12 @@ ErrCode robot_torque_probe(Robot *robot, int joint, int level)
     motor_torque_run(robot, joint, 0, 0, 0);
     motor_set_torque_mode(robot, joint, 0, 0);
     home_restore(robot, joint);
-    LOG_INFO("=== 力矩碰撞诊断结束：关节%d 等级=%d（HOMED=%d 退出RUN=%d）===",
+    printf("=== 力矩碰撞诊断结束：关节%d 等级=%d（HOMED=%d 退出RUN=%d）===\n",
              joint, level, seen_homed, seen_stop);
     return ERR_NONE;
 }
 
 /* ====================== 关节6：传感器回零 ====================== */
-
-/* sensor_phase_name：阶段名（用于日志） */
-static const char *sensor_phase_name(SensorPhase ph)
-{
-    static const char *names[] = {
-        "初始判定", "正向开3°", "反向快找", "正向快找", "慢速离开", "完成"
-    };
-    if (ph < 0 || ph >= (int)(sizeof(names) / sizeof(names[0]))) return "未知";
-    return names[ph];
-}
 
 /* SensorCtx：关节6 传感器回零上下文。
  * start/tick/finish 拆分使传感器回零可与堵转轮询共用主循环并行推进 */
@@ -587,7 +548,7 @@ typedef struct {
 static void sensor6_set_rpm(Robot *robot, int rpm)
 {
     if (motor_set_speed16(robot, 6, rpm) != ERR_NONE) {
-        LOG_WARN("关节6 写连续运行速度源0x009A(%drpm)失败，按记忆速度运行", rpm);
+        printf("[警告] 关节6 写连续运行速度源0x009A(%drpm)失败，按记忆速度运行\n", rpm);
     }
     motor_set_speed(robot, 6, rpm);
 }
@@ -609,7 +570,7 @@ static ErrCode sensor6_start(Robot *robot, SensorCtx *c)
 
     rc = home_arm(robot, 6);
     if (rc != ERR_NONE) {
-        LOG_WARN("关节6 arm 失败：%s", err_str(rc));
+        printf("[警告] 关节6 arm 失败：%s\n", err_str(rc));
         return rc;
     }
     motor_set_profile(robot, 6, sensor.accel_ms, sensor.accel_ms);
@@ -617,7 +578,7 @@ static ErrCode sensor6_start(Robot *robot, SensorCtx *c)
      * 不依赖驱动器默认值或上次残留值，避免上电第一次速度不一致。 */
     sensor6_set_rpm(robot, sensor.fast_rpm);
 
-    LOG_INFO("关节6 传感器回零启动 (快速%drpm/慢速%drpm/极慢%drpm)",
+    printf("关节6 传感器回零启动 (快速%drpm/慢速%drpm/极慢%drpm)\n",
              sensor.fast_rpm, sensor.slow_rpm, sensor.crawl_rpm);
     c->start_ms = GetTickCount();
     return ERR_NONE;
@@ -641,14 +602,14 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     /* 超时检测：离开沿阶段单独 10s，其余用总超时 */
     if (ph == SEN_SLOW_LEAVE && c->leave_start > 0 &&
         (now - c->leave_start) >= 10000) {
-        LOG_WARN("关节6 慢速离开IN0超时");
+        printf("[警告] 关节6 慢速离开IN0超时\n");
         c->failed = 1;
         motor_estop(robot, 6);
         return -1;
     }
     if (ph != SEN_SLOW_LEAVE && c->start_ms > 0 &&
         (now - c->start_ms) >= (uint32_t)home_timeout_ms) {
-        LOG_WARN("关节6 传感器回零超时");
+        printf("[警告] 关节6 传感器回零超时\n");
         c->failed = 1;
         motor_estop(robot, 6);
         return -1;
@@ -670,7 +631,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
         if (!pos_ok) {
             c->pos_fail_cnt++;
             if (c->pos_fail_cnt >= SEN_POS_FAIL_MAX) {
-                LOG_WARN("关节6 正向开3°阶段位置读连续失败%d次，急停保护",
+                printf("[警告] 关节6 正向开3°阶段位置读连续失败%d次，急停保护\n",
                          SEN_POS_FAIL_MAX);
                 c->failed = 1;
                 motor_estop(robot, 6);
@@ -681,15 +642,13 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
         }
     }
 
-    LOG_DEBUG("关节6 IN0=%d IN1=%d 电流=%dmA 位置=%d 阶段=%s",
-             in0, in1, cur, pos_ok ? (int)pos : -99999, sensor_phase_name(ph));
 
     /* 状态机切换 */
     switch (ph) {
     case SEN_INIT:
         if (in0) {
             /* 情况1：初始就在IN0上，正向快速开3度（离开挡片） */
-            LOG_INFO("关节6 初始碰IN0（情况1），正向快速开3度");
+            printf("关节6 初始碰IN0（情况1），正向快速开3度\n");
             c->pos_base = pos_ok ? pos : 0;
             sensor6_set_rpm(robot, sensor.fast_rpm);
             Sleep(10);
@@ -697,14 +656,14 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
             c->ph = SEN_FWD_LEAVE;
         } else if (in1) {
             /* 情况2：初始碰IN1，正向快速找IN0 */
-            LOG_INFO("关节6 初始碰IN1（情况2），正向快速找IN0");
+            printf("关节6 初始碰IN1（情况2），正向快速找IN0\n");
             sensor6_set_rpm(robot, sensor.fast_rpm);
             Sleep(10);
             motor_run(robot, 6, +1);
             c->ph = SEN_FWD_FIND;
         } else {
             /* 情况3：初始无传感器，反向快速找IN0 */
-            LOG_INFO("关节6 初始无传感器（情况3），反向快速找IN0");
+            printf("关节6 初始无传感器（情况3），反向快速找IN0\n");
             sensor6_set_rpm(robot, sensor.fast_rpm);
             Sleep(10);
             motor_run(robot, 6, sensor.dir);
@@ -715,7 +674,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     case SEN_FWD_LEAVE:
         /* 正向快速开3度：位移到位后反向快速回找 IN0 */
         if (pos_ok && (pos - c->pos_base) >= DEG2STEPS(3.0, 50)) {
-            LOG_INFO("关节6 正向开3度到位，反向快速回找IN0");
+            printf("关节6 正向开3度到位，反向快速回找IN0\n");
             sensor6_set_rpm(robot, sensor.fast_rpm);
             Sleep(10);
             motor_run(robot, 6, sensor.dir);
@@ -726,7 +685,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     case SEN_REV_FIND:
         if (in0) {
             /* 反向途中碰到IN0：改慢速正向离开（on->off 清零） */
-            LOG_INFO("关节6 反向碰到IN0，慢速正向离开 (%drpm)", sensor.crawl_rpm);
+            printf("关节6 反向碰到IN0，慢速正向离开 (%drpm)\n", sensor.crawl_rpm);
             sensor6_set_rpm(robot, sensor.crawl_rpm);
             Sleep(10);
             motor_run(robot, 6, +1);
@@ -735,7 +694,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
             c->ph = SEN_SLOW_LEAVE;
         } else if (in1) {
             /* 反向途中先碰IN1：转入情况2（正向快速找IN0） */
-            LOG_INFO("关节6 反向碰到IN1，转正向快速找IN0（同情况2）");
+            printf("关节6 反向碰到IN1，转正向快速找IN0（同情况2）\n");
             sensor6_set_rpm(robot, sensor.fast_rpm);
             Sleep(10);
             motor_run(robot, 6, +1);
@@ -746,7 +705,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     case SEN_FWD_FIND:
         if (in0) {
             /* 正向碰到IN0：改慢速正向离开（穿过挡片到正向沿清零） */
-            LOG_INFO("关节6 正向碰到IN0，慢速正向离开 (%drpm)", sensor.crawl_rpm);
+            printf("关节6 正向碰到IN0，慢速正向离开 (%drpm)\n", sensor.crawl_rpm);
             sensor6_set_rpm(robot, sensor.crawl_rpm);
             c->in0_was_on = 1;
             c->leave_start = GetTickCount();
@@ -757,7 +716,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     case SEN_SLOW_LEAVE:
         if (c->in0_was_on && !in0) {
             /* 慢速离开IN0（on->off 沿），急停并清零，完成 */
-            LOG_INFO("关节6 慢速离开IN0，回零完成");
+            printf("关节6 慢速离开IN0，回零完成\n");
             motor_estop(robot, 6);
             Sleep(50);
             c->ph = SEN_DONE;
@@ -785,7 +744,7 @@ static void sensor6_finish(Robot *robot, SensorCtx *c)
         int clear_ok = (motor_clear_pos(robot, 6) == ERR_NONE);
         Sleep(30);
         pos = motor_read_position(robot, 6, &pos_ok);
-        LOG_INFO("关节6 位置清零%s，位置=%d",
+        printf("关节6 位置清零%s，位置=%d\n",
                  clear_ok ? "成功" : "失败", pos_ok ? (int)pos : -99999);
     } else {
         /* 主循环整体超时等未走 tick 超时分支的兜底 */
@@ -793,11 +752,11 @@ static void sensor6_finish(Robot *robot, SensorCtx *c)
             c->failed = 1;
             motor_estop(robot, 6);
         }
-        LOG_WARN("关节6 传感器回零失败：%s", err_str(ERR_TIMEOUT));
+        printf("[警告] 关节6 传感器回零失败：%s\n", err_str(ERR_TIMEOUT));
     }
 
     home_restore(robot, 6);
-    if (c->done) LOG_INFO("关节6 回零完成");
+    if (c->done) printf("关节6 回零完成\n");
 }
 
 /* home_joint6：关节6 单轴传感器回零 = sensor6_start → 循环 tick → sensor6_finish */
@@ -850,25 +809,25 @@ static void home_goto_pose(Robot *robot)
             if (st_ok && pos_ok) {
                 tgt[j] = pos + delta;
                 if (pos > HOME_ZERO_TOL_STEPS || pos < -(int32_t)HOME_ZERO_TOL_STEPS) {
-                    LOG_WARN("关节%d 清零后位置非0(%d步≈%.2f°)：0x00D2 零点可能未生效，"
+                    printf("[警告] 关节%d 清零后位置非0(%d步≈%.2f°)：0x00D2 零点可能未生效，\n"
                              "本次已改用相对位移保证行程，但后续绝对定位仍带此偏置",
                              j, (int)pos,
                              (double)pos * 360.0 /
                              ((double)reductions[j - 1] * (double)ENCODER_STEPS_PER_REV));
                 }
-                LOG_INFO("关节%d movej 前: 状态=0x%08X 报警=%d 位置=%d 行程=%d 绝对目标=%d",
+                printf("关节%d movej 前: 状态=0x%08X 报警=%d 位置=%d 行程=%d 绝对目标=%d\n",
                          j, (unsigned)st, motor_read_alarm(robot, j), (int)pos,
                          (int)delta, (int)tgt[j]);
             } else {
                 tgt[j] = delta;   /* 读不到位置：退回绝对目标（保持原行为） */
-                LOG_WARN("关节%d movej 前: 状态读%s 位置读%s，退回绝对目标 %d",
+                printf("[警告] 关节%d movej 前: 状态读%s 位置读%s，退回绝对目标 %d\n",
                          j, st_ok ? "OK" : "失败", pos_ok ? "OK" : "失败", (int)delta);
             }
         }
-        LOG_INFO("关节%d 相对移动 %.1f°（绝对目标 %d）", j, p->forward_deg, (int)tgt[j]);
+        printf("关节%d 相对移动 %.1f°（绝对目标 %d）\n", j, p->forward_deg, (int)tgt[j]);
         if (motor_set_speed(robot, j, p->speed_rpm) != ERR_NONE ||
             motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
-            LOG_WARN("关节%d 发 movej 失败", j);
+            printf("[警告] 关节%d 发 movej 失败\n", j);
             continue;
         }
         pend[j] = 1;
@@ -885,7 +844,7 @@ static void home_goto_pose(Robot *robot)
                 int pos_ok;
                 if (!pend[j]) continue;
                 pos = motor_read_position(robot, j, &pos_ok);
-                LOG_WARN("关节%d 转角到 %.1f° 超时（目标=%d 位置=%d 差=%d）",
+                printf("[警告] 关节%d 转角到 %.1f° 超时（目标=%d 位置=%d 差=%d）\n",
                          j, stall[j].forward_deg, (int)tgt[j],
                          pos_ok ? (int)pos : -99999,
                          pos_ok ? (int)(tgt[j] - pos) : -99999);
@@ -901,11 +860,11 @@ static void home_goto_pose(Robot *robot)
                 int32_t pos;
                 int pos_ok;
                 pos = motor_read_position(robot, j, &pos_ok);
-                LOG_INFO("关节%d 到位（%.1f° 位置=%d）", j, stall[j].forward_deg,
+                printf("关节%d 到位（%.1f° 位置=%d）\n", j, stall[j].forward_deg,
                          pos_ok ? (int)pos : -99999);
                 pend[j] = 0; remain--;
             } else if (q == -1) {
-                LOG_WARN("关节%d 转角到 %.1f° 报警/异常，已结算该轴",
+                printf("[警告] 关节%d 转角到 %.1f° 报警/异常，已结算该轴\n",
                          j, stall[j].forward_deg);
                 pend[j] = 0; remain--;
             } else if (q == -2) {
@@ -929,18 +888,17 @@ ErrCode robot_home(Robot *robot)
     SensorCtx c6;
     uint32_t start_ms;
     int j, all_ok;
-    int cur_now[7] = {-1, -1, -1, -1, -1, -1, -1};  /* 1~6 本帧电流 mA；-1=未启动/已完成/读取失败 */
     int any_fail = 0;
 
     if (robot == NULL) return ERR_ARG;
 
     /* 打印参数总览 */
-    LOG_INFO("=== 回零参数 ===");
+    printf("=== 回零参数 ===\n");
     for (j = 1; j <= 5; j++) {
         if (robot_is_masked(robot, j)) {
-            LOG_INFO("  关节%d: 已屏蔽", j);
+            printf("  关节%d: 已屏蔽\n", j);
         } else {
-                LOG_INFO("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f° 力矩=%d%s",
+                printf("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f° 力矩=%d%s\n",
                          j, stall[j].speed_rpm, stall[j].accel_ms, stall[j].decel_ms,
                          stall[j].dir, stall[j].stall_current,
                          stall[j].forward_deg,
@@ -949,24 +907,24 @@ ErrCode robot_home(Robot *robot)
         }
     }
     if (!robot_is_masked(robot, 6)) {
-        LOG_INFO("  关节6: 传感器 快%d/慢%d/极慢%drpm 方向=%+d",
+        printf("  关节6: 传感器 快%d/慢%d/极慢%drpm 方向=%+d\n",
                  sensor.fast_rpm, sensor.slow_rpm, sensor.crawl_rpm, sensor.dir);
     }
-    LOG_INFO("================");
+    printf("================\n");
 
     /* 阶段1：{1,2,3,5} 并行堵转归零 与 关节6 传感器回零 同时启动 */
-    LOG_INFO("回零：{2,3,5,1} 堵转 + 关节6 传感器 并行归零...");
+    printf("回零：{2,3,5,1} 堵转 + 关节6 传感器 并行归零...\n");
     for (int gi = 0; gi < (int)(sizeof(group_stall) / sizeof(group_stall[0])); gi++) {
         int jj = group_stall[gi];
         if (robot_is_masked(robot, jj)) continue;
         if (home_arm(robot, jj) != ERR_NONE) {
-            LOG_WARN("关节%d arm 失败，跳过", jj);
+            printf("[警告] 关节%d arm 失败，跳过\n", jj);
             sfail[jj] = 1;
             any_fail = 1;
             continue;
         }
         if (home_stall_start(robot, jj) != ERR_NONE) {
-            LOG_WARN("关节%d 堵转启动失败，跳过", jj);
+            printf("[警告] 关节%d 堵转启动失败，跳过\n", jj);
             sfail[jj] = 1;
             any_fail = 1;
             continue;
@@ -988,16 +946,12 @@ ErrCode robot_home(Robot *robot)
     while ((GetTickCount() - start_ms) < (uint32_t)home_timeout_ms) {
         int all_done = 1;
 
-        /* 每轮电流快照复位：仅本帧真正读到电流的轴显示数值，其余显示 '-' */
-        for (j = 1; j <= 6; j++) cur_now[j] = -1;
-
         /* 6 轴传感器推进一帧 */
         if (active[6] && !sdone[6] && !sfail[6]) {
             int r = sensor6_tick(robot, &c6);
             if (r == 1)       sdone[6] = 1;
             else if (r == -1) { sfail[6] = 1; any_fail = 1; }
             else              all_done = 0;
-            cur_now[6] = c6.last_cur;   /* tick 帧内已更新 last_cur */
         }
 
         /* 堵转组轮询（4 号由 3 号到位事件加入 active） */
@@ -1005,44 +959,23 @@ ErrCode robot_home(Robot *robot)
             int rc;
             if (!active[j] || sdone[j] || sfail[j]) continue;
             all_done = 0;
-            rc = home_check_stall(robot, j, &cur_now[j]);
+            rc = home_check_stall(robot, j, NULL);
             if (rc == 0) continue;
             home_stall_done(robot, j);
             sdone[j] = 1;
-            LOG_INFO("关节%d 堵转回零完成", j);
+            printf("关节%d 堵转回零完成\n", j);
             if (j == 3 && !active[4] && !robot_is_masked(robot, 4)) {
                 /* 阶段2：3 号到位 -> 立即启动 4 号 */
                 if (home_arm(robot, 4) == ERR_NONE &&
                     home_stall_start(robot, 4) == ERR_NONE) {
                     active[4] = 1;
-                    LOG_INFO("关节3 到位，立即启动关节4 堵转归零");
+                    printf("关节3 到位，立即启动关节4 堵转归零\n");
                 } else {
-                    LOG_WARN("关节4 arm/启动失败，跳过（未归零）");
+                    printf("[警告] 关节4 arm/启动失败，跳过（未归零）\n");
                     sfail[4] = 1;
                     any_fail = 1;
                 }
             }
-        }
-
-        /* 每轮六轴电流统一快照（- = 未启动/已完成/读取失败）
-         * 【标定】附带在跑轴数：轮询周期随该数变化（1 轴 ~7-10ms / 5 轴 30~50ms），
-         * 日志里能直接把"周期变化"与"轴数减少"对上，便于标定窗口点数与死区 */
-        {
-            char snap[160];
-            size_t off = 0;
-            int nrun = 0;
-            for (j = 1; j <= 6; j++) {
-                if (active[j] && !sdone[j] && !sfail[j]) nrun++;
-            }
-            off += (size_t)snprintf(snap + off, sizeof(snap) - off,
-                                    "实时电流[在跑%d轴]", nrun);
-            for (j = 1; j <= 6; j++) {
-                if (cur_now[j] < 0)
-                    off += (size_t)snprintf(snap + off, sizeof(snap) - off, " %d=-", j);
-                else
-                    off += (size_t)snprintf(snap + off, sizeof(snap) - off, " %d=%dmA", j, cur_now[j]);
-            }
-            LOG_DEBUG("%s", snap);
         }
 
         if (all_done) break;
@@ -1052,7 +985,7 @@ ErrCode robot_home(Robot *robot)
     /* 超时兜底：未完成堵转轴急停并标记失败 */
     for (j = 1; j <= 5; j++) {
         if (!active[j] || sdone[j]) continue;
-        LOG_WARN("关节%d 堵转回零超时", j);
+        printf("[警告] 关节%d 堵转回零超时\n", j);
         motor_estop(robot, j);
         sfail[j] = 1;
         any_fail = 1;
@@ -1083,10 +1016,10 @@ ErrCode robot_home(Robot *robot)
             home_restore(robot, j);
             Sleep(20);
         }
-        LOG_INFO("回零：全部轴归零完成，统一转角到 forward_deg...");
+        printf("回零：全部轴归零完成，统一转角到 forward_deg...\n");
         home_goto_pose(robot);
     } else {
-        LOG_WARN("回零：存在未归零/失败轴，跳过统一转角");
+        printf("[警告] 回零：存在未归零/失败轴，跳过统一转角\n");
         /* 失败场景也要恢复 1~5 轴保护（6 轴已在 sensor6_finish 恢复） */
         for (j = 1; j <= 5; j++) {
             if (robot_is_masked(robot, j)) continue;
@@ -1095,7 +1028,7 @@ ErrCode robot_home(Robot *robot)
         }
     }
 
-    LOG_INFO("回零流程结束：%s", any_fail ? "存在失败轴" : "全部成功");
+    printf("回零流程结束：%s\n", any_fail ? "存在失败轴" : "全部成功");
     return any_fail ? ERR_TIMEOUT : ERR_NONE;
 }
 
@@ -1113,21 +1046,21 @@ ErrCode robot_home_single(Robot *robot, int joint)
 
     /* 关节6 是传感器回零轴（不在 stall 堵转表内），走专用传感器状态机 */
     if (joint == 6) {
-        LOG_INFO("=== 单轴传感器回零：关节6 ===");
+        printf("=== 单轴传感器回零：关节6 ===\n");
         return home_joint6(robot);
     }
     p = &stall[joint];
 
-    LOG_INFO("=== 单轴独立堵转回零：关节%d ===", joint);
+    printf("=== 单轴独立堵转回零：关节%d ===\n", joint);
     rc = home_arm(robot, joint);
     if (rc != ERR_NONE) {
-        LOG_WARN("关节%d arm 失败：%s", joint, err_str(rc));
+        printf("[警告] 关节%d arm 失败：%s\n", joint, err_str(rc));
         return rc;
     }
 
     rc = home_stall_start(robot, joint);
     if (rc != ERR_NONE) {
-        LOG_WARN("关节%d 堵转启动失败：%s", joint, err_str(rc));
+        printf("[警告] 关节%d 堵转启动失败：%s\n", joint, err_str(rc));
         home_restore(robot, joint);
         return rc;
     }
@@ -1135,7 +1068,7 @@ ErrCode robot_home_single(Robot *robot, int joint)
     /* 等待堵转到位 */
     hit = home_wait_stall(robot, joint, home_timeout_ms);
     if (!hit) {
-        LOG_WARN("关节%d 堵转回零超时", joint);
+        printf("[警告] 关节%d 堵转回零超时\n", joint);
         motor_estop(robot, joint);
         home_restore(robot, joint);
         return ERR_TIMEOUT;
@@ -1146,7 +1079,7 @@ ErrCode robot_home_single(Robot *robot, int joint)
     home_stall_forward(robot, joint);
 
     home_restore(robot, joint);
-    LOG_INFO("关节%d 单轴回零完成（目标 %.1f°）", joint, p->forward_deg);
+    printf("关节%d 单轴回零完成（目标 %.1f°）\n", joint, p->forward_deg);
     return ERR_NONE;
 }
 
@@ -1161,7 +1094,7 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
     if (joint < 1 || joint > 6) return ERR_ARG;
     if (robot_is_masked(robot, joint)) return ERR_MASKED;
 
-    LOG_INFO("单轴回零：关节%d 回零后自动运动到 %.1f° ...", joint, angle_deg);
+    printf("单轴回零：关节%d 回零后自动运动到 %.1f° ...\n", joint, angle_deg);
 
     /* 保存并临时屏蔽其余轴，使 robot_home 只回零目标轴 */
     for (j = 1; j <= 6; j++) {
@@ -1180,21 +1113,21 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
 
         rc = robot_movej(robot, joint, angle_deg, spd);
         if (rc != ERR_NONE) {
-            LOG_ERROR("关节%d 自动运动到 %.1f° 失败：%s",
+            printf("[错误] 关节%d 自动运动到 %.1f° 失败：%s\n",
                       joint, angle_deg, err_str(rc));
         } else {
-            LOG_INFO("关节%d 自动运动到 %.1f° ...", joint, angle_deg);
+            printf("关节%d 自动运动到 %.1f° ...\n", joint, angle_deg);
             {
                 const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
                 int32_t target = DEG2STEPS(angle_deg, reductions[joint - 1]);
                 int wr = home_wait_inpos(robot, joint, target, home_timeout_ms);
                 if (wr == 1) {
-                    LOG_INFO("关节%d 到位（%.1f°）", joint, angle_deg);
+                    printf("关节%d 到位（%.1f°）\n", joint, angle_deg);
                 } else if (wr == 0) {
-                    LOG_WARN("关节%d 运动到 %.1f° 超时", joint, angle_deg);
+                    printf("[警告] 关节%d 运动到 %.1f° 超时\n", joint, angle_deg);
                     rc = ERR_TIMEOUT;
                 } else {
-                    LOG_WARN("关节%d 运动到 %.1f° 报警/异常", joint, angle_deg);
+                    printf("[警告] 关节%d 运动到 %.1f° 报警/异常\n", joint, angle_deg);
                     rc = ERR_ALARM;
                 }
             }
@@ -1210,7 +1143,7 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
         }
     }
 
-    LOG_INFO("关节%d 回零并运动到 %.1f°：%s",
+    printf("关节%d 回零并运动到 %.1f°：%s\n",
              joint, angle_deg, rc == ERR_NONE ? "完成" : err_str(rc));
     return rc;
 }

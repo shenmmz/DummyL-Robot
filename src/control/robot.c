@@ -18,7 +18,6 @@
 #include "comm/comm_if.h"
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
-#include "utils/logger.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,15 +75,15 @@ void robot_apply_subdivision(Robot *robot)
         int32_t rb;
 
         if (robot->masked[i]) {
-            LOG_INFO("关节%d 已屏蔽，跳过细分写入", joint);
+            printf("关节%d 已屏蔽，跳过细分写入\n", joint);
             continue;
         }
         if (!robot->online[i]) {
-            LOG_WARN("关节%d 离线，跳过细分写入", joint);
+            printf("[警告] 关节%d 离线，跳过细分写入\n", joint);
             continue;
         }
         if (motor_write_subdivision(robot, joint, ENCODER_STEPS_PER_REV) != ERR_NONE) {
-            LOG_WARN("关节%d 写细分 %d 失败，角度换算将失真", joint,
+            printf("[警告] 关节%d 写细分 %d 失败，角度换算将失真\n", joint,
                      (int)ENCODER_STEPS_PER_REV);
             fail_cnt++;
             continue;
@@ -93,16 +92,16 @@ void robot_apply_subdivision(Robot *robot)
         if (rb == ENCODER_STEPS_PER_REV) {
             ok_cnt++;
         } else if (rb < 0) {
-            LOG_WARN("关节%d 写细分成功但读回失败，实际值未知", joint);
+            printf("[警告] 关节%d 写细分成功但读回失败，实际值未知\n", joint);
             fail_cnt++;
         } else {
-            LOG_ERROR("关节%d 细分写入后读回 %d，与配置 %d 不符", joint,
+            printf("[错误] 关节%d 细分写入后读回 %d，与配置 %d 不符\n", joint,
                       (int)rb, (int)ENCODER_STEPS_PER_REV);
             fail_cnt++;
         }
     }
     if (fail_cnt > 0) {
-        LOG_WARN("细分对齐完成：成功 %d 轴，失败 %d 轴（角度换算可能失真）",
+        printf("[警告] 细分对齐完成：成功 %d 轴，失败 %d 轴（角度换算可能失真）\n",
                  ok_cnt, fail_cnt);
     }
 }
@@ -121,14 +120,14 @@ Robot *robot_init(const char *port_name, uint32_t baudrate)
         baudrate = MODBUS_BAUDRATE;
     }
     if (ops == NULL || ops->open == NULL) {
-        LOG_ERROR("总线 CommOps 未注入，无法初始化");
+        printf("[错误] 总线 CommOps 未注入，无法初始化\n");
         free(r);
         return NULL;
     }
     r->ops = ops;
     r->baudrate = baudrate;
     if (ops->open(port_name, baudrate) != 0) {
-        LOG_ERROR("串口打开失败: %s", port_name);
+        printf("[错误] 串口打开失败: %s\n", port_name);
         free(r);
         return NULL;
     }
@@ -141,26 +140,26 @@ Robot *robot_init(const char *port_name, uint32_t baudrate)
         for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
             r->masked[i] = mask_def[i];
             if (mask_def[i]) {
-                LOG_INFO("关节%d 已默认屏蔽（故障电机）", i + 1);
+                printf("关节%d 已默认屏蔽（故障电机）\n", i + 1);
             }
         }
     }
-    LOG_INFO("机器人初始化完成，串口 %s @ %lu 8N1", port_name, (unsigned long)baudrate);
+    printf("机器人初始化完成，串口 %s @ %lu 8N1\n", port_name, (unsigned long)baudrate);
 
     /* 启动时查询各电机在线状态（读 0x0066 设备地址） */
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
         if (r->masked[i]) {
-            LOG_INFO("关节%d 已屏蔽，跳过检测", i + 1);
+            printf("关节%d 已屏蔽，跳过检测\n", i + 1);
             continue;
         }
         {
             int id = motor_read_device_addr(r, i + 1);
             if (id > 0) {
                 r->online[i] = 1;
-                LOG_INFO("关节%d 在线，电机ID=%d", i + 1, id);
+                printf("关节%d 在线，电机ID=%d\n", i + 1, id);
             } else {
                 r->online[i] = 0;
-                LOG_WARN("关节%d 离线", i + 1);
+                printf("[警告] 关节%d 离线\n", i + 1);
             }
         }
     }
@@ -192,7 +191,7 @@ ErrCode robot_mask(Robot *robot, int joint)
         return ERR_ARG;
     }
     robot->masked[joint - 1] = 1;
-    LOG_INFO("关节%d 已屏蔽", joint);
+    printf("关节%d 已屏蔽\n", joint);
     return ERR_NONE;
 }
 
@@ -202,7 +201,7 @@ ErrCode robot_unmask(Robot *robot, int joint)
         return ERR_ARG;
     }
     robot->masked[joint - 1] = 0;
-    LOG_INFO("关节%d 已恢复", joint);
+    printf("关节%d 已恢复\n", joint);
     return ERR_NONE;
 }
 
@@ -223,15 +222,15 @@ ErrCode robot_enable(Robot *robot, int joint)
         return ERR_ARG;
     }
     if (robot_is_masked(robot, joint)) {
-        LOG_INFO("关节%d 已屏蔽，跳过使能", joint);
+        printf("关节%d 已屏蔽，跳过使能\n", joint);
         return ERR_MASKED;
     }
     rc = motor_enable(robot, joint);
     if (rc == ERR_NONE) {
         robot->online[joint - 1] = 1;
-        LOG_INFO("关节%d 已使能", joint);
+        printf("关节%d 已使能\n", joint);
     } else {
-        LOG_WARN("关节%d 使能失败：%s", joint, err_str(rc));
+        printf("[警告] 关节%d 使能失败：%s\n", joint, err_str(rc));
         robot->online[joint - 1] = 0;
     }
     return rc;
@@ -246,14 +245,14 @@ ErrCode robot_disable(Robot *robot, int joint)
         return ERR_ARG;
     }
     if (robot_is_masked(robot, joint)) {
-        LOG_INFO("关节%d 已屏蔽，跳过失能", joint);
+        printf("关节%d 已屏蔽，跳过失能\n", joint);
         return ERR_MASKED;
     }
     rc = motor_disable(robot, joint);
     if (rc == ERR_NONE) {
-        LOG_INFO("关节%d 已失能", joint);
+        printf("关节%d 已失能\n", joint);
     } else {
-        LOG_WARN("关节%d 失能失败：%s", joint, err_str(rc));
+        printf("[警告] 关节%d 失能失败：%s\n", joint, err_str(rc));
     }
     return rc;
 }
@@ -270,7 +269,7 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
         return ERR_ARG;
     }
     if (robot_is_masked(robot, joint)) {
-        LOG_INFO("关节%d 已屏蔽，跳过运动", joint);
+        printf("关节%d 已屏蔽，跳过运动\n", joint);
         return ERR_MASKED;
     }
     steps = DEG2STEPS(angle_deg, reductions[joint - 1]);
@@ -280,15 +279,15 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
 
     rc = motor_set_speed(robot, joint, speed_rpm);
     if (rc != ERR_NONE) {
-        LOG_WARN("关节%d 写速度失败：%s", joint, err_str(rc));
+        printf("[警告] 关节%d 写速度失败：%s\n", joint, err_str(rc));
         return rc;
     }
 
     rc = motor_move_abs(robot, joint, steps);
     if (rc == ERR_NONE) {
-        LOG_INFO("关节%d 运动到 %.2f 度 (脉冲 %d)", joint, angle_deg, (int)steps);
+        printf("关节%d 运动到 %.2f 度 (脉冲 %d)\n", joint, angle_deg, (int)steps);
     } else {
-        LOG_WARN("关节%d 运动指令失败：%s", joint, err_str(rc));
+        printf("[警告] 关节%d 运动指令失败：%s\n", joint, err_str(rc));
     }
     return rc;
 }
