@@ -107,9 +107,6 @@ static int cmd_status(Robot *robot)
         /* 光标回到行首，刷新输出 */
         printf("\033[H\033[J");
         printf("持续刷新状态中（按任意键退出）...\n\n");
-        printf("  %-4s %-6s %-8s %-10s %-8s %-8s %-8s %-6s %-4s %-4s %s\n",
-               "关节", "在线", "状态字", "位置(步)", "角度", "电流mA", "速度rpm", "报警", "IN0", "IN1", "标志");
-        printf("  ---- ------ -------- ---------- -------- -------- -------- ---- ---- ---- ----\n");
 
         for (j = 1; j <= 6; j++) {
             uint32_t st32 = 0;
@@ -119,12 +116,12 @@ static int cmd_status(Robot *robot)
             ErrCode rc;
 
             if (robot_is_masked(robot, j)) {
-                printf("  %-4d 已屏蔽\n", j);
+                printf("关节:%d,状态:已屏蔽\n", j);
                 continue;
             }
             rc = robot_read_status32(robot, j, &st32);
             if (rc != ERR_NONE) {
-                printf("  %-4d 离线\n", j);
+                printf("关节:%d,状态:离线\n", j);
                 continue;
             }
             pos = robot_read_position_steps(robot, j, &ok);
@@ -145,8 +142,8 @@ static int cmd_status(Robot *robot)
                 if (st32 & LEESN_STAT_ENABLE_LVL) strcat(flags, "使能 ");
                 if (st32 & LEESN_STAT_ALARM)      strcat(flags, "报警!");
 
-                printf("  %-4d %-6s 0x%06X %-10d %-8.2f %-8d %-8d %-6s %-4d %-4d %s\n",
-                       j, "在线", (unsigned)(st32 & 0xFFFFFFu),
+                printf("关节:%d,状态:在线,字:0x%06X,步长:%d,角度:%.2f,电流:%d,速度:%d,报警:%s,IN0:%d,IN1:%d,标志:%s\n",
+                       j, (unsigned)(st32 & 0xFFFFFFu),
                        ok ? (int)pos : 0,
                        angle,
                        cur >= 0 ? cur : 0,
