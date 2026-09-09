@@ -26,7 +26,7 @@
 #include <windows.h>
 #endif
 
-/* cmd_status：持续刷新全部关节状态，按任意键退出；每行前缀实时 HH:MM:SS */
+/* cmd_status：持续刷新全部关节状态，按任意键退出；每行前缀实时 YYYY-MM-DD HH:MM:SS */
 static int cmd_status(Robot *robot)
 {
     HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
@@ -44,12 +44,13 @@ static int cmd_status(Robot *robot)
         static const int reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
 
         /* 每行前缀实时时钟（用户明确"时间"为当前实时时间，非字面值）。
-         * 每轮取一次，同一轮 6 轴共用同一时间戳。 */
-        char ts[16];
+         * 每轮取一次，同一轮 6 轴共用同一时间戳；含年月日。 */
+        char ts[32];
         {
             SYSTEMTIME lt;
             GetLocalTime(&lt);
-            snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
+            snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
+                     lt.wYear, lt.wMonth, lt.wDay,
                      lt.wHour, lt.wMinute, lt.wSecond);
         }
 
