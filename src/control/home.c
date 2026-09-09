@@ -34,10 +34,10 @@ typedef struct {
 #define TORQUE_MODE_GRAB  2        /* 抓取物体 */
 #define TORQUE_MODE_HOLD_RUN 3     /* 恒力矩运行 */
 #define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
-#define HOME_ZERO_TOL_STEPS    500
+#define HOME_ZERO_TOL_STEPS    500 /**/
 static StallHome stall[7] = {
     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -180.0, .torque_level = 120 },
-    [2] = { .speed_rpm = 150,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 480, .forward_deg = 73.5, .torque_level = 120 },
+    [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .forward_deg = 73.5, .torque_level = 120 },
     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -88.0, .torque_level = 120 },
     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 6.0, .torque_level = 120 },
     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 114.0, .torque_level = 120 },
@@ -233,7 +233,7 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
             s_stall_last_pos[joint] = pos;
             s_stall_last_ok[joint] = 1;
         }
-        LOG_INFO("关节%d T+%ums 周期=%ums [起步屏蔽] 状态=0x%08X 电流=%dmA 位置=%d (阈值=%dmA, 屏蔽剩%ums)",
+        LOG_DEBUG("关节%d T+%ums 周期=%ums [起步屏蔽] 状态=0x%08X 电流=%dmA 位置=%d (阈值=%dmA, 屏蔽剩%ums)",
                  joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
                  pos_ok ? (int)pos : -99999, threshold,
                  (unsigned)(s_stall_mask_end_ms[joint] - now_ms));
@@ -262,7 +262,7 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
         s_stall_last_ok[joint] = 1;
     }
 
-    LOG_INFO("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 位置=%d 帧差=%d (阈值=%dmA)",
+    LOG_DEBUG("关节%d T+%ums 周期=%ums 状态=0x%08X 电流=%dmA 位置=%d 帧差=%d (阈值=%dmA)",
              joint, elaps_ms, period_ms, (unsigned)st, cur_ok ? cur : -1,
              pos_ok ? (int)pos : -99999,
              (pos_ok && s_stall_last_ok[joint]) ? (int)delta : -99999,
@@ -681,7 +681,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
         }
     }
 
-    LOG_INFO("关节6 IN0=%d IN1=%d 电流=%dmA 位置=%d 阶段=%s",
+    LOG_DEBUG("关节6 IN0=%d IN1=%d 电流=%dmA 位置=%d 阶段=%s",
              in0, in1, cur, pos_ok ? (int)pos : -99999, sensor_phase_name(ph));
 
     /* 状态机切换 */
@@ -1042,7 +1042,7 @@ ErrCode robot_home(Robot *robot)
                 else
                     off += (size_t)snprintf(snap + off, sizeof(snap) - off, " %d=%dmA", j, cur_now[j]);
             }
-            LOG_INFO("%s", snap);
+            LOG_DEBUG("%s", snap);
         }
 
         if (all_done) break;

@@ -35,6 +35,8 @@ void cmd_print_help(void)
     printf("                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n");
     printf("  torque:N:L            力矩碰撞回原点诊断：关节 N 以等级 L(0~255) 试撞，\n");
     printf("                         每 200ms 打印 状态字/电流/位置，用于观察到位信号\n");
+    printf("  debug                 切换回零逐帧调试日志（电流/位置/帧差/实时电流快照），\n");
+    printf("                         标定力矩等级与堵转阈值时打开看电流曲线，再输一次关闭\n");
     printf("  help                  帮助\n");
     printf("  exit                  退出\n");
 }
@@ -237,6 +239,8 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_TORQUE;
         out->joint = joint;
         out->torque_level = level;
+    } else if (strcmp(cmd, "debug") == 0) {
+        out->type = CMD_DEBUG;
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {

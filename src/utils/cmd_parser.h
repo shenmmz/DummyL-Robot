@@ -35,6 +35,7 @@
 #define CMD_HOMEJ    13
 #define CMD_DIAG     14
 #define CMD_TORQUE   15   /* 力矩碰撞回原点诊断：torque:N:L 在关节 N 上以等级 L 试撞 */
+#define CMD_DEBUG    16   /* 回零逐帧调试日志开关：debug 在 INFO/DEBUG 间切换（标定时用） */
 
 typedef struct {
     int      type;       /* CMD_* */

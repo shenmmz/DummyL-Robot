@@ -545,6 +545,18 @@ int main(int argc, char **argv)
                 LOG_WARN("诊断后监控线程重启失败");
             break;
         }
+        case CMD_DEBUG: {
+            /* 回零/堵转逐帧日志(电流/位置/帧差/实时电流快照)在 INFO 级别下不打印，
+             * 标定力矩等级与堵转阈值时用它打开看电流曲线，再输一次 debug 关闭。 */
+            if (log_get_level() > LOG_LEVEL_DEBUG) {
+                log_set_level(LOG_LEVEL_DEBUG);
+                LOG_WARN("已打开调试日志（回零逐帧电流/位置/帧差、实时电流快照），再输 debug 关闭");
+            } else {
+                log_set_level(LOG_LEVEL_INFO);
+                LOG_WARN("已关闭调试日志，恢复 INFO 级别");
+            }
+            break;
+        }
         case CMD_CALIB:
             LOG_INFO("单关节调试功能未启用");
             break;
