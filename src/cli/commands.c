@@ -26,7 +26,7 @@
 #include <windows.h>
 #endif
 
-/* cmd_status：持续刷新全部关节状态，按任意键退出 */
+/* cmd_status：持续刷新全部关节状态，按任意键退出；每行前缀实时 HH:MM:SS */
 static int cmd_status(Robot *robot)
 {
     HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
@@ -43,6 +43,16 @@ static int cmd_status(Robot *robot)
         int j;
         static const int reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
 
+        /* 每行前缀实时时钟（用户明确"时间"为当前实时时间，非字面值）。
+         * 每轮取一次，同一轮 6 轴共用同一时间戳。 */
+        char ts[16];
+        {
+            SYSTEMTIME lt;
+            GetLocalTime(&lt);
+            snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
+                     lt.wHour, lt.wMinute, lt.wSecond);
+        }
+
         for (j = 1; j <= 6; j++) {
             uint32_t st32 = 0;
             int ok = 0;
@@ -51,12 +61,12 @@ static int cmd_status(Robot *robot)
             ErrCode rc;
 
             if (robot_is_masked(robot, j)) {
-                printf("时间关节:%d,状态:已屏蔽\n", j);
+                printf("%s 关节:%d,状态:已屏蔽\n", ts, j);
                 continue;
             }
             rc = robot_read_status32(robot, j, &st32);
             if (rc != ERR_NONE) {
-                printf("时间关节:%d,状态:离线\n", j);
+                printf("%s 关节:%d,状态:离线\n", ts, j);
                 continue;
             }
             pos = robot_read_position_steps(robot, j, &ok);
@@ -77,8 +87,8 @@ static int cmd_status(Robot *robot)
                 if (st32 & LEESN_STAT_ENABLE_LVL) strcat(flags, "使能 ");
                 if (st32 & LEESN_STAT_ALARM)      strcat(flags, "报警!");
 
-                printf("时间关节:%d,状态:在线,字:0x%06X,步长:%d,角度:%.2f,电流:%d,速度:%d,报警:%s,IN0:%d,IN1:%d,标志:%s\n",
-                       j, (unsigned)(st32 & 0xFFFFFFu),
+                printf("%s 关节:%d,状态:在线,字:0x%06X,步长:%d,角度:%.2f,电流:%d,速度:%d,报警:%s,IN0:%d,IN1:%d,标志:%s\n",
+                       ts, j, (unsigned)(st32 & 0xFFFFFFu),
                        ok ? (int)pos : 0,
                        angle,
                        cur >= 0 ? cur : 0,
