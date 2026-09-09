@@ -295,30 +295,9 @@ static void home_stall_done(Robot *robot, int joint)
      * 注：0x00D2 为【无记忆】RAM 寄存器，零点不跨断电保持，上电须重新回零。
      * 禁止在此追加 motor_save_params(0x00DC=1)——既存不住零点，又会把回零期
      * 临时关闭的报警/限位固化进 flash，理由见 motor_reg.h 声明处。 */
-    /* 清零诊断：实测 1/3/4/5 号轴 clear_pos 后 0x0004 并非 0（-27289 / -32055 /
-     * +7937 / +42796），而 2/6 号轴正常（45 / 1）。为区分"0x00D2 未生效"与
-     * "清零后被外力/位置环拖走"，记录清零前位置 + 清零后多帧采样：
-     *   清后首帧 ≈ 清前值  → 0x00D2 完全未生效（语义或执行条件问题）
-     *   清后首帧 ≈ 0、后续帧递增 → 清零成功，之后位置被拖走
-     *   清后首帧 = 无关值  → 写入动作本身引起的跳变 */
-    {
-        int ok0 = 0, okk = 0, k;
-        int32_t p0 = motor_read_position(robot, joint, &ok0);
-
-        clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
-        Sleep(30);
-        pos = motor_read_position(robot, joint, &pos_ok);
-        printf("关节%d 清零诊断: 清前=%d 清后=%d (写0x00D2%s)\n",
-                 joint, ok0 ? (int)p0 : -99999, pos_ok ? (int)pos : -99999,
-                 clear_ok ? "成功" : "失败");
-        for (k = 1; k <= 2; k++) {
-            int32_t pk;
-            Sleep(60);
-            pk = motor_read_position(robot, joint, &okk);
-            printf("关节%d 清零诊断: +%dms 位置=%d\n", joint, 30 + k * 60,
-                     okk ? (int)pk : -99999);
-        }
-    }
+    clear_ok = (motor_clear_pos(robot, joint) == ERR_NONE);
+    Sleep(30);
+    pos = motor_read_position(robot, joint, &pos_ok);
     if (!clear_ok) {
         printf("[错误] 关节%d 堵转清零失败，后续退让 move_abs 将基于旧零点，位置会错\n", joint);
     } else {
@@ -422,8 +401,6 @@ static void home_stall_forward(Robot *robot, int joint)
                  ((double)reductions[joint - 1] * (double)ENCODER_STEPS_PER_REV));
     }
 
-    printf("关节%d 堵转后相对移动 %.1f°（位置 %d -> 绝对目标 %d）\n",
-             joint, p->forward_deg, (int)pos, (int)target);
     if (motor_set_speed(robot, joint, p->speed_rpm) != ERR_NONE ||
         motor_move_abs(robot, joint, target) != ERR_NONE) {
         printf("[警告] 关节%d 转角指令发送失败，停在清零点\n", joint);
@@ -815,16 +792,10 @@ static void home_goto_pose(Robot *robot)
                              (double)pos * 360.0 /
                              ((double)reductions[j - 1] * (double)ENCODER_STEPS_PER_REV));
                 }
-                printf("关节%d movej 前: 状态=0x%08X 报警=%d 位置=%d 行程=%d 绝对目标=%d\n",
-                         j, (unsigned)st, motor_read_alarm(robot, j), (int)pos,
-                         (int)delta, (int)tgt[j]);
             } else {
                 tgt[j] = delta;   /* 读不到位置：退回绝对目标（保持原行为） */
-                printf("[警告] 关节%d movej 前: 状态读%s 位置读%s，退回绝对目标 %d\n",
-                         j, st_ok ? "OK" : "失败", pos_ok ? "OK" : "失败", (int)delta);
             }
         }
-        printf("关节%d 相对移动 %.1f°（绝对目标 %d）\n", j, p->forward_deg, (int)tgt[j]);
         if (motor_set_speed(robot, j, p->speed_rpm) != ERR_NONE ||
             motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
             printf("[警告] 关节%d 发 movej 失败\n", j);
@@ -892,28 +863,8 @@ ErrCode robot_home(Robot *robot)
 
     if (robot == NULL) return ERR_ARG;
 
-    /* 打印参数总览 */
-    printf("=== 回零参数 ===\n");
-    for (j = 1; j <= 5; j++) {
-        if (robot_is_masked(robot, j)) {
-            printf("  关节%d: 已屏蔽\n", j);
-        } else {
-                printf("  关节%d: 堵转 %drpm 加速%dms/减速%dms 方向=%+d 阈值=%dmA 正向=%.1f° 力矩=%d%s\n",
-                         j, stall[j].speed_rpm, stall[j].accel_ms, stall[j].decel_ms,
-                         stall[j].dir, stall[j].stall_current,
-                         stall[j].forward_deg,
-                         stall[j].torque_level,
-                         "(碰撞回原点)");
-        }
-    }
-    if (!robot_is_masked(robot, 6)) {
-        printf("  关节6: 传感器 快%d/慢%d/极慢%drpm 方向=%+d\n",
-                 sensor.fast_rpm, sensor.slow_rpm, sensor.crawl_rpm, sensor.dir);
-    }
-    printf("================\n");
-
     /* 阶段1：{1,2,3,5} 并行堵转归零 与 关节6 传感器回零 同时启动 */
-    printf("回零：{2,3,5,1} 堵转 + 关节6 传感器 并行归零...\n");
+
     for (int gi = 0; gi < (int)(sizeof(group_stall) / sizeof(group_stall[0])); gi++) {
         int jj = group_stall[gi];
         if (robot_is_masked(robot, jj)) continue;
