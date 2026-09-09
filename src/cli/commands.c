@@ -18,7 +18,6 @@
 #include "api/motor_reg.h"
 #include "config/robot_config.h"
 #include "utils/err.h"
-#include "utils/help_text.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -40,15 +39,9 @@ static int cmd_status(Robot *robot)
      * 否则 WaitForSingleObject 会立即返回，循环只跑一帧就当成"按任意键退出"。 */
     FlushConsoleInputBuffer(hStdin);
 
-    printf("持续刷新状态中（按任意键退出）...\n\n");
-
     while (1) {
         int j;
         static const int reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-
-        /* 光标回到行首，刷新输出 */
-        printf("\033[H\033[J");
-        printf("持续刷新状态中（按任意键退出）...\n\n");
 
         for (j = 1; j <= 6; j++) {
             uint32_t st32 = 0;
@@ -58,12 +51,12 @@ static int cmd_status(Robot *robot)
             ErrCode rc;
 
             if (robot_is_masked(robot, j)) {
-                printf("关节:%d,状态:已屏蔽\n", j);
+                printf("时间关节:%d,状态:已屏蔽\n", j);
                 continue;
             }
             rc = robot_read_status32(robot, j, &st32);
             if (rc != ERR_NONE) {
-                printf("关节:%d,状态:离线\n", j);
+                printf("时间关节:%d,状态:离线\n", j);
                 continue;
             }
             pos = robot_read_position_steps(robot, j, &ok);
@@ -84,7 +77,7 @@ static int cmd_status(Robot *robot)
                 if (st32 & LEESN_STAT_ENABLE_LVL) strcat(flags, "使能 ");
                 if (st32 & LEESN_STAT_ALARM)      strcat(flags, "报警!");
 
-                printf("关节:%d,状态:在线,字:0x%06X,步长:%d,角度:%.2f,电流:%d,速度:%d,报警:%s,IN0:%d,IN1:%d,标志:%s\n",
+                printf("时间关节:%d,状态:在线,字:0x%06X,步长:%d,角度:%.2f,电流:%d,速度:%d,报警:%s,IN0:%d,IN1:%d,标志:%s\n",
                        j, (unsigned)(st32 & 0xFFFFFFu),
                        ok ? (int)pos : 0,
                        angle,
@@ -116,7 +109,6 @@ static int cmd_status(Robot *robot)
     SetConsoleMode(hStdin, old_mode);
     /* 丢弃用于退出的那次按键，避免它泄漏到主循环的 fgets 里被当成下一条命令 */
     FlushConsoleInputBuffer(hStdin);
-    printf("\n状态刷新已停止。\n");
     return 0;
 }
 

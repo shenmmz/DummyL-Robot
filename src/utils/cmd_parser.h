@@ -50,4 +50,7 @@ typedef struct {
 /* 解析一行输入，成功返回 CMD_*，解析失败返回 CMD_UNKNOWN */
 int cmd_parse(const char *line, ParsedCmd *out);
 
+/* 打印 CLI 命令帮助文本（命令说明集中维护于 cmd_parser.c） */
+void cmd_print_help(void);
+
 #endif /* CMD_PARSER_H */

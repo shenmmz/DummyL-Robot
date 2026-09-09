@@ -4,7 +4,6 @@
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
 #include "utils/cmd_parser.h"
-#include "utils/help_text.h"
 #include "cli/commands.h"
 
 #include <stdio.h>
