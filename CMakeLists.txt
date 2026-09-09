@@ -61,10 +61,11 @@ add_library(control STATIC
 )
 
 # ---------- 静态库: utils ----------
-# 精简中文日志 + 命令行解析 + 统一错误码
+# 精简中文日志 + 命令行解析 + 统一错误码 + 字符串字面量集中管理
 add_library(utils STATIC
     src/utils/cmd_parser.c
     src/utils/err.c
+    src/utils/strings.c
 )
 
 # 公共头文件目录与警告选项
