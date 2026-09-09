@@ -2,7 +2,7 @@
  * cmd_parser.c —— 命令行交互命令解析与帮助输出
  * ------------------------------------------------------------
  * 所属模块：工具层（utils）
- * 对外接口：cmd_print_help、cmd_parse
+ * 对外接口：cmd_parse（命令帮助文本见 utils/help_text.h / help_text.c）
  * 依赖模块：utils/logger
  */
 
@@ -11,32 +11,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-/* cmd_print_help：打印命令行可用命令帮助 */
-void cmd_print_help(void)
-{
-    printf("可用命令:\n");
-    printf("  home                  回零（全轴）\n");
-    printf("  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n");
-    printf("                         (例 home:1 单独验证 1 轴，与其它轴无关)\n");
-    printf("  homej:N:ANGLE         关节 N 回零后自动运动到 ANGLE 度 (N=1..6)\n");
-    printf("  homej:N:ANGLE:SPEED   指定速度 (rpm)\n");
-    printf("  movej:N:ANGLE         关节 N 绝对运动到 ANGLE 度 (N=1..6)\n");
-    printf("  movej:N:ANGLE:SPEED   指定速度 (rpm)\n");
-    printf("  enable:N              使能关节 N\n");
-    printf("  disable:N             失能关节 N\n");
-    printf("  status                查询所有关节状态\n");
-    printf("  mask:N[,M,...]        屏蔽关节（可批量，例 mask:2,3,4）\n");
-    printf("  unmask:N[,M,...]      恢复关节（可批量，例 unmask:2,3,4）\n");
-    printf("  scan                  扫描总线电机\n");
-    printf("  calib                 单关节手动调试\n");
-    printf("  diag [N]              回零诊断：细分/编码器线数/实际速度/位置偏差\n");
-    printf("                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n");
-    printf("  torque:N:L            力矩碰撞回原点诊断：关节 N 以等级 L(0~255) 试撞，\n");
-    printf("                         每 200ms 打印 状态字/电流/位置，用于观察到位信号\n");
-    printf("  help                  帮助\n");
-    printf("  exit                  退出\n");
-}
 
 /* parse_joint_list：解析逗号分隔的关节列表（如 "2,3,4"）到 out->joints。
  * 任一关节号非法（<1 或 >6）则整体失败返回 -1，避免只屏蔽一半。

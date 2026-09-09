@@ -23,7 +23,7 @@
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
 #include "utils/cmd_parser.h"
-#include "utils/strings.h"
+#include "utils/help_text.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +34,8 @@
 #include <mmsystem.h>   /* timeBeginPeriod/timeEndPeriod：抬高系统定时器精度 */
 #endif
 
+#define INI_PATH "config/robot_config.ini"
+
 /* 极简 ini 读取：取 [serial] 段下 key 的 value（去除空白），找不到返回默认。
  * 返回 1 = ini 文件存在并已装载（生效来源：ini）；
  * 返回 0 = ini 缺失/无法打开，回退默认值宏（生效来源：默认）。 */
@@ -43,7 +45,7 @@ static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigne
     char line[256];
     int in_serial = 0;
 
-    snprintf(port, port_sz, "%s", STR_DEFAULT_PORT);
+    snprintf(port, port_sz, "COM3");
     *baud = MODBUS_BAUDRATE;
 
     f = fopen(path, "r");
@@ -97,7 +99,7 @@ static int cmd_status(Robot *robot)
     GetConsoleMode(hStdin, &old_mode);
     SetConsoleMode(hStdin, old_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT));
 
-    printf(STR_STATUS_REFRESH);
+    printf("持续刷新状态中（按任意键退出）...\n\n");
 
     while (1) {
         int j;
@@ -105,7 +107,7 @@ static int cmd_status(Robot *robot)
 
         /* 光标回到行首，刷新输出 */
         printf("\033[H\033[J");
-        printf(STR_STATUS_REFRESH);
+        printf("持续刷新状态中（按任意键退出）...\n\n");
 
         for (j = 1; j <= 6; j++) {
             uint32_t st32 = 0;
@@ -115,12 +117,12 @@ static int cmd_status(Robot *robot)
             ErrCode rc;
 
             if (robot_is_masked(robot, j)) {
-                printf(STR_STATUS_MASKED, j);
+                printf("关节:%d,状态:已屏蔽\n", j);
                 continue;
             }
             rc = robot_read_status32(robot, j, &st32);
             if (rc != ERR_NONE) {
-                printf(STR_STATUS_OFFLINE, j);
+                printf("关节:%d,状态:离线\n", j);
                 continue;
             }
             pos = robot_read_position_steps(robot, j, &ok);
@@ -134,14 +136,14 @@ static int cmd_status(Robot *robot)
                 int in1 = (st32 & LEESN_STAT_INPUT(1)) ? 1 : 0;
                 double angle = ok ? STEPS2DEG(pos, reductions[j - 1]) : 0.0;
 
-                if (st32 & LEESN_STAT_INPOS)      strcat(flags, STR_FLAG_INPOS);
-                if (st32 & LEESN_STAT_SOFT_NEG)   strcat(flags, STR_FLAG_SOFT_NEG);
-                if (st32 & LEESN_STAT_SOFT_POS)   strcat(flags, STR_FLAG_SOFT_POS);
-                if (st32 & LEESN_STAT_HOMED)      strcat(flags, STR_FLAG_HOMED);
-                if (st32 & LEESN_STAT_ENABLE_LVL) strcat(flags, STR_FLAG_ENABLE);
-                if (st32 & LEESN_STAT_ALARM)      strcat(flags, STR_FLAG_ALARM);
+                if (st32 & LEESN_STAT_INPOS)      strcat(flags, "到位 ");
+                if (st32 & LEESN_STAT_SOFT_NEG)   strcat(flags, "负限位 ");
+                if (st32 & LEESN_STAT_SOFT_POS)   strcat(flags, "正限位 ");
+                if (st32 & LEESN_STAT_HOMED)      strcat(flags, "原点 ");
+                if (st32 & LEESN_STAT_ENABLE_LVL) strcat(flags, "使能 ");
+                if (st32 & LEESN_STAT_ALARM)      strcat(flags, "报警!");
 
-                printf(STR_STATUS_ONLINE,
+                printf("关节:%d,状态:在线,字:0x%06X,步长:%d,角度:%.2f,电流:%d,速度:%d,报警:%s,IN0:%d,IN1:%d,标志:%s\n",
                        j, (unsigned)(st32 & 0xFFFFFFu),
                        ok ? (int)pos : 0,
                        angle,
@@ -149,7 +151,7 @@ static int cmd_status(Robot *robot)
                        spd >= 0 ? spd : 0,
                        alm >= 0 ? leesn_alarm_text(alm) : "?",
                        in0, in1,
-                       flags[0] ? flags : STR_DASH);
+                       flags[0] ? flags : "—");
             }
         }
 
@@ -171,7 +173,7 @@ static int cmd_status(Robot *robot)
 
     /* 恢复控制台模式 */
     SetConsoleMode(hStdin, old_mode);
-    printf(STR_STATUS_STOPPED);
+    printf("\n状态刷新已停止。\n");
     return 0;
 }
 
@@ -185,32 +187,32 @@ static int cmd_scan(Robot *robot)
     int online_count = 0;
     int masked_count = 0;
 
-    printf(STR_SCAN_TITLE);
+    printf("总线电机扫描（关节 1..6）...\n\n");
 
     for (j = 1; j <= 6; j++) {
         if (robot_is_masked(robot, j)) {
-            printf(STR_SCAN_MASKED, j);
+            printf("  关节 %d: 已屏蔽（跳过）\n", j);
             masked_count++;
             continue;
         }
         if (robot_is_online(robot, j)) {
-            printf(STR_SCAN_ONLINE, j);
+            printf("  关节 %d: 在线\n", j);
             online_list[online_count++] = j;
         } else {
-            printf(STR_SCAN_OFFLINE, j);
+            printf("  关节 %d: 离线（无响应）\n", j);
         }
         Sleep(30); /* 给总线留方向切换余量 */
     }
 
-    printf(STR_SCAN_RESULT, online_count);
+    printf("\n扫描结果: %d/6 在线", online_count);
     if (online_count > 0) {
-        printf(STR_SCAN_ONLINE_JOINTS);
+        printf("，在线关节 ");
         for (int k = 0; k < online_count; k++) {
             printf("%s%d", k > 0 ? "," : "", online_list[k]);
         }
     }
     if (masked_count > 0) {
-        printf(STR_SCAN_MASKED_COUNT, masked_count);
+        printf("，%d 个关节被屏蔽", masked_count);
     }
     printf("\n");
     return 0;
@@ -236,13 +238,12 @@ static int cmd_diag(Robot *robot, int joint_only)
         lo = 1; hi = 6; samples = 1;
     }
 
-    printf(STR_DIAG_TITLE);
-    printf(STR_DIAG_ENC_CFG, (int)ENCODER_STEPS_PER_REV);
-    printf(STR_DIAG_HEADER,
-           STR_DIAG_COL_JOINT, STR_DIAG_COL_SUBDIV, STR_DIAG_COL_ENC,
-           STR_DIAG_COL_SPD, STR_DIAG_COL_ERR, STR_DIAG_COL_POS,
-           STR_DIAG_COL_CUR, STR_DIAG_COL_STAT);
-    printf(STR_DIAG_SEP);
+    printf("\n回零诊断读数（闭环判据）\n");
+    printf("  配置细分 ENCODER_STEPS_PER_REV = %d\n\n", (int)ENCODER_STEPS_PER_REV);
+    printf("  %-6s %-15s %-9s %-11s %-10s %-11s %-8s %s\n",
+           "关节", "细分(实际/配置)", "编码器线数", "实际速度rpm", "位置偏差",
+           "位置(步)", "电流mA", "状态字");
+    printf("  ------ --------------- --------- ----------- ---------- ----------- -------- --------\n");
 
     for (j = lo; j <= hi; j++) {
         int32_t prev_pos = 0;
@@ -250,7 +251,7 @@ static int cmd_diag(Robot *robot, int joint_only)
         int     have_prev = 0;
 
         if (robot_is_masked(robot, j)) {
-            printf(STR_DIAG_MASKED, j);
+            printf("  %-6d 已屏蔽\n", j);
             continue;
         }
         for (s = 0; s < samples; s++) {
@@ -261,7 +262,7 @@ static int cmd_diag(Robot *robot, int joint_only)
             char    err_txt[16], pos_txt[16], cur_txt[16];
 
             if (motor_read_status(robot, j, &st32) != ERR_NONE) {
-                printf(STR_DIAG_OFFLINE, j);
+                printf("  %-6d 离线\n", j);
                 break;
             }
             subdiv    = motor_read_subdivision(robot, j);
@@ -275,30 +276,30 @@ static int cmd_diag(Robot *robot, int joint_only)
             else             snprintf(tag, sizeof(tag), "%d", j);
 
             if (subdiv < 0) {
-                snprintf(subdiv_txt, sizeof(subdiv_txt), STR_DIAG_SUBDIV_FAIL);
+                snprintf(subdiv_txt, sizeof(subdiv_txt), "读失败");
             } else if (subdiv == (int32_t)ENCODER_STEPS_PER_REV) {
-                snprintf(subdiv_txt, sizeof(subdiv_txt), STR_DIAG_SUBDIV_OK, (int)subdiv);
+                snprintf(subdiv_txt, sizeof(subdiv_txt), "%d 一致", (int)subdiv);
             } else {
-                snprintf(subdiv_txt, sizeof(subdiv_txt), STR_DIAG_SUBDIV_MISMATCH,
+                snprintf(subdiv_txt, sizeof(subdiv_txt), "%d/%d 不符",
                          (int)subdiv, (int)ENCODER_STEPS_PER_REV);
             }
             if (enc_lines >= 0) snprintf(enc_txt, sizeof(enc_txt), "%d", enc_lines);
-            else                snprintf(enc_txt, sizeof(enc_txt), STR_DASH);
+            else                snprintf(enc_txt, sizeof(enc_txt), "—");
             if (spd_raw >= 0)   snprintf(spd_txt, sizeof(spd_txt), "%.2f", (double)spd_raw / 100.0);
-            else                snprintf(spd_txt, sizeof(spd_txt), STR_DASH);
+            else                snprintf(spd_txt, sizeof(spd_txt), "—");
             if (pos_err >= 0)   snprintf(err_txt, sizeof(err_txt), "%d", pos_err);
-            else                snprintf(err_txt, sizeof(err_txt), STR_DASH);
+            else                snprintf(err_txt, sizeof(err_txt), "—");
             if (pos_ok)         snprintf(pos_txt, sizeof(pos_txt), "%d", (int)pos);
-            else                snprintf(pos_txt, sizeof(pos_txt), STR_DASH);
+            else                snprintf(pos_txt, sizeof(pos_txt), "—");
             if (cur >= 0)       snprintf(cur_txt, sizeof(cur_txt), "%d", cur);
-            else                snprintf(cur_txt, sizeof(cur_txt), STR_DASH);
+            else                snprintf(cur_txt, sizeof(cur_txt), "—");
 
-            printf(STR_DIAG_ROW,
+            printf("  %-6s %-15s %-9s %-11s %-10s %-11s %-8s 0x%06X\n",
                    tag, subdiv_txt, enc_txt, spd_txt, err_txt, pos_txt, cur_txt,
                    (unsigned)(st32 & 0xFFFFFFu));
 
             if (have_prev && pos_ok && pos_err >= 0 && prev_err >= 0) {
-                printf(STR_DIAG_DELTA,
+                printf("        └ Δ位置=%+d 步, Δ偏差=%+d 步（%dms 内）\n",
                        (int)(pos - prev_pos), pos_err - prev_err,
                        (samples > 1) ? 400 : 0);
             }
@@ -323,15 +324,18 @@ static int cmd_diag(Robot *robot, int joint_only)
         for (k = 0; k < 20; k++) (void)motor_read_current(robot, lo);
         dt_cur = GetTickCount() - t0;
 
-        printf(STR_DIAG_BUS_TITLE, lo);
-        printf(STR_DIAG_BUS_POS, (unsigned)dt_pos, (double)dt_pos / 20.0);
-        printf(STR_DIAG_BUS_CUR, (unsigned)dt_cur, (double)dt_cur / 20.0);
-        printf(STR_DIAG_BUS_PERIOD, (double)dt_pos / 20.0 + (double)dt_cur / 20.0);
+        printf("\n  总线测速（关节%d，各 20 次）：\n", lo);
+        printf("    位置+状态合并读  %u ms / 20 次 = %.1f ms/次\n",
+               (unsigned)dt_pos, (double)dt_pos / 20.0);
+        printf("    电流读            %u ms / 20 次 = %.1f ms/次\n",
+               (unsigned)dt_cur, (double)dt_cur / 20.0);
+        printf("    堵转轮询周期 ≈ %.1f ms（2 事务/轮）\n",
+               (double)dt_pos / 20.0 + (double)dt_cur / 20.0);
     }
     if (samples > 1) {
-        printf(STR_DIAG_JUDGE_TITLE);
-        printf(STR_DIAG_JUDGE_SLIP);
-        printf(STR_DIAG_JUDGE_STALL);
+        printf("\n  判定提示：\n");
+        printf("    实际速度≈设定速度 且 电流高、Δ位置≈额定步数 → 电机轴仍在转 = 打滑/跳齿（机械问题）\n");
+        printf("    实际速度≈0、Δ位置≈0 且 Δ偏差持续累积        → 命令走电机不转 = 真堵转（判据侧可解）\n");
     }
     printf("\n");
     return 0;
@@ -355,17 +359,17 @@ int main(int argc, char **argv)
     timeBeginPeriod(1);
 #endif
 
-    printf(STR_BANNER);
-    printf(STR_HELP_HINT);
+    printf("DummyL-Robot 控制台 (C11 + MinGW)\n");
+    printf("输入 help 查看命令，exit 退出。\n\n");
 
     if (argc > 1) {
         snprintf(port, sizeof(port), "%s", argv[1]);
     } else {
-        int ini_loaded = ini_read_serial(STR_INI_PATH, port, sizeof(port), &baud);
+        int ini_loaded = ini_read_serial(INI_PATH, port, sizeof(port), &baud);
         if (ini_loaded) {
-            printf(STR_SRC_INI, STR_INI_PATH, port, baud);
+            printf("生效来源：ini（%s），串口 %s @ %lu 8N1\n", INI_PATH, port, baud);
         } else {
-            printf(STR_SRC_DEFAULT, port, baud);
+            printf("生效来源：默认（ini 缺失，回退 robot_config.h 默认值），串口 %s @ %lu 8N1\n", port, baud);
         }
 
         char found_ports[16][64];
@@ -410,18 +414,18 @@ int main(int argc, char **argv)
         }
 
         if (port_count == 0) {
-            printf(STR_ERR_NO_PORT);
+            printf("[错误] 未发现可用串口\n");
             return 1;
         }
 
         if (port_count == 1) {
             snprintf(port, sizeof(port), "%s", found_ports[0]);
         } else {
-            printf(STR_MULTI_PORT);
+            printf("\n检测到多个串口：\n");
             for (int i = 0; i < port_count; i++) {
-                printf(STR_PORT_ITEM, i + 1, found_ports[i]);
+                printf("  [%d] %s\n", i + 1, found_ports[i]);
             }
-            printf(STR_SELECT_PORT, port_count);
+            printf("请选择串口编号 (1-%d): ", port_count);
             fflush(stdout);
             char sel_line[16];
             if (fgets(sel_line, sizeof(sel_line), stdin) != NULL) {
@@ -429,14 +433,14 @@ int main(int argc, char **argv)
                 if (sel >= 0 && sel < port_count) {
                     snprintf(port, sizeof(port), "%s", found_ports[sel]);
                 } else {
-                    printf(STR_ERR_BAD_SELECT);
+                    printf("[错误] 无效选择\n");
                     return 1;
                 }
             } else {
                 return 1;
             }
         }
-        printf(STR_USE_PORT, port, baud);
+        printf("\n使用串口: %s @ %lu 8N1\n", port, baud);
     }
 
     /* 注入串口 CommOps（方案一：control 层通过接口操作总线） */
@@ -444,23 +448,23 @@ int main(int argc, char **argv)
 
     robot = robot_init(port, (uint32_t)baud);
     if (robot == NULL) {
-        printf(STR_ERR_INIT);
+        printf("[错误] 初始化失败，请检查串口连接与 robot_config.ini\n");
         return 1;
     }
 
     /* 后台定时监控：程序启动即创建线程，按周期巡检六轴状态/电流/报警 */
     mon = monitor_create(robot, 0); /* 0=不启用电流堵转事件，只做状态监控 */
     if (mon == NULL) {
-        printf(STR_WARN_MON_CREATE);
+        printf("[警告] 监控器创建失败，继续运行\n");
     } else if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS)) {
-        printf(STR_WARN_MON_START);
+        printf("[警告] 监控线程启动失败，继续运行\n");
         monitor_destroy(mon);
         mon = NULL;
     }
 
     while (running) {
         ParsedCmd cmd;
-        printf(STR_PROMPT);
+        printf("DummyL> ");
         fflush(stdout);
         if (fgets(line, sizeof(line), stdin) == NULL) {
             break;
@@ -473,32 +477,32 @@ int main(int argc, char **argv)
             monitor_stop(mon);
             ErrCode rc = (cmd.joint >= 1) ? robot_home_single(robot, cmd.joint)
                                           : robot_home(robot);
-            if (rc != ERR_NONE) printf(STR_ERR_HOME, err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 回零失败：%s\n", err_str(rc));
             if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
-                printf(STR_WARN_HOME_MON);
+                printf("[警告] 回零后监控线程重启失败\n");
             break;
         }
         case CMD_HOMEJ: {
             monitor_stop(mon);
             ErrCode rc = robot_home_joint(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
-            if (rc != ERR_NONE) printf(STR_ERR_HOME_JOINT, err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 单轴回零失败：%s\n", err_str(rc));
             if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
-                printf(STR_WARN_HOME_MON);
+                printf("[警告] 回零后监控线程重启失败\n");
             break;
         }
         case CMD_MOVEJ: {
             ErrCode rc = robot_movej(robot, cmd.joint, cmd.angle_deg, cmd.speed_rpm);
-            if (rc != ERR_NONE) printf(STR_ERR_MOVE, err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 运动指令失败：%s\n", err_str(rc));
             break;
         }
         case CMD_ENABLE: {
             ErrCode rc = robot_enable(robot, cmd.joint);
-            if (rc != ERR_NONE) printf(STR_ERR_ENABLE, err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 使能失败：%s\n", err_str(rc));
             break;
         }
         case CMD_DISABLE: {
             ErrCode rc = robot_disable(robot, cmd.joint);
-            if (rc != ERR_NONE) printf(STR_ERR_DISABLE, err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 失能失败：%s\n", err_str(rc));
             break;
         }
         case CMD_STATUS:
@@ -512,15 +516,14 @@ int main(int argc, char **argv)
                     ErrCode rc = is_mask ? robot_mask(robot, cmd.joints[k])
                                          : robot_unmask(robot, cmd.joints[k]);
                     if (rc != ERR_NONE) {
-                        printf(STR_ERR_MASK_JOINT, is_mask ? STR_OP_MASK : STR_OP_UNMASK,
-                               cmd.joints[k], err_str(rc));
+                        printf("[错误] %s关节%d失败：%s\n", is_mask ? "屏蔽" : "恢复",
+                                  cmd.joints[k], err_str(rc));
                     }
                 }
             } else {
                 ErrCode rc = is_mask ? robot_mask(robot, cmd.joint)
                                      : robot_unmask(robot, cmd.joint);
-                if (rc != ERR_NONE)
-                    printf(STR_ERR_MASK, is_mask ? STR_OP_MASK : STR_OP_UNMASK, err_str(rc));
+                if (rc != ERR_NONE) printf("[错误] %s失败：%s\n", is_mask ? "屏蔽" : "恢复", err_str(rc));
             }
             break;
         }
@@ -533,13 +536,13 @@ int main(int argc, char **argv)
         case CMD_TORQUE: {
             monitor_stop(mon);
             ErrCode rc = robot_torque_probe(robot, cmd.joint, cmd.torque_level);
-            if (rc != ERR_NONE) printf(STR_ERR_TORQUE, err_str(rc));
+            if (rc != ERR_NONE) printf("[错误] 力矩碰撞诊断失败：%s\n", err_str(rc));
             if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS))
-                printf(STR_WARN_TORQUE_MON);
+                printf("[警告] 诊断后监控线程重启失败\n");
             break;
         }
         case CMD_CALIB:
-            printf(STR_CALIB_DISABLED);
+            printf("单关节调试功能未启用\n");
             break;
         case CMD_HELP:
             cmd_print_help();
@@ -550,7 +553,7 @@ int main(int argc, char **argv)
         case CMD_EMPTY:
             break;
         default:
-            printf(STR_WARN_UNKNOWN);
+            printf("[警告] 未知命令，输入 help 查看帮助\n");
             break;
         }
     }
@@ -565,6 +568,6 @@ int main(int argc, char **argv)
 #ifdef _WIN32
     timeEndPeriod(1);   /* 与 main 开头的 timeBeginPeriod(1) 配对 */
 #endif
-    printf(STR_EXIT);
+    printf("已退出。\n");
     return 0;
 }
