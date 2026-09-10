@@ -211,6 +211,38 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_TORQUE;
         out->joint = joint;
         out->torque_level = level;
+    } else if (strcmp(cmd, "fk") == 0) {
+        /* 可选 6 个关节角（度）；不带参数 = 打印预设验证姿态表 */
+        int n = 0;
+        int extra = 0;
+        while (n < 6) {
+            char *v = strtok_r(NULL, ":", &save);
+            if (v == NULL) break;
+            out->vals[n++] = atof(v);
+        }
+        if (strtok_r(NULL, ":", &save) != NULL) extra = 1;  /* 多余参数 */
+        out->val_count = n;
+        if ((n != 0 && n != 6) || extra) {
+            printf("[警告] 用法: fk 或 fk:J1:J2:J3:J4:J5:J6（6 个关节角，单位度）\n");
+            return CMD_UNKNOWN;
+        }
+        out->type = CMD_FK;
+    } else if (strcmp(cmd, "ik") == 0) {
+        /* 目标位姿：X:Y:Z:RX:RY:RZ（mm / 度），6 个参数缺一不可 */
+        int n = 0;
+        int extra = 0;
+        while (n < 6) {
+            char *v = strtok_r(NULL, ":", &save);
+            if (v == NULL) break;
+            out->vals[n++] = atof(v);
+        }
+        if (strtok_r(NULL, ":", &save) != NULL) extra = 1;  /* 多余参数 */
+        out->val_count = n;
+        if (n != 6 || extra) {
+            printf("[警告] 用法: ik:X:Y:Z:RX:RY:RZ（位置 mm，姿态 RPY 度）\n");
+            return CMD_UNKNOWN;
+        }
+        out->type = CMD_IK;
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
@@ -245,6 +277,10 @@ static const char HELP_TEXT[] =
     "                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n"
     "  torque:N:L            力矩碰撞回原点诊断：关节 N 以等级 L(0~255) 试撞，\n"
     "                         每 200ms 打印 状态字/电流/位置，用于观察到位信号\n"
+    "  fk                    正运动学：打印预设验证姿态表 A~F 的末端 XYZ(mm)/RPY(度)，\n"
+    "                         实机 movej 到位后量测对照，用于校核 DH 与实物尺寸\n"
+    "  fk:J1:J2:J3:J4:J5:J6  指定关节角求末端位姿（单位：度）\n"
+    "  ik:X:Y:Z:RX:RY:RZ     逆运动学：给末端位姿求关节角候选解（位置 mm，姿态 RPY 度）\n"
     "  help                  帮助\n"
     "  exit                  退出\n";
 

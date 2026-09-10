@@ -17,8 +17,12 @@
 #include "control/monitor.h"
 #include "api/motor_reg.h"
 #include "config/robot_config.h"
+#include "kinematics/dh.h"
+#include "kinematics/ik.h"
+#include "kinematics/mat3.h"
 #include "utils/err.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -287,6 +291,150 @@ static int cmd_diag(Robot *robot, int joint_only)
     return 0;
 }
 
+/* ============================================================
+ * 运动学命令（fk / ik）
+ * ------------------------------------------------------------
+ * 复用 kinematics 模块：dh_forward（正解）、ik_solve + ik_filter_by_limits
+ * + ik_select_best（球腕解耦解析逆解）。纯离线计算，不占用 RS485 总线。
+ * ============================================================ */
+
+#define KIN_D2R (3.14159265358979323846 / 180.0)
+#define KIN_R2D (180.0 / 3.14159265358979323846)
+
+/* rpy_deg_to_pose：XYZ(mm) + ZYX 欧拉角(度) → 4x4 齐次矩阵
+ * （dh_pose_to_xyz_rpy 的逆：R = Rz(rz)·Ry(ry)·Rx(rx)） */
+static void rpy_deg_to_pose(double x, double y, double z,
+                            double rx_deg, double ry_deg, double rz_deg,
+                            double pose[4][4])
+{
+    Mat3 rz, ry, rx, rzy, r;
+    int i, j;
+
+    mat3_rotz(rz_deg * KIN_D2R, rz);
+    mat3_roty(ry_deg * KIN_D2R, ry);
+    mat3_rotx(rx_deg * KIN_D2R, rx);
+    mat3_mul(rz, ry, rzy);   /* Rz * Ry */
+    mat3_mul(rzy, rx, r);    /* (Rz*Ry) * Rx */
+
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 3; j++) {
+            pose[i][j] = r[i][j];
+        }
+    }
+    pose[0][3] = x;
+    pose[1][3] = y;
+    pose[2][3] = z;
+    pose[3][0] = 0.0;
+    pose[3][1] = 0.0;
+    pose[3][2] = 0.0;
+    pose[3][3] = 1.0;
+}
+
+/* print_fk_line：打印一组关节角（度）的 FK 结果（末端 XYZ mm + RPY 度） */
+static void print_fk_line(const char *tag, const double *joints_deg)
+{
+    double pose[4][4];
+    double xyz[3], rpy[3];
+
+    dh_forward(DH_TABLE, joints_deg, pose);
+    dh_pose_to_xyz_rpy(pose, xyz, rpy);
+
+    printf("  %-3s J: %7.2f %7.2f %7.2f %7.2f %7.2f %7.2f  ->  "
+           "X=%8.3f Y=%8.3f Z=%8.3f mm  RPY=%7.2f %7.2f %7.2f deg\n",
+           tag,
+           joints_deg[0], joints_deg[1], joints_deg[2],
+           joints_deg[3], joints_deg[4], joints_deg[5],
+           xyz[0], xyz[1], xyz[2],
+           rpy[0] * KIN_R2D, rpy[1] * KIN_R2D, rpy[2] * KIN_R2D);
+}
+
+/* cmd_fk：正运动学。
+ *   无参数      —— 打印预设验证姿态表 A~F（供实机 movej 到位后量测对照）；
+ *   fk:J1:...:J6 —— 给定关节角（度）算末端位姿。 */
+static int cmd_fk(const ParsedCmd *cmd)
+{
+    static const double presets[6][6] = {
+        {  0.0,   0.0,   0.0, 0.0, 0.0, 0.0 },  /* A：全轴零位（home） */
+        { 90.0,   0.0,   0.0, 0.0, 0.0, 0.0 },  /* B：仅 J1 转 +90° */
+        { 45.0,   0.0,   0.0, 0.0, 0.0, 0.0 },  /* C：仅 J1 转 +45° */
+        {  0.0,  45.0,   0.0, 0.0, 0.0, 0.0 },  /* D：仅 J2 抬 +45° */
+        {  0.0, -45.0,   0.0, 0.0, 0.0, 0.0 },  /* E：仅 J2 压 -45° */
+        {  0.0,   0.0, -90.0, 0.0, 0.0, 0.0 },  /* F：仅 J3 转 -90° */
+    };
+    static const char *tags[6] = { "A", "B", "C", "D", "E", "F" };
+    int i;
+
+    printf("\n正运动学（DH 表 kinematics/dh_params.h；位置 mm，角度 度）\n");
+
+    if (cmd->val_count == 6) {
+        print_fk_line("in", cmd->vals);
+    } else {
+        printf("  预设验证姿态（实机 movej 到位后量测末端 XYZ 对照，±3mm 内判可信）：\n");
+        for (i = 0; i < 6; i++) {
+            print_fk_line(tags[i], presets[i]);
+        }
+    }
+    printf("\n");
+    return 0;
+}
+
+/* cmd_ik：逆运动学。
+ * 给定目标位姿（X:Y:Z:RX:RY:RZ，位置 mm、姿态 ZYX 欧拉角 度），
+ * 输出全部候选解，并按"相对零位关节角变化最小"推荐一组，附 FK 回代误差自检。 */
+static int cmd_ik(const ParsedCmd *cmd)
+{
+    double pose[4][4];
+    double sols[IK_MAX_SOLUTIONS][6];
+    double kept[IK_MAX_SOLUTIONS][6];
+    double zero[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    double best[6];
+    double back[4][4], xyz[3], rpy[3];
+    double dx, dy, dz;
+    int cnt, kept_cnt, i;
+
+    rpy_deg_to_pose(cmd->vals[0], cmd->vals[1], cmd->vals[2],
+                    cmd->vals[3], cmd->vals[4], cmd->vals[5], pose);
+
+    printf("\n逆运动学（目标位姿 X=%.3f Y=%.3f Z=%.3f mm，RPY=%.2f %.2f %.2f deg）\n",
+           cmd->vals[0], cmd->vals[1], cmd->vals[2],
+           cmd->vals[3], cmd->vals[4], cmd->vals[5]);
+
+    cnt = ik_solve(DH_TABLE, pose, sols);
+    if (cnt <= 0) {
+        printf("  无解：目标位姿不可达，或落在解析 IK 的退化（奇异）分支\n\n");
+        return 0;
+    }
+    printf("  解析解组数：%d\n", cnt);
+
+    /* 关节软限位尚未标定，暂不限位（limits=NULL 表示全部保留） */
+    kept_cnt = ik_filter_by_limits(sols, cnt, NULL, kept);
+    for (i = 0; i < kept_cnt; i++) {
+        printf("    解%d: J1=%8.2f J2=%8.2f J3=%8.2f J4=%8.2f J5=%8.2f J6=%8.2f\n",
+               i + 1, kept[i][0], kept[i][1], kept[i][2],
+               kept[i][3], kept[i][4], kept[i][5]);
+    }
+
+    if (ik_select_best(kept, kept_cnt, zero, NULL, best) != 0) {
+        printf("  推荐解：无\n\n");
+        return 0;
+    }
+    printf("  推荐解（相对零位变化最小）：J1=%.2f J2=%.2f J3=%.2f J4=%.2f J5=%.2f J6=%.2f\n",
+           best[0], best[1], best[2], best[3], best[4], best[5]);
+
+    /* FK 回代自检：推荐解应能复现目标位姿 */
+    dh_forward(DH_TABLE, best, back);
+    dh_pose_to_xyz_rpy(back, xyz, rpy);
+    dx = xyz[0] - cmd->vals[0];
+    dy = xyz[1] - cmd->vals[1];
+    dz = xyz[2] - cmd->vals[2];
+    printf("  FK 回代：X=%.3f Y=%.3f Z=%.3f mm，RPY=%.2f %.2f %.2f deg（位置误差 %.3f mm）\n",
+           xyz[0], xyz[1], xyz[2],
+           rpy[0] * KIN_R2D, rpy[1] * KIN_R2D, rpy[2] * KIN_R2D,
+           sqrt(dx * dx + dy * dy + dz * dz));
+    printf("\n");
+    return 0;
+}
+
 /* cmd_dispatch：命令分发总入口（原 main.c 交互循环 switch 整体迁入）
  * 返回 1 表示用户请求退出（exit/quit），否则 0。 */
 int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
@@ -361,6 +509,12 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
             printf("[警告] 诊断后监控线程重启失败\n");
         break;
     }
+    case CMD_FK:
+        cmd_fk(cmd);
+        break;
+    case CMD_IK:
+        cmd_ik(cmd);
+        break;
     case CMD_CALIB:
         printf("单关节调试功能未启用\n");
         break;

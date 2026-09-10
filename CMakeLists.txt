@@ -75,7 +75,7 @@ add_library(cli STATIC
 )
 target_include_directories(cli PUBLIC src ${CMAKE_SOURCE_DIR})
 target_compile_options(cli PRIVATE -Wall -Wextra)
-target_link_libraries(cli PUBLIC control utils)
+target_link_libraries(cli PUBLIC control utils kinematics)
 
 # 公共头文件目录与警告选项
 # src 用于引用 comm/kinematics/... 子模块头；项目根用于引用 config/*.h
@@ -103,3 +103,9 @@ target_link_libraries(dummyrobot PRIVATE control utils cli)
 if(WIN32)
     target_link_libraries(dummyrobot PRIVATE winmm)
 endif()
+
+# ---------- 离线单元测试（CTest）----------
+# tests 仅依赖 utils / kinematics，不含串口与硬件，可无机械臂运行：
+#   ctest --test-dir build --output-on-failure
+enable_testing()
+add_subdirectory(tests)
