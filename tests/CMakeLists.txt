@@ -26,4 +26,10 @@ target_link_libraries(test_cmd_parser PRIVATE utils)
 target_include_directories(test_cmd_parser PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
 target_compile_options(test_cmd_parser PRIVATE -Wall -Wextra)
 add_test(NAME cmd_parser COMMAND test_cmd_parser)
-（内容由AI生成，仅供参考）
+
+# 零点标定：电机角 <-> 机械角 换算往返一致 + 回零实测基准
+add_executable(test_joint_zero test_joint_zero.c)
+target_link_libraries(test_joint_zero PRIVATE kinematics)
+target_include_directories(test_joint_zero PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_joint_zero PRIVATE -Wall -Wextra)
+add_test(NAME joint_zero COMMAND test_joint_zero)

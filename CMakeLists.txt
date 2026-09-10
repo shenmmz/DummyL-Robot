@@ -38,6 +38,7 @@ add_library(kinematics STATIC
     src/kinematics/mat3.c
     src/kinematics/dh.c
     src/kinematics/ik.c
+    src/kinematics/joint_zero.c
 )
 
 # ---------- 静态库: trajectory ----------
