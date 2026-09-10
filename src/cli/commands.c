@@ -413,8 +413,15 @@ static int cmd_ik(const ParsedCmd *cmd)
     }
     printf("  解析解组数：%d\n", cnt);
 
-    /* 关节软限位尚未标定，暂不限位（limits=NULL 表示全部保留） */
-    kept_cnt = ik_filter_by_limits(sols, cnt, NULL, kept);
+    /* 按机械角软限位（2026-09-10 逐轴实测）过滤候选解；limits=NULL 时全保留 */
+    const double lim_min[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
+    const double lim_max[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MAX_DEG;
+    JointLimit limits[ROBOT_JOINT_COUNT];
+    for (int j = 0; j < ROBOT_JOINT_COUNT; j++) {
+        limits[j].min_deg = lim_min[j];
+        limits[j].max_deg = lim_max[j];
+    }
+    kept_cnt = ik_filter_by_limits(sols, cnt, limits, kept);
     for (i = 0; i < kept_cnt; i++) {
         printf("    解%d: J1=%8.2f J2=%8.2f J3=%8.2f J4=%8.2f J5=%8.2f J6=%8.2f\n",
                i + 1, kept[i][0], kept[i][1], kept[i][2],

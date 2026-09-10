@@ -33,3 +33,10 @@ target_link_libraries(test_joint_zero PRIVATE kinematics)
 target_include_directories(test_joint_zero PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
 target_compile_options(test_joint_zero PRIVATE -Wall -Wextra)
 add_test(NAME joint_zero COMMAND test_joint_zero)
+
+# 关节软限位：配置合法性 + ik_filter_by_limits 使用真实限位表的过滤行为
+add_executable(test_joint_limits test_joint_limits.c)
+target_link_libraries(test_joint_limits PRIVATE kinematics)
+target_include_directories(test_joint_limits PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_joint_limits PRIVATE -Wall -Wextra)
+add_test(NAME joint_limits COMMAND test_joint_limits)
