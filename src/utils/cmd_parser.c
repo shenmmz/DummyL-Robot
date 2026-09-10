@@ -264,7 +264,7 @@ static const char HELP_TEXT[] =
     "                         (例 home:1 单独验证 1 轴，与其它轴无关)\n"
     "  homej:N:ANGLE         关节 N 回零后自动运动到 ANGLE 度 (N=1..6)\n"
     "  homej:N:ANGLE:SPEED   指定速度 (rpm)\n"
-    "  movej:N:ANGLE         关节 N 绝对运动到 ANGLE 度 (N=1..6)\n"
+    "  movej:N:ANGLE         关节 N 绝对运动到 ANGLE 度 (N=1..6，机械角)\n"
     "  movej:N:ANGLE:SPEED   指定速度 (rpm)\n"
     "  enable:N              使能关节 N\n"
     "  disable:N             失能关节 N\n"

@@ -18,6 +18,7 @@
 #include "comm/comm_if.h"
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
+#include "kinematics/joint_zero.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -257,11 +258,14 @@ ErrCode robot_disable(Robot *robot, int joint)
     return rc;
 }
 
-/* robot_movej：关节绝对运动到指定角度（立三 0x00E8~0x00E9 绝对位置，
- * 速度写 0x00D8~0x00D9，单位 0.01 rpm），返回 ErrCode */
+/* robot_movej：关节绝对运动到指定【机械角】（立三 0x00E8~0x00E9 绝对位置，
+ * 速度写 0x00D8~0x00D9，单位 0.01 rpm），返回 ErrCode。
+ * 入参为机械角（机械零位为 0，与 status/fk/ik 同一口径），
+ * 内部经零点标定换算为上位机电机角后再转脉冲下发。 */
 ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+    double mech[6], motor[6];
     int32_t steps;
     ErrCode rc;
 
@@ -272,7 +276,13 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
         printf("关节%d 已屏蔽，跳过运动\n", joint);
         return ERR_MASKED;
     }
-    steps = DEG2STEPS(angle_deg, reductions[joint - 1]);
+    /* 机械角 -> 电机角（仅本关节有效，其余位置零不影响单轴换算） */
+    for (int i = 0; i < 6; i++) {
+        mech[i] = 0.0;
+    }
+    mech[joint - 1] = angle_deg;
+    joint_zero_mech_to_motor(mech, motor);
+    steps = DEG2STEPS(motor[joint - 1], reductions[joint - 1]);
     if (speed_rpm <= 0.0) {
         speed_rpm = 3000.0;
     }
@@ -356,6 +366,33 @@ int32_t robot_read_position_steps(Robot *robot, int joint, int *ok)
     }
     if (ok) *ok = 1;
     return val;
+}
+
+/* robot_read_position_deg：读取关节实时位置并换算为【机械角】（度）。
+ * 脉冲 -> 电机角 ->（减零点）-> 机械角，与 status/fk/ik/robot_movej 同一口径。
+ * ok 指示读取是否成功；失败返回 0.0。 */
+double robot_read_position_deg(Robot *robot, int joint, int *ok)
+{
+    const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+    double motor[6], mech[6];
+    int32_t steps;
+    int rd_ok = 0;
+
+    if (ok) *ok = 0;
+    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
+        return 0.0;
+    }
+    steps = robot_read_position_steps(robot, joint, &rd_ok);
+    if (!rd_ok) {
+        return 0.0;
+    }
+    for (int i = 0; i < 6; i++) {
+        motor[i] = 0.0;
+    }
+    motor[joint - 1] = STEPS2DEG(steps, reductions[joint - 1]);
+    joint_zero_motor_to_mech(motor, mech);
+    if (ok) *ok = 1;
+    return mech[joint - 1];
 }
 
 /* robot_read_current_ma：读取关节实时电流（mA，0x001A），失败返回 -1 */

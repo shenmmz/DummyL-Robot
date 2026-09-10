@@ -46,7 +46,6 @@ static int cmd_status(Robot *robot)
 
     while (1) {
         int j;
-        static const int reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
 
         /* 每行前缀实时时钟（用户明确"时间"为当前实时时间，非字面值）。
          * 每轮取一次，同一轮 6 轴共用同一时间戳；含年月日。 */
@@ -84,7 +83,9 @@ static int cmd_status(Robot *robot)
                 char flags[64] = "";
                 int in0 = (st32 & LEESN_STAT_INPUT(0)) ? 1 : 0;
                 int in1 = (st32 & LEESN_STAT_INPUT(1)) ? 1 : 0;
-                double angle = ok ? STEPS2DEG(pos, reductions[j - 1]) : 0.0;
+                /* 显示【机械角】：脉冲 -> 电机角 -> 减零点（与 movej/fk/ik 同口径） */
+                int deg_ok = 0;
+                double angle = robot_read_position_deg(robot, j, &deg_ok);
 
                 if (st32 & LEESN_STAT_INPOS)      strcat(flags, "到位 ");
                 if (st32 & LEESN_STAT_SOFT_NEG)   strcat(flags, "负限位 ");
@@ -331,31 +332,29 @@ static void rpy_deg_to_pose(double x, double y, double z,
     pose[3][3] = 1.0;
 }
 
-/* print_fk_line：打印一组【上位机电机角】（度）的 FK 结果（末端 XYZ mm + RPY 度）
- * 内部先经零点标定换算成机械角，再交给 DH 正解。 */
-static void print_fk_line(const char *tag, const double *q_motor)
+/* print_fk_line：打印一组【机械角】（度）的 FK 结果（末端 XYZ mm + RPY 度）
+ * 机械角即 status/movej 的口径，可直接送入 DH 正解。 */
+static void print_fk_line(const char *tag, const double *q_mech)
 {
-    double q_mech[6];
     double pose[4][4];
     double xyz[3], rpy[3];
 
-    joint_zero_motor_to_mech(q_motor, q_mech);
     dh_forward(DH_TABLE, q_mech, pose);
     dh_pose_to_xyz_rpy(pose, xyz, rpy);
 
     printf("  %-3s J: %7.2f %7.2f %7.2f %7.2f %7.2f %7.2f  ->  "
            "X=%8.3f Y=%8.3f Z=%8.3f mm  RPY=%7.2f %7.2f %7.2f deg\n",
            tag,
-           q_motor[0], q_motor[1], q_motor[2],
-           q_motor[3], q_motor[4], q_motor[5],
+           q_mech[0], q_mech[1], q_mech[2],
+           q_mech[3], q_mech[4], q_mech[5],
            xyz[0], xyz[1], xyz[2],
            rpy[0] * KIN_R2D, rpy[1] * KIN_R2D, rpy[2] * KIN_R2D);
 }
 
 /* cmd_fk：正运动学。
- *   无参数      —— 打印预设验证姿态表 A~F（机械角预设，输出对应电机角，
- *                  供实机 movej 到位后量测对照）；
- *   fk:J1:...:J6 —— 给定【上位机电机角】（度，即 status 显示值）算末端位姿。 */
+ *   无参数      —— 打印预设验证姿态表 A~F（机械角，可直接 movej，
+ *                  供实机到位后量测对照）；
+ *   fk:J1:...:J6 —— 给定【机械角】（度，即 status 显示值）算末端位姿。 */
 static int cmd_fk(const ParsedCmd *cmd)
 {
     static const double presets[6][6] = {
@@ -370,16 +369,14 @@ static int cmd_fk(const ParsedCmd *cmd)
     int i;
 
     printf("\n正运动学（DH 表 kinematics/dh_params.h；位置 mm，角度 度）\n");
-    printf("  输入/输出均为【上位机电机角】（status 显示值），内部经零点标定转机械角求解。\n");
+    printf("  输入/输出均为【机械角】（与 status、movej 同口径，机械零位为 0）。\n");
 
     if (cmd->val_count == 6) {
         print_fk_line("in", cmd->vals);
     } else {
-        printf("  预设验证姿态（下表 J: 为可直接 movej 的电机角；到位后量测末端 XYZ，±3mm 内判可信）：\n");
+        printf("  预设验证姿态（下表 J: 可直接 movej；到位后量测末端 XYZ，±3mm 内判可信）：\n");
         for (i = 0; i < 6; i++) {
-            double motor[6];
-            joint_zero_mech_to_motor(presets[i], motor);
-            print_fk_line(tags[i], motor);
+            print_fk_line(tags[i], presets[i]);
         }
     }
     printf("\n");
@@ -389,7 +386,7 @@ static int cmd_fk(const ParsedCmd *cmd)
 /* cmd_ik：逆运动学。
  * 给定目标位姿（X:Y:Z:RX:RY:RZ，位置 mm、姿态 ZYX 欧拉角 度），
  * 输出全部候选解，并按"相对机械零位关节角变化最小"推荐一组，附 FK 回代误差自检。
- * 输出的关节角已由机械角换算为【上位机电机角】，可直接用于 movej。 */
+ * 输出的关节角为【机械角】（与 status、movej 同口径），可直接用于 movej。 */
 static int cmd_ik(const ParsedCmd *cmd)
 {
     double pose[4][4];
@@ -397,7 +394,6 @@ static int cmd_ik(const ParsedCmd *cmd)
     double kept[IK_MAX_SOLUTIONS][6];
     double zero[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     double best[6];
-    double motor[6];
     double back[4][4], xyz[3], rpy[3];
     double dx, dy, dz;
     int cnt, kept_cnt, i;
@@ -408,7 +404,7 @@ static int cmd_ik(const ParsedCmd *cmd)
     printf("\n逆运动学（目标位姿 X=%.3f Y=%.3f Z=%.3f mm，RPY=%.2f %.2f %.2f deg）\n",
            cmd->vals[0], cmd->vals[1], cmd->vals[2],
            cmd->vals[3], cmd->vals[4], cmd->vals[5]);
-    printf("  输出关节角为【上位机电机角】，可直接 movej。\n");
+    printf("  输出关节角为【机械角】，可直接 movej。\n");
 
     cnt = ik_solve(DH_TABLE, pose, sols);
     if (cnt <= 0) {
@@ -420,19 +416,17 @@ static int cmd_ik(const ParsedCmd *cmd)
     /* 关节软限位尚未标定，暂不限位（limits=NULL 表示全部保留） */
     kept_cnt = ik_filter_by_limits(sols, cnt, NULL, kept);
     for (i = 0; i < kept_cnt; i++) {
-        joint_zero_mech_to_motor(kept[i], motor);
         printf("    解%d: J1=%8.2f J2=%8.2f J3=%8.2f J4=%8.2f J5=%8.2f J6=%8.2f\n",
-               i + 1, motor[0], motor[1], motor[2],
-               motor[3], motor[4], motor[5]);
+               i + 1, kept[i][0], kept[i][1], kept[i][2],
+               kept[i][3], kept[i][4], kept[i][5]);
     }
 
     if (ik_select_best(kept, kept_cnt, zero, NULL, best) != 0) {
         printf("  推荐解：无\n\n");
         return 0;
     }
-    joint_zero_mech_to_motor(best, motor);
     printf("  推荐解（相对机械零位变化最小）：J1=%.2f J2=%.2f J3=%.2f J4=%.2f J5=%.2f J6=%.2f\n",
-           motor[0], motor[1], motor[2], motor[3], motor[4], motor[5]);
+           best[0], best[1], best[2], best[3], best[4], best[5]);
 
     /* FK 回代自检：推荐解应能复现目标位姿 */
     dh_forward(DH_TABLE, best, back);

@@ -13,8 +13,10 @@
  *   机械角       —— DH 表与 FK/IK 使用的角度，零点在【机械设计零位】。
  * 两者只差一个常数（见 config/robot_config.h 的标定说明）。
  *
- * 约定：kinematics 内部（DH_TABLE / dh_forward / ik_solve）一律用机械角；
- *       与硬件、用户交互的边界（CLI 输入、movej 下发、status 回读）用电机角。
+ * 约定（2026-09-10 定）：【用户面一律机械角】——status 显示、movej/homej 输入、
+ *       fk/ik 输入输出都是机械角，与通用机械臂/示教器口径一致（机械零位为 0）。
+ *       电机角只出现在两个最底层：robot_movej 下发前、位置回读换算时，
+ *       这两处由 control/robot.c 调用本模块完成转换，上层无需关心。
  */
 
 #define JOINT_ZERO_COUNT 6

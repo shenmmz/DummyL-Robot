@@ -32,8 +32,10 @@ void robot_close(Robot *robot);
 ErrCode robot_enable(Robot *robot, int joint);
 ErrCode robot_disable(Robot *robot, int joint);
 
-/* 单关节绝对运动：角度（度）-> 脉冲，写 0x00E8~0x00E9（INT32，
+/* 单关节绝对运动：角度（度，【机械角】）-> 脉冲，写 0x00E8~0x00E9（INT32，
  * 运行中亦可执行）；速度参数写 0x00D8~0x00D9（0.01 rpm）。
+ * 入参为机械角（机械零位为 0，与 status/fk/ik 同口径），
+ * 内部经零点标定（config ROBOT_JOINT_ZERO_DEG）换算为电机角后下发。
  * 返回 ErrCode：ERR_NONE / ERR_ARG / ERR_MASKED（屏蔽跳过）/ 通信错误 */
 ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm);
 
@@ -53,6 +55,10 @@ ErrCode robot_read_status32(Robot *robot, int joint, uint32_t *status);
 
 /* 读取关节当前位置（脉冲，0x0004~0x0005），失败返回 0 并置 *ok=0 */
 int32_t robot_read_position_steps(Robot *robot, int joint, int *ok);
+
+/* 读取关节当前位置并换算为【机械角】（度），失败返回 0.0 并置 *ok=0。
+ * 与 robot_movej / status / fk / ik 同口径（机械零位为 0）。 */
+double robot_read_position_deg(Robot *robot, int joint, int *ok);
 
 /* 读取关节当前电流（mA，0x001A），失败返回 -1 */
 int robot_read_current_ma(Robot *robot, int joint);
