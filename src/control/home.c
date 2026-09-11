@@ -2,6 +2,7 @@
  * home.c —— 回零实现
  * 关节1-5：碰撞回原点力矩模式回零（顶硬限位→电流超阈判到位→清零→movej 到 forward_deg）
  * 关节6：IN0/IN1 传感器回零（零点=IN0 正向 on→off 沿，兼容三种初始位置）
+ *        清零后再正转 q0_J6(+90°，见 config) 到机械零点
  * 寄存器操作统一走 motor_reg API，不直接操作 Modbus 帧。
  */
 
@@ -50,6 +51,25 @@ static struct {
     int dir;              /* 初始方向 -1反向 */
     int accel_ms;         /* 加减速时间 ms */
 } sensor = { 300, 90, 30, -1, 100 };
+
+/* 关节6 零点偏置：传感器回零清零点 = 电机角 0，而机械零点 q0_J6=+90
+ * （config ROBOT_JOINT_ZERO_DEG 第6项），故回零后须再正向转 q0_J6 度，机械角才归 0。
+ * 直接引用 config，避免与零点表漂移；改 config 即自动同步。 */
+static const double joint_zero_deg[ROBOT_JOINT_COUNT] = ROBOT_JOINT_ZERO_DEG;
+#define HOME_J6_ZERO_OFFSET_DEG  (joint_zero_deg[5])
+#define HOME_J6_ZERO_RPM         100
+
+/* 回零后转角目标（电机角相对位移量）：
+ * 1~5 取 stall 表 forward_deg（含 J3=-88 这类"目标非0"的轴）；
+ * 6 轴 = q0_J6（目标机械角 0，故电机目标 = 0 + q0_J6）。 */
+static double home_forward_deg(int j)
+{
+    return (j == 6) ? HOME_J6_ZERO_OFFSET_DEG : stall[j].forward_deg;
+}
+static int home_forward_rpm(int j)
+{
+    return (j == 6) ? HOME_J6_ZERO_RPM : stall[j].speed_rpm;
+}
 
 static int    home_timeout_ms  = 60000;//设置回零超时时间
 
@@ -697,6 +717,9 @@ static void sensor6_finish(Robot *robot, SensorCtx *c)
     if (c->done) printf("关节6 回零完成\n");
 }
 
+/* 前向声明：定义在本文件末尾（单轴回零路径复用同一转角逻辑） */
+static void home_goto_pose(Robot *robot, int only_joint);
+
 /* home_joint6：关节6 单轴传感器回零 = sensor6_start → 循环 tick → sensor6_finish */
 static ErrCode home_joint6(Robot *robot)
 {
@@ -709,27 +732,33 @@ static ErrCode home_joint6(Robot *robot)
         Sleep(HOME_STALL_POLL_MS);
     }
     sensor6_finish(robot, &c);
+    /* 与整机路径同口径：清零后再走 q0_J6 零点偏置，机械角才归 0 */
+    if (c.done) home_goto_pose(robot, 6);
     return c.done ? ERR_NONE : ERR_TIMEOUT;
 }
 
 /* ====================== 公开接口 ====================== */
 
-/* home_goto_pose：全轴回零后统一 movej 到 forward_deg。
+/* home_goto_pose：回零后统一 movej 到 forward_deg（含 6 轴零点偏置）。
+ * only_joint=0 表示 1~6 全轴；=N 表示只走第 N 轴（单轴回零路径复用）。
  * 先一次性发全部 movej 再统一轮询；单轴异常只结算自身不拖累其余轴。
  * 注意：调用前应已恢复限位/报警保护，转角过程有完整保护。 */
-static void home_goto_pose(Robot *robot)
+static void home_goto_pose(Robot *robot, int only_joint)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-    uint8_t pend[7] = {0};   /* 1~5：已发 movej、待等待到位 */
-    int32_t tgt[7] = {0};    /* 1~5：期望绝对脉冲 */
+    uint8_t pend[7] = {0};   /* 1~6：已发 movej、待等待到位 */
+    int32_t tgt[7] = {0};    /* 1~6：期望绝对脉冲 */
     uint32_t start_ms;
     int remain = 0, j;
+    int j_first = (only_joint >= 1 && only_joint <= 6) ? only_joint : 1;
+    int j_last  = (only_joint >= 1 && only_joint <= 6) ? only_joint : 6;
 
     /* 第一遍：全部发出 movej（各轴同时开始运动） */
-    for (j = 1; j <= 5; j++) {
-        StallHome *p = &stall[j];
+    for (j = j_first; j <= j_last; j++) {
+        double fdeg = home_forward_deg(j);
+        int    frpm = home_forward_rpm(j);
         if (robot_is_masked(robot, j)) continue;
-        if (p->forward_deg == 0.0) continue;
+        if (fdeg == 0.0) continue;
 
         /* 发指令前快照状态/位置并暴露异常，防电机没动却被轮询误判为到位。
          * 【相对位移】实测清零后 0x0004 常非 0（0x00D2 未必生效），若仍按
@@ -739,7 +768,7 @@ static void home_goto_pose(Robot *robot)
         {
             uint32_t st;
             int32_t pos = 0;
-            int32_t delta = DEG2STEPS(p->forward_deg, reductions[j - 1]);
+            int32_t delta = DEG2STEPS(fdeg, reductions[j - 1]);
             int pos_ok = 0, st_ok;
 
             st_ok = (motor_read_status(robot, j, &st) == ERR_NONE);
@@ -757,7 +786,7 @@ static void home_goto_pose(Robot *robot)
                 tgt[j] = delta;   /* 读不到位置：退回绝对目标（保持原行为） */
             }
         }
-        if (motor_set_speed(robot, j, p->speed_rpm) != ERR_NONE ||
+        if (motor_set_speed(robot, j, frpm) != ERR_NONE ||
             motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
             printf("[警告] 关节%d 发 movej 失败\n", j);
             continue;
@@ -771,20 +800,20 @@ static void home_goto_pose(Robot *robot)
     start_ms = GetTickCount();
     while (remain > 0) {
         if ((GetTickCount() - start_ms) >= (uint32_t)home_timeout_ms) {
-            for (j = 1; j <= 5; j++) {
+            for (j = j_first; j <= j_last; j++) {
                 int32_t pos;
                 int pos_ok;
                 if (!pend[j]) continue;
                 pos = motor_read_position(robot, j, &pos_ok);
                 printf("[警告] 关节%d 转角到 %.1f° 超时（目标=%d 位置=%d 差=%d）\n",
-                         j, stall[j].forward_deg, (int)tgt[j],
+                         j, home_forward_deg(j), (int)tgt[j],
                          pos_ok ? (int)pos : -99999,
                          pos_ok ? (int)(tgt[j] - pos) : -99999);
                 pend[j] = 0;
             }
             break;
         }
-        for (j = 1; j <= 5; j++) {
+        for (j = j_first; j <= j_last; j++) {
             int q;
             if (!pend[j]) continue;
             q = home_inpos_query(robot, j, tgt[j]);
@@ -792,7 +821,7 @@ static void home_goto_pose(Robot *robot)
                 pend[j] = 0; remain--;
             } else if (q == -1) {
                 printf("[警告] 关节%d 转角到 %.1f° 报警/异常，已结算该轴\n",
-                         j, stall[j].forward_deg);
+                         j, home_forward_deg(j));
                 pend[j] = 0; remain--;
             } else if (q == -2) {
                 Sleep(HOME_STALL_POLL_MS);   /* 读失败：避让一帧下轮再试 */
@@ -922,7 +951,7 @@ ErrCode robot_home(Robot *robot)
             home_restore(robot, j);
             Sleep(20);
         }
-        home_goto_pose(robot);
+        home_goto_pose(robot, 0);
     } else {
         printf("[警告] 回零：存在未归零/失败轴，跳过统一转角\n");
         /* 失败场景也要恢复 1~5 轴保护（6 轴已在 sensor6_finish 恢复） */
