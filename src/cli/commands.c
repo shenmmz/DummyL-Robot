@@ -243,13 +243,13 @@ void cmd_getpos(Robot *robot)
     dh_forward(DH_TABLE, q, pose);
     dh_pose_to_xyz_rpy(pose, xyz, rpy);
 
-    printf("关节角(机械角, 度):\n");
     for (int i = 0; i < 6; i++) {
-        printf("  J%d = %.2f°\n", i + 1, q[i]);
+        printf(i ? ", J%d = %.2f°" : "J%d = %.2f°", i + 1, q[i]);
     }
-    printf("笛卡尔坐标(mm):\n");
-    printf("  X = %.2f  Y = %.2f  Z = %.2f\n", xyz[0], xyz[1], xyz[2]);
-    printf("  姿态 RPY(度):  Rx = %.2f  Ry = %.2f  Rz = %.2f\n",
+    printf("\n");
+
+    printf("X = %.2f , Y = %.2f , Z = %.2f , Rx = %.2f , Ry = %.2f , Rz = %.2f\n",
+           xyz[0], xyz[1], xyz[2],
            rpy[0] * RAD2DEG, rpy[1] * RAD2DEG, rpy[2] * RAD2DEG);
 
     if (!all_ok) printf("[警告] 部分关节读取失败，坐标按读取值计算\n");
