@@ -115,8 +115,31 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "getpos") == 0) {
         out->type = CMD_GETPOS;
     } else if (strncmp(cmd, "zero", 4) == 0) {
-        out->type = CMD_ZERO;
-        out->joint = (strstr(out->raw, "save") != NULL) ? 1 : 0;
+        if (strstr(out->raw, "set") != NULL) {
+            /* zero set q0 q1 q2 q3 q4 q5：直接写入已知电机角零点 */
+            double vals[6];
+            int n = 0;
+            char *ctx = NULL;
+            char *t = strtok_r((char *)out->raw, " \t", &ctx);
+            while (t != NULL && n < 6) {
+                if (strcmp(t, "zero") == 0 || strcmp(t, "set") == 0) {
+                    t = strtok_r(NULL, " \t", &ctx);
+                    continue;
+                }
+                vals[n] = atof(t);
+                n++;
+                t = strtok_r(NULL, " \t", &ctx);
+            }
+            if (n != 6) {
+                printf("[警告] 用法: zero set q0 q1 q2 q3 q4 q5（6 个电机角零点，空格分隔）\n");
+                return CMD_UNKNOWN;
+            }
+            out->type = CMD_ZERO_SET;
+            for (int i = 0; i < 6; i++) out->zero_vals[i] = vals[i];
+        } else {
+            out->type = CMD_ZERO;
+            out->joint = (strstr(out->raw, "save") != NULL) ? 1 : 0;
+        }
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
@@ -142,7 +165,8 @@ static const char HELP_TEXT[] =
     "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
     "  getpos                读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)\n"
     "  zero                  显示零点标定数据（零点、当前读数、修正值）\n"
-    "  zero save             保存当前零点标定值\n"
+    "  zero save             保存零点标定（须先回零到 home(0,0,90,0,0,0)，否则拒绝）\n"
+    "  zero set q0..q5       直接写入已知电机角零点（6 个值，空格分隔）\n"
     "  help                  帮助\n"
     "  exit                  退出\n";
 

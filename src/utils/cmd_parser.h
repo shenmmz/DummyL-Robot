@@ -11,7 +11,9 @@
  *   disable:N        仅单独泄力(失能)关节 N
  *   motor            启动/停止电机实时监控（3S/次循环显示）
  *   getpos           读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)
- *   zero[:save]      显示/保存零点标定数据
+ *   zero              显示零点标定数据（零点、当前读数、修正值）
+ *   zero save         保存零点标定（须先回零到 home 姿态，否则拒绝）
+ *   zero set q0..q5   直接写入已知电机角零点（6 个值，空格分隔）
  *   help             帮助
  *   exit             退出
  */
@@ -26,12 +28,14 @@
 #define CMD_EMPTY    7
 #define CMD_ZERO     8
 #define CMD_GETPOS   9
+#define CMD_ZERO_SET 10
 
 typedef struct {
     int      type;       /* CMD_* */
     int      joint;      /* 1..6（关节号），0=全部/未指定 */
     double   angle_deg;  /* 目标绝对角度（度） */
     double   speed_rpm;  /* 速度（rpm），0表示使用默认 */
+    double   zero_vals[6]; /* zero set 写入的 6 个电机角零点 */
     char     raw[128];   /* 原始输入 */
 } ParsedCmd;
 

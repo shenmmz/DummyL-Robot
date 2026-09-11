@@ -18,8 +18,12 @@
 #include "kinematics/dh.h"
 
 #include <stdio.h>
+#include <math.h>
 
 #include <windows.h>
+
+/* zero save 允许的 home 姿态偏差（度/轴）；超过则拒绝保存，防止污染标定 */
+#define ZERO_SAVE_HOME_TOL_DEG 2.0
 
 /* ====================== 电机实时监控线程 ====================== */
 
@@ -172,6 +176,9 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     case CMD_ZERO:
         cmd_zero(robot, cmd->joint == 1);
         break;
+    case CMD_ZERO_SET:
+        cmd_zero_set(robot, cmd->zero_vals);
+        break;
     case CMD_GETPOS:
         cmd_getpos(robot);
         break;
@@ -221,16 +228,49 @@ void cmd_zero(Robot *robot, int do_save)
     for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
     printf("}\n");
 
-    if (!all_ok) printf("[警告] 部分关节读取失败\n");
+    /* home 校验：当前机械角须接近 home(0,0,90,0,0,0)，否则 corrected 会污染 q0 */
+    int at_home = 1;
+    for (int i = 0; i < 6; i++) {
+        if (fabs(reading[i] - target[i]) > ZERO_SAVE_HOME_TOL_DEG) {
+            at_home = 0;
+            break;
+        }
+    }
 
     if (do_save) {
+        if (!all_ok) {
+            printf("[拒绝] 部分关节读取失败，禁止保存（会写入错误标定）\n");
+            return;
+        }
+        if (!at_home) {
+            printf("[拒绝] 当前姿态偏离 home(0,0,90,0,0,0) 过大，禁止保存——会把当前姿态误当新零点、污染标定。\n");
+            printf("         请先执行 home 回到零位，再 zero save。\n");
+            return;
+        }
         joint_zero_save(corrected);
         if (ini_write_joint_zero(INI_PATH, corrected)) {
             printf("零点标定已保存（内存 + ini：%s）\n", INI_PATH);
         } else {
             printf("零点标定已保存(内存)，但写入 ini 失败\n");
         }
+    } else {
+        if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
+        if (!at_home) printf("[提示] 当前非 home 姿态，\"修正后零点\"仅为预览；须先 home 后才能 zero save。\n");
     }
+}
+
+/* cmd_zero_set：直接写入已知电机角零点（q0..q5），内存 + ini 持久化 */
+void cmd_zero_set(Robot *robot, const double vals[6])
+{
+    (void)robot;
+    joint_zero_save(vals);
+    if (ini_write_joint_zero(INI_PATH, vals)) {
+        printf("零点标定已写入（内存 + ini：%s）：\n", INI_PATH);
+    } else {
+        printf("零点标定已写入(内存)，但写入 ini 失败：\n");
+    }
+    printf("  q0 = %.2f, q1 = %.2f, q2 = %.2f, q3 = %.2f, q4 = %.2f, q5 = %.2f\n",
+           vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
 }
 
 /* cmd_getpos：读取当前关节机械角，经正运动学求末端笛卡尔坐标与姿态 */

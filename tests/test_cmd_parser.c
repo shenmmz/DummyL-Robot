@@ -2,12 +2,13 @@
  * test_cmd_parser.c —— CLI 命令解析离线单元测试
  * ------------------------------------------------------------
  * 所属：tests（CTest）
- * 覆盖：home、movej、disable、motor、getpos、zero、exit、空行、未知命令的解析与参数校验。
+ * 覆盖：home、movej、disable、motor、getpos、zero/zero save/zero set、exit、空行、未知命令的解析与参数校验。
  */
 
 #include "utils/cmd_parser.h"
 
 #include <stdio.h>
+#include <math.h>
 
 static int g_fail = 0;
 
@@ -94,6 +95,15 @@ int main(void)
     CHECK(rc == CMD_ZERO && c.joint == 1, "zero save 应解析为 CMD_ZERO 保存（得到 rc=%d, joint=%d）", rc, c.joint);
     rc = cmd_parse("zerosave", &c);
     CHECK(rc == CMD_ZERO && c.joint == 1, "zerosave 应解析为 CMD_ZERO 保存（得到 rc=%d, joint=%d）", rc, c.joint);
+
+    /* zero set：直接写入已知零点（6 值） */
+    rc = cmd_parse("zero set -176.85 72.87 -175.46 7.38 118.08 262.27", &c);
+    CHECK(rc == CMD_ZERO_SET, "zero set 应解析为 CMD_ZERO_SET（得到 rc=%d）", rc);
+    CHECK(fabs(c.zero_vals[0] + 176.85) < 1e-6 && fabs(c.zero_vals[5] - 262.27) < 1e-6,
+          "zero set 数值解析失败（q0=%.4f, q5=%.4f）", c.zero_vals[0], c.zero_vals[5]);
+
+    /* zero set：数值不足 6 个应拒绝 */
+    CHECK(cmd_parse("zero set -176.85 72.87", &c) == CMD_UNKNOWN, "zero set 数值不足 6 个应被拒绝");
 
     /* 空行 */
     rc = cmd_parse("", &c);
