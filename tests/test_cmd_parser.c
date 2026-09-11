@@ -56,13 +56,13 @@ int main(void)
     rc = cmd_parse("disable", &c);
     CHECK(rc == CMD_DISABLE && c.joint == 0, "disable 应解析为 CMD_DISABLE joint=0（得到 rc=%d, joint=%d）", rc, c.joint);
 
-    /* motor：全部关节 */
+    /* motor：启动/停止全关节监控（不再支持 motor:N 子指令） */
     rc = cmd_parse("motor", &c);
     CHECK(rc == CMD_MOTOR && c.joint == 0, "motor 应解析为 CMD_MOTOR joint=0（得到 rc=%d, joint=%d）", rc, c.joint);
 
-    /* motor：指定关节 */
+    /* motor:N 后缀不再解析：仍按全关节监控处理（joint 保持 0） */
     rc = cmd_parse("motor:2", &c);
-    CHECK(rc == CMD_MOTOR && c.joint == 2, "motor:2 解析失败（rc=%d, joint=%d）", rc, c.joint);
+    CHECK(rc == CMD_MOTOR && c.joint == 0, "motor:2 应解析为 CMD_MOTOR，N 后缀忽略（得到 rc=%d, joint=%d）", rc, c.joint);
 
     /* exit */
     rc = cmd_parse("exit", &c);

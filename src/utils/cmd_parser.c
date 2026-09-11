@@ -101,9 +101,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_DISABLE;
         out->joint = 0;  /* 0=全部失能 */
     } else if (strcmp(cmd, "motor") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
         out->type = CMD_MOTOR;
-        out->joint = (j != NULL) ? atoi(j) : 0;
     } else if (strcmp(cmd, "zero") == 0) {
         out->type = CMD_ZERO;
         out->joint = (strstr(out->raw, "save") != NULL) ? 1 : 0;
@@ -124,13 +122,11 @@ int cmd_parse(const char *line, ParsedCmd *out)
 static const char HELP_TEXT[] =
     "可用命令:\n"
     "  home                  回零（全轴）\n"
-    "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"
-    "                         (例 home:1 单独回零1轴，与其它轴无关)\n"
+    "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"                      
     "  movej:N:ANGLE         控制轴N，绝对角度ANGLE(度)\n"
     "  movej:N:ANGLE:SPEED   控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)\n"
     "  disable               全部失能所有关节\n"
     "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
-    "  motor:N               查看关节 N 的电机实时位置\n"
     "  zero                  显示零点标定数据（零点、当前读数、修正值）\n"
     "  zero save             保存当前零点标定值\n"
     "  help                  帮助\n"
