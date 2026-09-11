@@ -2,7 +2,7 @@
  * test_cmd_parser.c —— CLI 命令解析离线单元测试
  * ------------------------------------------------------------
  * 所属：tests（CTest）
- * 覆盖：home、movej、disable、motor、exit、空行、未知命令的解析与参数校验。
+ * 覆盖：home、movej、disable、motor、getpos、zero、exit、空行、未知命令的解析与参数校验。
  */
 
 #include "utils/cmd_parser.h"
@@ -75,6 +75,10 @@ int main(void)
     /* help */
     rc = cmd_parse("help", &c);
     CHECK(rc == CMD_HELP, "help 解析失败（得到 rc=%d）", rc);
+
+    /* getpos */
+    rc = cmd_parse("getpos", &c);
+    CHECK(rc == CMD_GETPOS, "getpos 解析失败（得到 rc=%d）", rc);
 
     /* 空行 */
     rc = cmd_parse("", &c);

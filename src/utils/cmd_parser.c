@@ -102,6 +102,8 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->joint = 0;  /* 0=全部失能 */
     } else if (strcmp(cmd, "motor") == 0) {
         out->type = CMD_MOTOR;
+    } else if (strcmp(cmd, "getpos") == 0) {
+        out->type = CMD_GETPOS;
     } else if (strcmp(cmd, "zero") == 0) {
         out->type = CMD_ZERO;
         out->joint = (strstr(out->raw, "save") != NULL) ? 1 : 0;
@@ -127,6 +129,7 @@ static const char HELP_TEXT[] =
     "  movej:N:ANGLE:SPEED   控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)\n"
     "  disable               全部失能所有关节\n"
     "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
+    "  getpos                读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)\n"
     "  zero                  显示零点标定数据（零点、当前读数、修正值）\n"
     "  zero save             保存当前零点标定值\n"
     "  help                  帮助\n"

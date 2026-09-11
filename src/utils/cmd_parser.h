@@ -6,10 +6,11 @@
  * 支持命令：
  *   home             回零（全轴）
  *   home:N           仅单独回零关节 N
- *   movej:N:ANGLE:SPEED  控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)
- *   disable            全部失能所有关节
- *   motor              启动/停止电机实时监控（1S/次循环显示）
- *   motor:N            查看关节 N 的电机实时位置
+ *   movej:N:ANGLE[:SPEED]  控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)
+ *   disable          全部失能所有关节
+ *   motor            启动/停止电机实时监控（3S/次循环显示）
+ *   getpos           读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)
+ *   zero[:save]      显示/保存零点标定数据
  *   help             帮助
  *   exit             退出
  */
@@ -23,6 +24,7 @@
 #define CMD_EXIT     6
 #define CMD_EMPTY    7
 #define CMD_ZERO     8
+#define CMD_GETPOS   9
 
 typedef struct {
     int      type;       /* CMD_* */

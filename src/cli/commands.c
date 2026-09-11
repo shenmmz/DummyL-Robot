@@ -3,7 +3,7 @@
  * ------------------------------------------------------------
  * 所属模块：应用命令层（cli）
  * 对外接口：cmd_dispatch
- * 支持命令：home、movej、disable、motor、help、exit
+ * 支持命令：home、movej、disable、motor、getpos、zero、help、exit
  * main.c 仅负责初始化与命令循环。
  */
 
@@ -14,6 +14,7 @@
 #include "api/motor_reg.h"
 #include "utils/err.h"
 #include "kinematics/joint_zero.h"
+#include "kinematics/dh.h"
 
 #include <stdio.h>
 
@@ -164,6 +165,9 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     case CMD_ZERO:
         cmd_zero(robot, cmd->joint == 1);
         break;
+    case CMD_GETPOS:
+        cmd_getpos(robot);
+        break;
     case CMD_HELP:
         cmd_print_help();
         break;
@@ -219,4 +223,34 @@ void cmd_zero(Robot *robot, int do_save)
         joint_zero_save(corrected);
         printf("零点标定已保存\n");
     }
+}
+
+/* cmd_getpos：读取当前关节机械角，经正运动学求末端笛卡尔坐标与姿态 */
+void cmd_getpos(Robot *robot)
+{
+    static const double RAD2DEG = 180.0 / 3.14159265358979323846;
+    double q[6];
+    int ok[6];
+    double pose[4][4];
+    double xyz[3], rpy[3];
+    int all_ok = 1;
+
+    for (int i = 0; i < 6; i++) {
+        q[i] = robot_read_position_deg(robot, i + 1, &ok[i]);
+        if (!ok[i]) all_ok = 0;
+    }
+
+    dh_forward(DH_TABLE, q, pose);
+    dh_pose_to_xyz_rpy(pose, xyz, rpy);
+
+    printf("关节角(机械角, 度):\n");
+    for (int i = 0; i < 6; i++) {
+        printf("  J%d = %.2f°\n", i + 1, q[i]);
+    }
+    printf("笛卡尔坐标(mm):\n");
+    printf("  X = %.2f  Y = %.2f  Z = %.2f\n", xyz[0], xyz[1], xyz[2]);
+    printf("  姿态 RPY(度):  Rx = %.2f  Ry = %.2f  Rz = %.2f\n",
+           rpy[0] * RAD2DEG, rpy[1] * RAD2DEG, rpy[2] * RAD2DEG);
+
+    if (!all_ok) printf("[警告] 部分关节读取失败，坐标按读取值计算\n");
 }
