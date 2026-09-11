@@ -221,12 +221,9 @@ void cmd_zero(Robot *robot, int do_save)
     printf("目标机械角:   {");
     for (int i = 0; i < 6; i++) printf(i ? ", %.1f" : "%.1f", target[i]);
     printf("}\n");
-    printf("当前读数:     {");
+    printf("当前角度:     {");
     for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", reading[i]);
     printf("}°\n");
-    printf("修正后零点:   {");
-    for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
-    printf("}\n");
 
     /* home 校验：当前机械角须接近 home(0,0,90,0,0,0)，否则 corrected 会污染 q0 */
     int at_home = 1;
@@ -253,9 +250,12 @@ void cmd_zero(Robot *robot, int do_save)
         } else {
             printf("零点标定已保存(内存)，但写入 ini 失败\n");
         }
+        printf("新的标定零点: {");
+        for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
+        printf("}\n");
     } else {
         if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
-        if (!at_home) printf("[提示] 当前非 home 姿态，\"修正后零点\"仅为预览；须先 home 后才能 zero save。\n");
+        if (!at_home) printf("[提示] 当前非 home 姿态，须先 home 回零后才能 zero save。\n");
     }
 }
 

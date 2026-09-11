@@ -164,7 +164,7 @@ static const char HELP_TEXT[] =
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
     "  getpos                读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)\n"
-    "  zero                  显示零点标定数据（零点、当前读数、修正值）\n"
+    "  zero                  显示当前零点与机械角\n"
     "  zero save             保存零点标定（须先回零到 home(0,0,90,0,0,0)，否则拒绝）\n"
     "  zero set q0..q5       直接写入已知电机角零点（6 个值，空格分隔）\n"
     "  help                  帮助\n"
