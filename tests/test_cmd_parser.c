@@ -87,6 +87,14 @@ int main(void)
     rc = cmd_parse("getpos", &c);
     CHECK(rc == CMD_GETPOS, "getpos 解析失败（得到 rc=%d）", rc);
 
+    /* zero / zero save / zerosave */
+    rc = cmd_parse("zero", &c);
+    CHECK(rc == CMD_ZERO && c.joint == 0, "zero 应解析为 CMD_ZERO 非保存（得到 rc=%d, joint=%d）", rc, c.joint);
+    rc = cmd_parse("zero save", &c);
+    CHECK(rc == CMD_ZERO && c.joint == 1, "zero save 应解析为 CMD_ZERO 保存（得到 rc=%d, joint=%d）", rc, c.joint);
+    rc = cmd_parse("zerosave", &c);
+    CHECK(rc == CMD_ZERO && c.joint == 1, "zerosave 应解析为 CMD_ZERO 保存（得到 rc=%d, joint=%d）", rc, c.joint);
+
     /* 空行 */
     rc = cmd_parse("", &c);
     CHECK(rc == CMD_EMPTY, "空行应解析为 CMD_EMPTY");

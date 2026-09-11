@@ -66,6 +66,7 @@ add_library(control STATIC
 add_library(utils STATIC
     src/utils/cmd_parser.c
     src/utils/err.c
+    src/utils/ini_rw.c
 )
 
 # ---------- 静态库: cli（命令实现与分发）----------

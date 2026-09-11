@@ -114,7 +114,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_MOTOR;
     } else if (strcmp(cmd, "getpos") == 0) {
         out->type = CMD_GETPOS;
-    } else if (strcmp(cmd, "zero") == 0) {
+    } else if (strncmp(cmd, "zero", 4) == 0) {
         out->type = CMD_ZERO;
         out->joint = (strstr(out->raw, "save") != NULL) ? 1 : 0;
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {

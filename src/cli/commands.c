@@ -13,6 +13,7 @@
 #include "control/monitor.h"
 #include "api/motor_reg.h"
 #include "utils/err.h"
+#include "utils/ini_rw.h"
 #include "kinematics/joint_zero.h"
 #include "kinematics/dh.h"
 
@@ -191,7 +192,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     return 0;
 }
 
-/* cmd_zero：显示零点标定数据；do_save=1 时保存修正值 */
+/* cmd_zero：显示零点标定数据；do_save=1 时保存修正值（内存 + ini 持久化） */
 void cmd_zero(Robot *robot, int do_save)
 {
     const double *zero = joint_zero_get();
@@ -213,9 +214,6 @@ void cmd_zero(Robot *robot, int do_save)
     printf("目标机械角:   {");
     for (int i = 0; i < 6; i++) printf(i ? ", %.1f" : "%.1f", target[i]);
     printf("}\n");
-    printf("修正后零点:   {");
-    for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
-    printf("}\n");
     printf("当前读数:     {");
     for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", reading[i]);
     printf("}°\n");
@@ -227,7 +225,11 @@ void cmd_zero(Robot *robot, int do_save)
 
     if (do_save) {
         joint_zero_save(corrected);
-        printf("零点标定已保存\n");
+        if (ini_write_joint_zero(INI_PATH, corrected)) {
+            printf("零点标定已保存（内存 + ini：%s）\n", INI_PATH);
+        } else {
+            printf("零点标定已保存(内存)，但写入 ini 失败\n");
+        }
     }
 }
 

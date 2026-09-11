@@ -40,3 +40,10 @@ target_link_libraries(test_joint_limits PRIVATE kinematics)
 target_include_directories(test_joint_limits PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
 target_compile_options(test_joint_limits PRIVATE -Wall -Wextra)
 add_test(NAME joint_limits COMMAND test_joint_limits)
+
+# ini [joint_zero] 段读写往返（持久化校验）
+add_executable(test_ini_rw test_ini_rw.c)
+target_link_libraries(test_ini_rw PRIVATE utils)
+target_include_directories(test_ini_rw PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_ini_rw PRIVATE -Wall -Wextra)
+add_test(NAME ini_rw COMMAND test_ini_rw)

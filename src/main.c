@@ -4,6 +4,8 @@
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
 #include "utils/cmd_parser.h"
+#include "utils/ini_rw.h"
+#include "kinematics/joint_zero.h"
 #include "cli/commands.h"
 
 #include <stdio.h>
@@ -12,7 +14,7 @@
 #include <windows.h>
 #include <mmsystem.h>   /* timeBeginPeriod/timeEndPeriod：抬高系统定时器精度 */
 
-#define INI_PATH "src/config/robot_config.ini"
+/* INI_PATH 由 utils/ini_rw.h 统一提供，保持 main 与 cli 一致 */
 
 /* 极简 ini 读取：取 [serial] 段下 key 的 value（去除空白），找不到返回默认。
  * 返回 1 = ini 文件存在并已装载（生效来源：ini）；
@@ -167,6 +169,17 @@ int main(int argc, char **argv)
             }
         }
         printf("\n使用串口: %s @ %lu 8N1\n", port, baud);
+    }
+
+    /* 读取 ini 的 [joint_zero] 段（若已保存标定），运行时覆盖头文件默认零点 */
+    {
+        double loaded[6];
+        if (ini_read_joint_zero(INI_PATH, loaded)) {
+            joint_zero_save(loaded);
+            printf("零点标定来源：ini [joint_zero]\n");
+        } else {
+            printf("零点标定来源：默认（robot_config.h 编译期宏）\n");
+        }
     }
 
     /* 注入串口 CommOps（control 层通过接口操作总线） */
