@@ -235,14 +235,16 @@ void cmd_zero(Robot *robot, int do_save)
     }
 
     if (do_save) {
-        if (!all_ok) {
-            printf("[拒绝] 部分关节读取失败，禁止保存（会写入错误标定）\n");
-            return;
-        }
-        if (!at_home) {
-            printf("[拒绝] 当前姿态偏离 home(0,0,90,0,0,0) 过大，禁止保存——会把当前姿态误当新零点、污染标定。\n");
-            printf("         请先执行 home 回到零位，再 zero save。\n");
-            return;
+        int updated = 0;
+        for (int i = 0; i < 6; i++) {
+            /* 仅对"读值正常且在 home 姿态"的轴重新标定；其余轴（失能/偏离 home/读失败）
+               保持原标定不动，避免把当前姿态误当新零点、污染 q0 */
+            if (ok[i] && fabs(reading[i] - target[i]) <= ZERO_SAVE_HOME_TOL_DEG) {
+                corrected[i] = zero[i] + (reading[i] - target[i]);
+                updated++;
+            } else {
+                corrected[i] = zero[i];
+            }
         }
         joint_zero_save(corrected);
         if (ini_write_joint_zero(INI_PATH, corrected)) {
@@ -253,9 +255,12 @@ void cmd_zero(Robot *robot, int do_save)
         printf("新的标定零点: {");
         for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
         printf("}\n");
+        if (updated < 6) {
+            printf("[提示] 仅 %d/6 轴在 home 姿态被重新标定；其余轴（失能或偏离 home）保持原标定，未参与更新。\n", updated);
+        }
     } else {
         if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
-        if (!at_home) printf("[提示] 当前非 home 姿态，须先 home 回零后才能 zero save。\n");
+        if (!at_home) printf("[提示] 当前非 home 姿态：zero save 仅重新标定在 home 的轴，其余保持原标定（防污染）。\n");
     }
 }
 
