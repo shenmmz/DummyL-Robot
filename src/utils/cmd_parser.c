@@ -98,8 +98,18 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->angle_deg = angle;
         out->speed_rpm = (s != NULL) ? atof(s) : 0.0;
     } else if (strcmp(cmd, "disable") == 0) {
+        char *j = strtok_r(NULL, ":", &save);
         out->type = CMD_DISABLE;
-        out->joint = 0;  /* 0=全部失能 */
+        if (j != NULL) {
+            int joint = atoi(j);
+            if (joint < 1 || joint > 6) {
+                printf("[警告] 用法: disable[:关节号]  例 disable:1 单独泄力1轴\n");
+                return CMD_UNKNOWN;
+            }
+            out->joint = joint;
+        } else {
+            out->joint = 0;  /* 0=全部失能 */
+        }
     } else if (strcmp(cmd, "motor") == 0) {
         out->type = CMD_MOTOR;
     } else if (strcmp(cmd, "getpos") == 0) {
@@ -128,6 +138,7 @@ static const char HELP_TEXT[] =
     "  movej:N:ANGLE         控制轴N，绝对角度ANGLE(度)\n"
     "  movej:N:ANGLE:SPEED   控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)\n"
     "  disable               全部失能所有关节\n"
+    "  disable:N             仅单独泄力(失能)关节 N\n"
     "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
     "  getpos                读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)\n"
     "  zero                  显示零点标定数据（零点、当前读数、修正值）\n"

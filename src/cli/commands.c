@@ -137,10 +137,16 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     }
     case CMD_DISABLE: {
         motor_monitor_stop(g_motor_mon);
-        int j;
-        for (j = 1; j <= 6; j++) {
-            ErrCode rc = robot_disable(robot, j);
-            if (rc != ERR_NONE) printf("[错误] 关节%d 失能失败：%s\n", j, err_str(rc));
+        if (cmd->joint >= 1) {
+            ErrCode rc = robot_disable(robot, cmd->joint);
+            if (rc != ERR_NONE) printf("[错误] 关节%d 失能失败：%s\n", cmd->joint, err_str(rc));
+            else printf("关节%d 已泄力(失能)\n", cmd->joint);
+        } else {
+            int j;
+            for (j = 1; j <= 6; j++) {
+                ErrCode rc = robot_disable(robot, j);
+                if (rc != ERR_NONE) printf("[错误] 关节%d 失能失败：%s\n", j, err_str(rc));
+            }
         }
         break;
     }

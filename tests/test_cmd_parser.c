@@ -56,6 +56,13 @@ int main(void)
     rc = cmd_parse("disable", &c);
     CHECK(rc == CMD_DISABLE && c.joint == 0, "disable 应解析为 CMD_DISABLE joint=0（得到 rc=%d, joint=%d）", rc, c.joint);
 
+    /* disable:N 单轴泄力 */
+    rc = cmd_parse("disable:3", &c);
+    CHECK(rc == CMD_DISABLE && c.joint == 3, "disable:3 应解析为 CMD_DISABLE joint=3（得到 rc=%d, joint=%d）", rc, c.joint);
+
+    /* disable: 关节号非法 */
+    CHECK(cmd_parse("disable:7", &c) == CMD_UNKNOWN, "disable:7 关节号非法应被拒绝");
+
     /* motor：启动/停止全关节监控（不再支持 motor:N 子指令） */
     rc = cmd_parse("motor", &c);
     CHECK(rc == CMD_MOTOR && c.joint == 0, "motor 应解析为 CMD_MOTOR joint=0（得到 rc=%d, joint=%d）", rc, c.joint);

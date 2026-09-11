@@ -8,6 +8,7 @@
  *   home:N           仅单独回零关节 N
  *   movej:N:ANGLE[:SPEED]  控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)
  *   disable          全部失能所有关节
+ *   disable:N        仅单独泄力(失能)关节 N
  *   motor            启动/停止电机实时监控（3S/次循环显示）
  *   getpos           读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)
  *   zero[:save]      显示/保存零点标定数据
