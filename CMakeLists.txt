@@ -79,7 +79,8 @@ target_compile_options(cli PRIVATE -Wall -Wextra)
 target_link_libraries(cli PUBLIC control utils kinematics)
 
 # 公共头文件目录与警告选项
-# src 用于引用 comm/kinematics/... 子模块头；项目根用于引用 config/*.h
+# src 用于引用 comm/kinematics/config/... 子模块头；项目根保留给根级头文件
+# 注：config/ 已于 2026-09-11 迁入 src/，故 config/*.h 走 src 路径解析
 foreach(lib comm kinematics trajectory api control utils)
     target_include_directories(${lib} PUBLIC src ${CMAKE_SOURCE_DIR})
     target_compile_options(${lib} PRIVATE -Wall -Wextra)

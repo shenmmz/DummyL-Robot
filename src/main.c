@@ -15,7 +15,7 @@
 #include <mmsystem.h>   /* timeBeginPeriod/timeEndPeriod：抬高系统定时器精度 */
 #endif
 
-#define INI_PATH "config/robot_config.ini"
+#define INI_PATH "src/config/robot_config.ini"
 
 /* 极简 ini 读取：取 [serial] 段下 key 的 value（去除空白），找不到返回默认。
  * 返回 1 = ini 文件存在并已装载（生效来源：ini）；
