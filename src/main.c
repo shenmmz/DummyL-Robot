@@ -9,11 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
 #include <windows.h>
 #include <mmsystem.h>   /* timeBeginPeriod/timeEndPeriod：抬高系统定时器精度 */
-#endif
 
 #define INI_PATH "src/config/robot_config.ini"
 
@@ -194,6 +191,28 @@ int main(int argc, char **argv)
     /* 命令循环：读取一行 → 解析 → 分发（具体命令实现见 cli/commands.c） */
     while (running) {
         ParsedCmd cmd;
+        /* 当电机监控线程运行时，不打印提示符，避免与线程输出交错 */
+        if (cmd_motor_running()) {
+            HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+            if (WaitForSingleObject(hStdin, 100) == WAIT_OBJECT_0) {
+                INPUT_RECORD ir;
+                DWORD read = 0;
+                PeekConsoleInputA(hStdin, &ir, 1, &read);
+                if (read > 0) {
+                    ReadConsoleInputA(hStdin, &ir, 1, &read);
+                    if (ir.Event.KeyEvent.bKeyDown &&
+                        (ir.Event.KeyEvent.uChar.AsciiChar == 'q' ||
+                         ir.Event.KeyEvent.uChar.AsciiChar == 'Q')) {
+                        ParsedCmd stop_cmd;
+                        memset(&stop_cmd, 0, sizeof(stop_cmd));
+                        stop_cmd.type = CMD_MOTOR;
+                        cmd_dispatch(robot, mon, &stop_cmd);
+                        continue;
+                    }
+                }
+            }
+            continue;
+        }
         printf("DummyL> ");
         fflush(stdout);
         if (fgets(line, sizeof(line), stdin) == NULL) {

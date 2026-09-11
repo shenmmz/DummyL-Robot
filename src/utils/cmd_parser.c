@@ -3,8 +3,7 @@
  * ------------------------------------------------------------
  * 所属模块：工具层（utils）
  * 对外接口：cmd_parse、cmd_print_help
- * 说明：help_text.c 已并入本文件，命令帮助文本（HELP_TEXT）集中维护于此。
- * 依赖模块：utils/logger
+ * 支持命令：home、movej、help、exit
  */
 
 #include "utils/cmd_parser.h"
@@ -12,32 +11,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-/* parse_joint_list：解析逗号分隔的关节列表（如 "2,3,4"）到 out->joints。
- * 任一关节号非法（<1 或 >6）则整体失败返回 -1，避免只屏蔽一半。
- * 单个关节（如 "2"）同样兼容。 */
-static int parse_joint_list(const char *s, ParsedCmd *out)
-{
-    char buf[32];
-    char *save = NULL;
-    char *tok;
-    int n = 0;
-
-    snprintf(buf, sizeof(buf), "%s", s);
-    tok = strtok_r(buf, ",", &save);
-    while (tok != NULL) {
-        int j = atoi(tok);
-        if (j < 1 || j > 6) {
-            printf("[警告] 关节号须在 1..6 之间：%s\n", tok);
-            return -1;
-        }
-        out->joints[n++] = j;
-        tok = strtok_r(NULL, ",", &save);
-    }
-    out->joint_count = n;
-    out->joint = (n > 0) ? out->joints[0] : 0;
-    return 0;
-}
 
 /* cmd_parse：解析一行命令文本到 ParsedCmd，返回命令类型 */
 int cmd_parse(const char *line, ParsedCmd *out)
@@ -100,30 +73,10 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 printf("[警告] 用法: home[:关节号]  例 home:1 单独回零1轴\n");
                 return CMD_UNKNOWN;
             }
-            out->joint = joint;   /* 带关节号 = 单轴独立回零 */
+            out->joint = joint;
         } else {
-            out->joint = 0;       /* 不带 = 全轴回零 */
+            out->joint = 0;
         }
-    } else if (strcmp(cmd, "homej") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
-        char *a = strtok_r(NULL, ":", &save);
-        char *s = strtok_r(NULL, ":", &save);
-        int joint;
-        double angle;
-        if (j == NULL || a == NULL) {
-            printf("[警告] 用法: homej:关节号:角度[:速度]\n");
-            return CMD_UNKNOWN;
-        }
-        joint = atoi(j);
-        angle = atof(a);
-        if (joint < 1 || joint > 6) {
-            printf("[警告] 关节号须在 1..6 之间\n");
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_HOMEJ;
-        out->joint = joint;
-        out->angle_deg = angle;
-        out->speed_rpm = (s != NULL) ? atof(s) : 0.0;
     } else if (strcmp(cmd, "movej") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         char *a = strtok_r(NULL, ":", &save);
@@ -144,105 +97,16 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->joint = joint;
         out->angle_deg = angle;
         out->speed_rpm = (s != NULL) ? atof(s) : 0.0;
-    } else if (strcmp(cmd, "enable") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
-        if (j == NULL) {
-            printf("[警告] 用法: enable:关节号\n");
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_ENABLE;
-        out->joint = atoi(j);
     } else if (strcmp(cmd, "disable") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
-        if (j == NULL) {
-            printf("[警告] 用法: disable:关节号\n");
-            return CMD_UNKNOWN;
-        }
         out->type = CMD_DISABLE;
-        out->joint = atoi(j);
-    } else if (strcmp(cmd, "status") == 0) {
-        out->type = CMD_STATUS;
-    } else if (strcmp(cmd, "mask") == 0) {
+        out->joint = 0;  /* 0=全部失能 */
+    } else if (strcmp(cmd, "motor") == 0) {
         char *j = strtok_r(NULL, ":", &save);
-        if (j == NULL) {
-            printf("[警告] 用法: mask:关节号[,关节号...]  例 mask:2 或 mask:2,3,4\n");
-            return CMD_UNKNOWN;
-        }
-        if (parse_joint_list(j, out) != 0) {
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_MASK;
-    } else if (strcmp(cmd, "unmask") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
-        if (j == NULL) {
-            printf("[警告] 用法: unmask:关节号[,关节号...]  例 unmask:2 或 unmask:2,3,4\n");
-            return CMD_UNKNOWN;
-        }
-        if (parse_joint_list(j, out) != 0) {
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_UNMASK;
-    } else if (strcmp(cmd, "scan") == 0) {
-        out->type = CMD_SCAN;
-    } else if (strcmp(cmd, "calib") == 0) {
-        out->type = CMD_CALIB;
-    } else if (strcmp(cmd, "diag") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
-        out->type = CMD_DIAG;
-        out->joint = (j != NULL) ? atoi(j) : 0;   /* 0 = 全部关节 */
-    } else if (strcmp(cmd, "torque") == 0) {
-        char *j = strtok_r(NULL, ":", &save);
-        char *l = strtok_r(NULL, ":", &save);
-        int joint, level;
-        if (j == NULL || l == NULL) {
-            printf("[警告] 用法: torque:关节号:等级  例 torque:4:120 在4轴以等级120试撞\n");
-            return CMD_UNKNOWN;
-        }
-        joint = atoi(j);
-        level = atoi(l);
-        if (joint < 1 || joint > 6) {
-            printf("[警告] 关节号须在 1..6 之间\n");
-            return CMD_UNKNOWN;
-        }
-        if (level < 0 || level > 255) {
-            printf("[警告] 力矩等级须在 0..255 之间\n");
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_TORQUE;
-        out->joint = joint;
-        out->torque_level = level;
-    } else if (strcmp(cmd, "fk") == 0) {
-        /* 可选 6 个关节角（度）；不带参数 = 打印预设验证姿态表 */
-        int n = 0;
-        int extra = 0;
-        while (n < 6) {
-            char *v = strtok_r(NULL, ":", &save);
-            if (v == NULL) break;
-            out->vals[n++] = atof(v);
-        }
-        if (strtok_r(NULL, ":", &save) != NULL) extra = 1;  /* 多余参数 */
-        out->val_count = n;
-        if ((n != 0 && n != 6) || extra) {
-            printf("[警告] 用法: fk 或 fk:J1:J2:J3:J4:J5:J6（6 个关节角，单位度）\n");
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_FK;
-    } else if (strcmp(cmd, "ik") == 0) {
-        /* 目标位姿：X:Y:Z:RX:RY:RZ（mm / 度），6 个参数缺一不可 */
-        int n = 0;
-        int extra = 0;
-        while (n < 6) {
-            char *v = strtok_r(NULL, ":", &save);
-            if (v == NULL) break;
-            out->vals[n++] = atof(v);
-        }
-        if (strtok_r(NULL, ":", &save) != NULL) extra = 1;  /* 多余参数 */
-        out->val_count = n;
-        if (n != 6 || extra) {
-            printf("[警告] 用法: ik:X:Y:Z:RX:RY:RZ（位置 mm，姿态 RPY 度）\n");
-            return CMD_UNKNOWN;
-        }
-        out->type = CMD_IK;
+        out->type = CMD_MOTOR;
+        out->joint = (j != NULL) ? atoi(j) : 0;
+    } else if (strcmp(cmd, "zero") == 0) {
+        out->type = CMD_ZERO;
+        out->joint = (strstr(out->raw, "save") != NULL) ? 1 : 0;
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
@@ -254,33 +118,21 @@ int cmd_parse(const char *line, ParsedCmd *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* 命令帮助文本（原 help_text.c 内容并入）                              */
+/* 命令帮助文本                                                      */
 /* ------------------------------------------------------------------ */
 
 static const char HELP_TEXT[] =
     "可用命令:\n"
     "  home                  回零（全轴）\n"
     "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"
-    "                         (例 home:1 单独验证 1 轴，与其它轴无关)\n"
-    "  homej:N:ANGLE         关节 N 回零后自动运动到 ANGLE 度 (N=1..6)\n"
-    "  homej:N:ANGLE:SPEED   指定速度 (rpm)\n"
-    "  movej:N:ANGLE         关节 N 绝对运动到 ANGLE 度 (N=1..6，机械角)\n"
-    "  movej:N:ANGLE:SPEED   指定速度 (rpm)\n"
-    "  enable:N              使能关节 N\n"
-    "  disable:N             失能关节 N\n"
-    "  status                查询所有关节状态\n"
-    "  mask:N[,M,...]        屏蔽关节（可批量，例 mask:2,3,4）\n"
-    "  unmask:N[,M,...]      恢复关节（可批量，例 unmask:2,3,4）\n"
-    "  scan                  扫描总线电机\n"
-    "  calib                 单关节手动调试\n"
-    "  diag [N]              回零诊断：细分/编码器线数/实际速度/位置偏差\n"
-    "                         (例 diag:2 只看 2 轴；省略 N 则全轴)\n"
-    "  torque:N:L            力矩碰撞回原点诊断：关节 N 以等级 L(0~255) 试撞，\n"
-    "                         每 200ms 打印 状态字/电流/位置，用于观察到位信号\n"
-    "  fk                    正运动学：打印预设验证姿态表 A~F 的末端 XYZ(mm)/RPY(度)，\n"
-    "                         实机 movej 到位后量测对照，用于校核 DH 与实物尺寸\n"
-    "  fk:J1:J2:J3:J4:J5:J6  指定关节角求末端位姿（单位：度）\n"
-    "  ik:X:Y:Z:RX:RY:RZ     逆运动学：给末端位姿求关节角候选解（位置 mm，姿态 RPY 度）\n"
+    "                         (例 home:1 单独回零1轴，与其它轴无关)\n"
+    "  movej:N:ANGLE         控制轴N，绝对角度ANGLE(度)\n"
+    "  movej:N:ANGLE:SPEED   控制轴N，绝对角度ANGLE(度)，速度SPEED(rpm)\n"
+    "  disable               全部失能所有关节\n"
+    "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
+    "  motor:N               查看关节 N 的电机实时位置\n"
+    "  zero                  显示零点标定数据（零点、当前读数、修正值）\n"
+    "  zero save             保存当前零点标定值\n"
     "  help                  帮助\n"
     "  exit                  退出\n";
 

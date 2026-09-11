@@ -9,13 +9,36 @@
 #include "kinematics/joint_zero.h"
 #include "config/robot_config.h"
 
-static const double JOINT_ZERO[JOINT_ZERO_COUNT] = ROBOT_JOINT_ZERO_DEG;
+static double g_joint_zero[JOINT_ZERO_COUNT] = ROBOT_JOINT_ZERO_DEG;
+static int g_zero_overridden = 0;
+
+const double *joint_zero_get(void)
+{
+    return g_joint_zero;
+}
+
+void joint_zero_save(const double *new_zero)
+{
+    for (int i = 0; i < JOINT_ZERO_COUNT; i++) {
+        g_joint_zero[i] = new_zero[i];
+    }
+    g_zero_overridden = 1;
+}
+
+void joint_zero_reset(void)
+{
+    static const double default_zero[JOINT_ZERO_COUNT] = ROBOT_JOINT_ZERO_DEG;
+    for (int i = 0; i < JOINT_ZERO_COUNT; i++) {
+        g_joint_zero[i] = default_zero[i];
+    }
+    g_zero_overridden = 0;
+}
 
 void joint_zero_motor_to_mech(const double *q_motor, double *q_mech)
 {
     int i;
     for (i = 0; i < JOINT_ZERO_COUNT; i++) {
-        q_mech[i] = q_motor[i] - JOINT_ZERO[i];
+        q_mech[i] = q_motor[i] - g_joint_zero[i];
     }
 }
 
@@ -23,6 +46,6 @@ void joint_zero_mech_to_motor(const double *q_mech, double *q_motor)
 {
     int i;
     for (i = 0; i < JOINT_ZERO_COUNT; i++) {
-        q_motor[i] = q_mech[i] + JOINT_ZERO[i];
+        q_motor[i] = q_mech[i] + g_joint_zero[i];
     }
 }

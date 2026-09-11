@@ -276,18 +276,6 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
         printf("关节%d 已屏蔽，跳过运动\n", joint);
         return ERR_MASKED;
     }
-    /* 机械角软限位越界拦截：防止手动/回零指令把轴打过行程
-     * （J3 下限 +30° 使全轴立正姿态物理不可达，见 robot_config.h） */
-    {
-        const double lim_min[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
-        const double lim_max[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MAX_DEG;
-        int idx = joint - 1;
-        if (angle_deg < lim_min[idx] - 1e-6 || angle_deg > lim_max[idx] + 1e-6) {
-            printf("[错误] 关节%d 目标角 %.2f° 超出软限位 [%.2f°, %.2f°]\n",
-                   joint, angle_deg, lim_min[idx], lim_max[idx]);
-            return ERR_ARG;
-        }
-    }
     /* 机械角 -> 电机角（仅本关节有效，其余位置零不影响单轴换算） */
     for (int i = 0; i < 6; i++) {
         mech[i] = 0.0;

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * home.c —— 回零实现
  * 关节1-5：碰撞回原点力矩模式回零（顶硬限位→电流超阈判到位→清零→movej 到 forward_deg）
  * 关节6：IN0/IN1 传感器回零（零点=IN0 正向 on→off 沿，兼容三种初始位置）
@@ -35,13 +35,13 @@ typedef struct {
 #define TORQUE_MODE_HOLD_RUN 3     /* 恒力矩运行 */
 #define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
 #define HOME_ZERO_TOL_STEPS    500 /**/
-static StallHome stall[7] = {
-    [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -180.0, .torque_level = 120 },
-    [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .forward_deg = 73.5, .torque_level = 120 },
-    [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -88.0, .torque_level = 120 },
-    [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 6.0, .torque_level = 120 },
-    [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 114.0, .torque_level = 120 },
-};
+ static StallHome stall[7] = {
+     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -176.85, .torque_level = 120 },
+     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .forward_deg = 72.87, .torque_level = 120 },
+     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -85.46, .torque_level = 120 },
+     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 7.38, .torque_level = 120 },
+     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 118.08, .torque_level = 120 },
+ };
 
 /* 关节6 传感器回零参数 */
 static struct {
@@ -108,16 +108,16 @@ static ErrCode home_arm(Robot *robot, int joint)
     return motor_set_limit(robot, joint, 0);  /* 关闭限位 */
 }
 
-/* home_restore：恢复使能/硬限位/超差报警/偏差预警默认值；单项失败仅告警不中断 */
+/* home_restore：恢复使能/超差报警/偏差预警默认值；单项失败仅告警不中断 */
 static void home_restore(Robot *robot, int joint)
 {
     if (motor_enable(robot, joint) != ERR_NONE) {
         printf("[警告] 关节%d 恢复使能失败\n", joint);
     }
     Sleep(30);
-    if (motor_set_limit(robot, joint, 1) != ERR_NONE) {   /* 开启限位 */
-        printf("[警告] 关节%d 恢复限位失败\n", joint);
-    }
+    /* 限位不在此处恢复，回零后先不开启限位，
+     * 使 movej 可自由运动到任意角度（回零后位置可能超出软限位）。
+     * 恢复限位：motor_set_limit(robot, joint, 1) */
     /* 恢复超差报警：回零期间被关闭（0x000B/0x000C=0），
      * 结束后写回默认 200/100，恢复正常运动的超差保护 */
     if (motor_restore_pos_err_alarm(robot, joint) != ERR_NONE) {
