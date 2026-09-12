@@ -22,8 +22,8 @@
 
 #include <windows.h>
 
-/* zero save 允许的 home 姿态偏差（度/轴）；超过则拒绝保存，防止污染标定 */
-#define ZERO_SAVE_HOME_TOL_DEG 2.0
+/* zero save 修正量提醒阈值（度）：超过仅提示，不阻断保存（用于发现"在错误姿态保存"） */
+#define ZERO_SAVE_WARN_DELTA_DEG 30.0
 
 /* ====================== 电机实时监控线程 ====================== */
 
@@ -225,25 +225,16 @@ void cmd_zero(Robot *robot, int do_save)
     for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", reading[i]);
     printf("}°\n");
 
-    /* home 校验：当前机械角须接近 home(0,0,90,0,0,0)，否则 corrected 会污染 q0 */
-    int at_home = 1;
-    for (int i = 0; i < 6; i++) {
-        if (fabs(reading[i] - target[i]) > ZERO_SAVE_HOME_TOL_DEG) {
-            at_home = 0;
-            break;
-        }
-    }
-
     if (do_save) {
         int updated = 0;
         for (int i = 0; i < 6; i++) {
-            /* 仅对"读值正常且在 home 姿态"的轴重新标定；其余轴（失能/偏离 home/读失败）
-               保持原标定不动，避免把当前姿态误当新零点、污染 q0 */
-            if (ok[i] && fabs(reading[i] - target[i]) <= ZERO_SAVE_HOME_TOL_DEG) {
+            /* 失能状态下手动摆位标定同样有效：只要读取成功就按当前角度重算，
+               不再按"是否失能 / 是否贴近 home"筛选（用户在失能状态下摆到基准位再标定） */
+            if (ok[i]) {
                 corrected[i] = zero[i] + (reading[i] - target[i]);
                 updated++;
             } else {
-                corrected[i] = zero[i];
+                corrected[i] = zero[i];   /* 仅读取失败的轴保持原标定 */
             }
         }
         joint_zero_save(corrected);
@@ -256,11 +247,16 @@ void cmd_zero(Robot *robot, int do_save)
         for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
         printf("}\n");
         if (updated < 6) {
-            printf("[提示] 仅 %d/6 轴在 home 姿态被重新标定；其余轴（失能或偏离 home）保持原标定，未参与更新。\n", updated);
+            printf("[提示] 有 %d 轴读取失败，保持原 q0 未更新。\n", 6 - updated);
+        }
+        for (int i = 0; i < 6; i++) {
+            if (ok[i] && fabs(corrected[i] - zero[i]) > ZERO_SAVE_WARN_DELTA_DEG) {
+                printf("[注意] 关节%d 修正量 %.2f° 偏大，请确认当前是否为标定基准姿态。\n",
+                       i + 1, corrected[i] - zero[i]);
+            }
         }
     } else {
         if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
-        if (!at_home) printf("[提示] 当前非 home 姿态：zero save 仅重新标定在 home 的轴，其余保持原标定（防污染）。\n");
     }
 }
 
