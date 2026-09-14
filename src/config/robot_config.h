@@ -22,6 +22,8 @@
 #define ROBOT_SLAVE_ADDR_TABLE {1, 2, 3, 4, 5, 6}
 /*机械电机角度零点标定*/
 #define ROBOT_JOINT_ZERO_DEG {-176.54, 74.55, -179.94, 3.74, 115.81, 86.89}
+/*回零后各轴目标机械角（姿态设计量，回零退让量 = 该值 + q0[j]）*/
+#define ROBOT_HOME_MECH_DEG {0.0, 0.0, 90.0, 0.0, 0.0, 0.0}
 /*机械电机角度限位*/
 #define ROBOT_JOINT_LIMIT_MIN_DEG { -170.0, -72.0,  30.0, -360.0, -95.0, -360.0 }
 #define ROBOT_JOINT_LIMIT_MAX_DEG {  179.0,  90.0, 180.0,  360.0,  95.0,  360.0 }

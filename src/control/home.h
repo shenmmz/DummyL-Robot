@@ -12,7 +12,7 @@
  *   阶段1 {1,2,3,5} 并行堵转归零（仅清零） → 阶段2 关节6 传感器回零
  *   → 阶段3 关节4 单独堵转归零 → 阶段4 统一 movej 到各轴 forward_deg
  * 6 轴为 IN0/IN1 传感器回零轴（非堵转），支持 3 种初始情况（见 home_joint6）；
- * 其 forward_deg = q0_J6(+90°)：传感器清零点非机械零点，须再正转 90° 机械角才归 0。
+ * 退让量 forward_deg = 目标机械角(ROBOT_HOME_MECH_DEG) + q0[j]，不再写死在回零表里。
  */
 
 #include "control/robot.h"

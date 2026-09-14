@@ -1,8 +1,8 @@
 ﻿/*
  * home.c —— 回零实现
- * 关节1-5：碰撞回原点力矩模式回零（顶硬限位→电流超阈判到位→清零→movej 到 forward_deg）
+ * 关节1-5：碰撞回原点力矩模式回零（顶硬限位→电流超阈判到位→清零→退让 forward_deg）
  * 关节6：IN0/IN1 传感器回零（零点=IN0 正向 on→off 沿，兼容三种初始位置）
- *        清零后再正转 q0_J6(+90°，见 config) 到机械零点
+ * 退让量 forward_deg = 目标机械角(ROBOT_HOME_MECH_DEG) + q0[j]，q0 运行时取 ini/标定值
  * 寄存器操作统一走 motor_reg API，不直接操作 Modbus 帧。
  */
 
@@ -24,7 +24,6 @@ typedef struct {
     int    decel_ms;      /* 减速时间 ms（0x0099，目标速度→停止速度） */
     int    dir;           /* 方向 +1正转 / -1反转 */
     int    stall_current; /* 堵转判定电流 mA，0=仅靠状态字判定 */
-    double forward_deg;   /* 堵转后移动角度（绝对角度），0=不移动 */
     int    torque_level;  /* 碰撞回原点力矩等级 1~255（必填；0=未配置=错误，纯电流回零已移除）；
                              走 0x009E 力矩模式顶限位，到等级即停，更柔和可控；
                              撞到位由 home_check_stall 电流超阈判定（本机不报 HOMED/退出RUN） */
@@ -37,11 +36,11 @@ typedef struct {
 #define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
 #define HOME_ZERO_TOL_STEPS    500 /**/
  static StallHome stall[7] = {
-     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -176.54, .torque_level = 120 },
-     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .forward_deg = 74.55, .torque_level = 120 },
-     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -179.94, .torque_level = 120 },
-     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 3.74, .torque_level = 120 },
-     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 115.81, .torque_level = 120 },
+     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .torque_level = 120 },
+     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .torque_level = 120 },
+     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .torque_level = 120 },
+     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .torque_level = 120 },
+     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .torque_level = 120 },
  };
 
 /* 关节6 传感器回零参数 */
@@ -53,18 +52,15 @@ static struct {
     int accel_ms;         /* 加减速时间 ms */
 } sensor = { 300, 90, 30, -1, 100 };
 
-/* 关节6 零点偏置：传感器回零清零点 = 电机角 0，而机械零点 q0_J6=+90
- * 回零后须再正向转 q0_J6 度，机械角才归 0。
- * 使用运行时覆盖值（joint_zero_get），zero_save 更新后即同步。 */
+/* 关节6 传感器清零点 = 电机角 0，非机械零点；回零后按 forward_deg 退让到目标机械角 */
 #define HOME_J6_ZERO_RPM         100
 
-/* 回零后转角目标（电机角相对位移量）：
- * 1~5 取 stall 表 forward_deg（含 J3=-88 这类"目标非0"的轴）；
- * 6 轴 = joint_zero_deg[5]（目标机械角 0，故电机目标 = 0 + zero[5]）。 */
+/* 回零后转角目标（电机角相对位移量）= 目标机械角 + q0[j]，q0 取运行时零点（ini 覆盖） */
 static double home_forward_deg(int j)
 {
+    static const double mech[ROBOT_JOINT_COUNT] = ROBOT_HOME_MECH_DEG;
     const double *zero = joint_zero_get();
-    return (j == 6) ? zero[5] : stall[j].forward_deg;
+    return mech[j - 1] + zero[j - 1];
 }
 static int home_forward_rpm(int j)
 {
@@ -381,12 +377,13 @@ static void home_stall_forward(Robot *robot, int joint)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
     StallHome *p = &stall[joint];
+    double fdeg = home_forward_deg(joint);
     int32_t delta, pos = 0, target;
     int pos_ok = 0, rc;
 
-    if (p->forward_deg == 0.0) return;
+    if (fdeg == 0.0) return;
 
-    delta  = DEG2STEPS(p->forward_deg, reductions[joint - 1]);
+    delta  = DEG2STEPS(fdeg, reductions[joint - 1]);
     pos    = motor_read_position(robot, joint, &pos_ok);
     target = pos_ok ? (pos + delta) : delta;   /* 读不到位置：退回绝对目标 */
     if (!pos_ok) {
@@ -410,11 +407,11 @@ static void home_stall_forward(Robot *robot, int joint)
         int pos2_ok = 0;
         int32_t pos2 = motor_read_position(robot, joint, &pos2_ok);
         printf("[警告] 关节%d 退让 %.1f° 超时（目标=%d 位置=%d 差=%d）\n",
-                 joint, p->forward_deg, (int)target,
+                 joint, fdeg, (int)target,
                  pos2_ok ? (int)pos2 : -99999,
                  pos2_ok ? (int)(target - pos2) : -99999);
     } else if (rc < 0) {
-        printf("[警告] 关节%d 退让 %.1f° 报警/异常\n", joint, p->forward_deg);
+        printf("[警告] 关节%d 退让 %.1f° 报警/异常\n", joint, fdeg);
     }
 }
 
@@ -969,7 +966,6 @@ ErrCode robot_home(Robot *robot)
  * 关节6 走传感器状态机；只操作目标轴 */
 ErrCode robot_home_single(Robot *robot, int joint)
 {
-    StallHome *p;
     ErrCode rc;
     int hit;
 
@@ -982,7 +978,6 @@ ErrCode robot_home_single(Robot *robot, int joint)
         printf("=== 单轴传感器回零：关节6 ===\n");
         return home_joint6(robot);
     }
-    p = &stall[joint];
 
     printf("=== 单轴独立堵转回零：关节%d ===\n", joint);
     rc = home_arm(robot, joint);
@@ -1012,7 +1007,7 @@ ErrCode robot_home_single(Robot *robot, int joint)
     home_stall_forward(robot, joint);
 
     home_restore(robot, joint);
-    printf("关节%d 单轴回零完成（目标 %.1f°）\n", joint, p->forward_deg);
+    printf("关节%d 单轴回零完成（目标 %.1f°）\n", joint, home_forward_deg(joint));
     return ERR_NONE;
 }
 
