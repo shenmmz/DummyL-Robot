@@ -97,12 +97,12 @@ int main(void)
     CHECK(fabs(c.zero_vals[0] + 176.88) < 1e-6 && fabs(c.zero_vals[5] - 444.58) < 1e-6,
           "zero_save 数值解析失败（q0=%.4f, q5=%.4f）", c.zero_vals[0], c.zero_vals[5]);
 
-    /* multi-joint movej */
-    rc = cmd_parse("movej:1:30,2:60,3000,150,200", &c);
-    CHECK(rc == CMD_MOVEJ && c.num_joints == 2, "多关节 movej 应解析为 CMD_MOVEJ num_joints=2（得到 rc=%d, n=%d）", rc, c.num_joints);
-    CHECK(c.joints[0] == 1 && c.angles[0] == 30.0 && c.joints[1] == 2 && c.angles[1] == 60.0,
-          "多关节 movej 参数解析失败（j0=%d,a0=%.2f,j1=%d,a1=%.2f）",
-          c.joints[0], c.angles[0], c.joints[1], c.angles[1]);
+    /* multi-joint movej：movej:ANG1..ANG6,SPD,ACC,DEC（9 段，J1~J6 全轴） */
+    rc = cmd_parse("movej:10,20,30,40,50,60,3000,150,200", &c);
+    CHECK(rc == CMD_MOVEJ && c.num_joints == 6, "多关节 movej 应解析为 CMD_MOVEJ num_joints=6（得到 rc=%d, n=%d）", rc, c.num_joints);
+    CHECK(c.joints[0] == 1 && c.angles[0] == 10.0 && c.joints[5] == 6 && c.angles[5] == 60.0,
+          "多关节 movej 参数解析失败（j0=%d,a0=%.2f,j5=%d,a5=%.2f）",
+          c.joints[0], c.angles[0], c.joints[5], c.angles[5]);
     CHECK(c.speeds[0] == 3000.0 && c.accel_ms[0] == 150 && c.decel_ms[0] == 200,
           "多关节 movej 加减速解析失败（spd=%.0f,acc=%d,dec=%d）",
           c.speeds[0], c.accel_ms[0], c.decel_ms[0]);
@@ -113,17 +113,19 @@ int main(void)
     CHECK(fabs(c.cartesian[0] - 100) < 1e-6 && fabs(c.cartesian[5] - 0) < 1e-6,
           "movel 数值解析失败（X=%.4f, Rz=%.4f）", c.cartesian[0], c.cartesian[5]);
 
-    /* ---- 多关节 movej 参数不足 / 脏段：必须判错（防静默错位与 atof 误读） ---- */
-    CHECK(cmd_parse("movej:1:30,2:60", &c) == CMD_UNKNOWN,
-          "movej 多关节缺 SPD/ACC/DEC 应被拒绝");
-    CHECK(cmd_parse("movej:1:30,2,3000,150,200", &c) == CMD_UNKNOWN,
-          "movej 关节段缺 ':' 应被拒绝");
-    CHECK(cmd_parse("movej:1:30,abc,150,200", &c) == CMD_UNKNOWN,
-          "movej 末三项非纯数字应被拒绝");
-    CHECK(cmd_parse("movej:1:30,2:60,3000,150,200x", &c) == CMD_UNKNOWN,
+    /* ---- 多关节 movej 段数不足 / 脏段：必须判错（防静默错位与 atof 误读） ---- */
+    CHECK(cmd_parse("movej:10,20,30,40,50,60,3000,150", &c) == CMD_UNKNOWN,
+          "movej 多关节缺一段应被拒绝");
+    CHECK(cmd_parse("movej:10,20,30,40,50,60,3000,150,200,9", &c) == CMD_UNKNOWN,
+          "movej 多关节段数过多应被拒绝");
+    CHECK(cmd_parse("movej:10,20,30,40,50,abc,3000,150,200", &c) == CMD_UNKNOWN,
+          "movej 角度非纯数字应被拒绝");
+    CHECK(cmd_parse("movej:10,20,30,40,50,60,3000,150,200x", &c) == CMD_UNKNOWN,
           "movej 末项含非数字尾缀应被拒绝");
-    CHECK(cmd_parse("movej:1:30,2:60,0,150,200", &c) == CMD_UNKNOWN,
+    CHECK(cmd_parse("movej:10,20,30,40,50,60,0,150,200", &c) == CMD_UNKNOWN,
           "movej 多关节速度 0 应被拒绝");
+    CHECK(cmd_parse("movej:10,20,30,40,50,60,3000,0,200", &c) == CMD_UNKNOWN,
+          "movej 多关节加速时间 0 应被拒绝");
     CHECK(cmd_parse("movej:1:45:0", &c) == CMD_UNKNOWN,
           "movej 单关节速度 0 应被拒绝");
     CHECK(cmd_parse("movej:1:45:200:9", &c) == CMD_UNKNOWN,
