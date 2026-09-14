@@ -23,7 +23,7 @@ void cmd_zero_save(Robot *robot, const double vals[6]);
 /* 读取当前关节角(机械角,度)并通过正运动学计算笛卡尔坐标(X,Y,Z)与姿态(RPY) */
 void cmd_getpos(Robot *robot);
 
-/* 笛卡尔坐标运动（X,Y,Z in mm; Rx,Ry,Rz in deg） */
-void cmd_movel(Robot *robot, const double cartesian[6]);
+/* 笛卡尔坐标运动（X,Y,Z in mm; Rx,Ry,Rz in deg；可选速度/加减速度存于 cmd） */
+void cmd_movel(Robot *robot, const ParsedCmd *cmd);
 
 #endif /* DUMMYL_CLI_COMMANDS_H */

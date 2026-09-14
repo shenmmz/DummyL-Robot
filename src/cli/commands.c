@@ -168,7 +168,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         break;
     }
     case CMD_MOSEL: {
-        cmd_movel(robot, cmd->cartesian);
+        cmd_movel(robot, cmd);
         break;
     }
     case CMD_DISABLE: {
@@ -393,13 +393,13 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
 }
 
 /* cmd_movel：笛卡尔坐标运动（X,Y,Z in mm; Rx,Ry,Rz in deg） */
-void cmd_movel(Robot *robot, const double cartesian[6])
+void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
     double pose[4][4];
-    double xyz[3] = {cartesian[0], cartesian[1], cartesian[2]};
-    double rpy[3] = {cartesian[3] * (3.14159265358979323846 / 180.0),
-                     cartesian[4] * (3.14159265358979323846 / 180.0),
-                     cartesian[5] * (3.14159265358979323846 / 180.0)};
+    double xyz[3] = {cmd->cartesian[0], cmd->cartesian[1], cmd->cartesian[2]};
+    double rpy[3] = {cmd->cartesian[3] * (3.14159265358979323846 / 180.0),
+                     cmd->cartesian[4] * (3.14159265358979323846 / 180.0),
+                     cmd->cartesian[5] * (3.14159265358979323846 / 180.0)};
     double sols[IK_MAX_SOLUTIONS][6];
     double best[6];
     double current[6];
@@ -449,7 +449,7 @@ void cmd_movel(Robot *robot, const double cartesian[6])
     }
 
     int joints[6] = {1, 2, 3, 4, 5, 6};
-    movej_joints(robot, 6, joints, best, 3000.0, 80, 90);
+    movej_joints(robot, 6, joints, best, cmd->speeds[0], cmd->accel_ms[0], cmd->decel_ms[0]);
     printf("movel 到位：");
     for (i = 0; i < 6; i++) printf(i ? ", J%d=%.2f°" : "J%d=%.2f°", i + 1, best[i]);
     printf("\n");

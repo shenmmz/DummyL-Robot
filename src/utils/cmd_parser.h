@@ -9,7 +9,8 @@
  *   movej:N:ANGLE[:SPEED][:r|a]   单关节运动：角度 ANGLE(度)、速度 SPEED(rpm)，
  *                                   末段 r=相对当前位置 / a=绝对(默认)
  *   movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步绝对运动
- *   movel:X,Y,Z,Rx,Ry,Rz    绝对笛卡尔坐标运动（mm, 度）
+ *   movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]    绝对笛卡尔坐标运动（mm, 度）；
+ *                                    SPD=rpm、ACC/DEC=ms，可省略（默认 3000/80/90）
  *   disable          全部失能所有关节
  *   disable:N        仅单独泄力(失能)关节 N
  *   enable           全部使能所有关节

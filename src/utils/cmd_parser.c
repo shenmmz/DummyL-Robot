@@ -102,7 +102,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
             out->joint = 0;
         }
     } else if (strcmp(cmd, "movej") == 0) {
-        char *rest = save;  /* 剩余字符串：30,60,90,0,0,0,3000,150,200 */
+        char *rest = save;  
         if (rest != NULL && strchr(rest, ',') != NULL) {
             /* 多关节：movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC
              * 前6项为关节1~6的绝对角度(度)，末3项为速度/加速度/减速度(ms) */
@@ -234,19 +234,39 @@ int cmd_parse(const char *line, ParsedCmd *out)
         char *rest = save;
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
-        double vals[6];
-        int n = 0;
-        while (tok != NULL && n < 6) {
-            vals[n] = atof(tok);
+        double v[9];
+        int n = 0, i;
+        while (tok != NULL && n < 9) {
+            if (!parse_full_number(tok, &v[n])) {
+                printf("[警告] movel 参数须为纯数字：%s\n", tok);
+                return CMD_UNKNOWN;
+            }
             n++;
             tok = strtok_r(NULL, ",", &ctx);
         }
-        if (n != 6) {
-            printf("[警告] 用法: movel:X,Y,Z,Rx,Ry,Rz（mm, 度）\n");
+        if (n != 6 && n != 9) {
+            printf("[警告] 用法: movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]（6 位姿，或 +3 速度参数）\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_MOSEL;
-        for (int i = 0; i < 6; i++) out->cartesian[i] = vals[i];
+        for (i = 0; i < 6; i++) out->cartesian[i] = v[i];
+        if (n == 9) {
+            if (v[6] <= 0.0) {
+                printf("[警告] movel 速度须大于 0 rpm\n");
+                return CMD_UNKNOWN;
+            }
+            if (v[7] <= 0.0 || v[8] <= 0.0) {
+                printf("[警告] movel 加减速时间须大于 0 ms\n");
+                return CMD_UNKNOWN;
+            }
+            out->speeds[0] = v[6];
+            out->accel_ms[0] = (int)v[7];
+            out->decel_ms[0] = (int)v[8];
+        } else {
+            out->speeds[0] = 3000.0;
+            out->accel_ms[0] = 80;
+            out->decel_ms[0] = 90;
+        }
     } else if (strcmp(cmd, "disable") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         out->type = CMD_DISABLE;
@@ -328,7 +348,8 @@ static const char HELP_TEXT[] =
     "  movej:N:ANGLE[:SPD][:r|a]  单关节运动：轴N 至角度ANGLE(度)，速度SPEED(rpm)，\n"
     "                          末段 r=相对当前位置 / a=绝对(默认)\n"
     "  movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC 多关节同步运动（绝对角度）\n"
-    "  movel:X,Y,Z,Rx,Ry,Rz  绝对笛卡尔坐标运动（mm, deg）\n"
+    "  movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]  绝对笛卡尔坐标运动（mm, deg）；\n"
+    "                           SPD=rpm、ACC/DEC=ms，可省略（默认 3000/80/90）\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"

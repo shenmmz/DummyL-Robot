@@ -127,11 +127,27 @@ int main(void)
           "多关节 movej 加减速解析失败（spd=%.0f,acc=%d,dec=%d）",
           c.speeds[0], c.accel_ms[0], c.decel_ms[0]);
 
-    /* movel：笛卡尔坐标 */
+    /* movel：笛卡尔坐标（仅位姿，默认速度） */
     rc = cmd_parse("movel:100,200,300,0,0,0", &c);
     CHECK(rc == CMD_MOSEL, "movel 应解析为 CMD_MOSEL（得到 rc=%d）", rc);
     CHECK(fabs(c.cartesian[0] - 100) < 1e-6 && fabs(c.cartesian[5] - 0) < 1e-6,
           "movel 数值解析失败（X=%.4f, Rz=%.4f）", c.cartesian[0], c.cartesian[5]);
+    CHECK(c.speeds[0] == 3000.0 && c.accel_ms[0] == 80 && c.decel_ms[0] == 90,
+          "movel 默认速度参数错误（spd=%.0f,acc=%d,dec=%d）", c.speeds[0], c.accel_ms[0], c.decel_ms[0]);
+
+    /* movel：位姿 + 速度/加减速度（用户示例形式） */
+    rc = cmd_parse("movel:150,62,103,-180,0,-180,10,50,50", &c);
+    CHECK(rc == CMD_MOSEL, "movel 9 段应解析为 CMD_MOSEL（得到 rc=%d）", rc);
+    CHECK(fabs(c.cartesian[0] - 150) < 1e-6 && fabs(c.cartesian[3] + 180) < 1e-6,
+          "movel 9 段位姿解析失败（X=%.4f, Rx=%.4f）", c.cartesian[0], c.cartesian[3]);
+    CHECK(c.speeds[0] == 10.0 && c.accel_ms[0] == 50 && c.decel_ms[0] == 50,
+          "movel 速度参数解析失败（spd=%.0f,acc=%d,dec=%d）", c.speeds[0], c.accel_ms[0], c.decel_ms[0]);
+
+    /* movel 段数 / 参数校验 */
+    CHECK(cmd_parse("movel:1,2,3,4,5", &c) == CMD_UNKNOWN, "movel 5 段应拒绝");
+    CHECK(cmd_parse("movel:1,2,3,4,5,6,7", &c) == CMD_UNKNOWN, "movel 7 段应拒绝");
+    CHECK(cmd_parse("movel:1,2,3,4,5,6,7,8", &c) == CMD_UNKNOWN, "movel 8 段应拒绝");
+    CHECK(cmd_parse("movel:1,2,3,4,5,6,0,80,90", &c) == CMD_UNKNOWN, "movel 速度 0 应拒绝");
 
     /* ---- 多关节 movej 段数不足 / 脏段：必须判错（防静默错位与 atof 误读） ---- */
     CHECK(cmd_parse("movej:10,20,30,40,50,60,3000,150", &c) == CMD_UNKNOWN,
