@@ -11,13 +11,14 @@
  *   theta_offset : 关节零位偏移 (rad)，含义为 theta = q + offset
  *                  （dh.c dh_forward 实现：theta = q*pi/180 + theta_offset）
  *
- * 【参数来源】用户提供的机械臂结构参数（单位 mm），经标准 DH 建模：
- *   J1 {a=35, d=140, alpha=-90°}   <- D_BS=35 基座x偏置 / L_BS=140 基座高度
- *   J2 {a=146, d=0,   alpha= 0°}   <- L_AM=146 大臂
- *   J3 {a=0,   d=52,  alpha= 90°}  <- D_EW=52 肘部偏置
- *   J4 {a=0,   d=115, alpha=-90°}  <- L_FA=115 前臂
- *   J5 {a=0,   d=0,   alpha= 90°}
- *   J6 {a=0,   d=91.5, alpha= 0°}  <- L_WT=91.5 腕部（J5→末端实测，原183为2倍笔误）
+ * 【参数来源】机械臂结构参数（单位 mm），经标准 DH 建模：
+ *   J1  a=35   基座到1轴的水平X偏移   d=140 基座垂直高度      alpha=-90°
+ *   J2  a=146  大臂长度               d=0                  alpha= 0°  home=-90°
+ *   J3  a=0    d=52   3轴→4轴中心距(肘部)  alpha= 90°  home= 90°
+ *   J4  a=0    d=115  4轴→5轴小臂长度       alpha=-90°
+ *   J5  a=0    d=0                      alpha= 90°
+ *   J6  a=0    d=91.5 J5→末端距离(腕长)    alpha= 0°
+ *     （d 原误写 183 = 2×91.5，已按 CAD 实测 91.50 修正）
  *   home 角度（J2=-90°, J3=90°, 其余 0）作为 theta_offset，
  *   使零位 (q=0) 时 FK 输出与机械 home 姿态一致。
  */
