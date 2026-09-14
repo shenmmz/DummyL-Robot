@@ -450,9 +450,29 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 
     int joints[6] = {1, 2, 3, 4, 5, 6};
     movej_joints(robot, 6, joints, best, cmd->speeds[0], cmd->accel_ms[0], cmd->decel_ms[0]);
-    printf("movel 到位：");
-    for (i = 0; i < 6; i++) printf(i ? ", J%d=%.2f°" : "J%d=%.2f°", i + 1, best[i]);
-    printf("\n");
+    /* 到位后读实际关节机械角，正运动学反算实际到达的笛卡尔坐标 */
+    {
+        int ok[6];
+        double actual[6];
+        double act_pose[4][4];
+        double act_xyz[3], act_rpy[3];
+        const double RAD2DEG = 180.0 / 3.14159265358979323846;
+        int all_ok = 1, k;
+        for (k = 0; k < 6; k++) {
+            actual[k] = robot_read_position_deg(robot, k + 1, &ok[k]);
+            if (!ok[k]) all_ok = 0;
+        }
+        dh_forward(DH_TABLE, actual, act_pose);
+        dh_pose_to_xyz_rpy(act_pose, act_xyz, act_rpy);
+        printf("movel 到位：\n");
+        printf("  笛卡尔 X=%.2f, Y=%.2f, Z=%.2f, Rx=%.2f, Ry=%.2f, Rz=%.2f\n",
+               act_xyz[0], act_xyz[1], act_xyz[2],
+               act_rpy[0] * RAD2DEG, act_rpy[1] * RAD2DEG, act_rpy[2] * RAD2DEG);
+        printf("  关节   ");
+        for (k = 0; k < 6; k++) printf(k ? ", J%d=%.2f°" : "J%d=%.2f°", k + 1, actual[k]);
+        printf("\n");
+        if (!all_ok) printf("[警告] 部分关节读取失败，坐标按读取值计算\n");
+    }
 }
 
 /* cmd_getpos：读取当前关节机械角，经正运动学求末端笛卡尔坐标与姿态 */

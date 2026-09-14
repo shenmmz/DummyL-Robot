@@ -132,7 +132,7 @@ int main(void)
     CHECK(rc == CMD_MOSEL, "movel 应解析为 CMD_MOSEL（得到 rc=%d）", rc);
     CHECK(fabs(c.cartesian[0] - 100) < 1e-6 && fabs(c.cartesian[5] - 0) < 1e-6,
           "movel 数值解析失败（X=%.4f, Rz=%.4f）", c.cartesian[0], c.cartesian[5]);
-    CHECK(c.speeds[0] == 3000.0 && c.accel_ms[0] == 80 && c.decel_ms[0] == 90,
+    CHECK(c.speeds[0] == 60.0 && c.accel_ms[0] == 80 && c.decel_ms[0] == 90,
           "movel 默认速度参数错误（spd=%.0f,acc=%d,dec=%d）", c.speeds[0], c.accel_ms[0], c.decel_ms[0]);
 
     /* movel：位姿 + 速度/加减速度（用户示例形式） */

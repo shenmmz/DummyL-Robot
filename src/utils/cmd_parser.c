@@ -263,9 +263,9 @@ int cmd_parse(const char *line, ParsedCmd *out)
             out->accel_ms[0] = (int)v[7];
             out->decel_ms[0] = (int)v[8];
         } else {
-            out->speeds[0] = 3000.0;
-            out->accel_ms[0] = 80;
-            out->decel_ms[0] = 90;
+            out->speeds[0] =   60;  // 默认速度
+            out->accel_ms[0] = 80;  // 默认加速度
+            out->decel_ms[0] = 90;  // 默认减速度
         }
     } else if (strcmp(cmd, "disable") == 0) {
         char *j = strtok_r(NULL, ":", &save);
@@ -349,7 +349,7 @@ static const char HELP_TEXT[] =
     "                          末段 r=相对当前位置 / a=绝对(默认)\n"
     "  movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC 多关节同步运动（绝对角度）\n"
     "  movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]  绝对笛卡尔坐标运动（mm, deg）；\n"
-    "                           SPD=rpm、ACC/DEC=ms，可省略（默认 3000/80/90）\n"
+    "                           SPD=rpm、ACC/DEC=ms，可省略（默认 60/80/90）\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"
