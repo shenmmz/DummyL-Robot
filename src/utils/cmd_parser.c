@@ -158,16 +158,20 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 out->type = CMD_MOVEJ;
             }
         } else {
-            /* 单关节：movej:N:ANGLE[:SPD] */
+            /* 单关节：movej:N:ANGLE[:SPD][:MODE]
+             * SPD 为数字(转速 rpm)，MODE 为字母 r(相对)/a(绝对)，缺省绝对。
+             * 靠类型区分段：数字段=速度、字母段=模式，避免空段(:r 缺速度)歧义。
+             * 顺序：SPD 可前可后于 MODE，但只有这两个可选段。 */
             char *j = strtok_r(rest, ":", &save);
             char *a = strtok_r(NULL, ":", &save);
-            char *s = strtok_r(NULL, ":", &save);
+            char *f1 = strtok_r(NULL, ":", &save);
+            char *f2 = strtok_r(NULL, ":", &save);
             char *extra = strtok_r(NULL, ":", &save);
             double jnum;
             double ang;
             int joint;
             if (j == NULL || a == NULL || extra != NULL) {
-                printf("[警告] 用法: movej:关节号:角度[:速度]\n");
+                printf("[警告] 用法: movej:关节号:角度[:速度][:r|a]\n");
                 return CMD_UNKNOWN;
             }
             if (!parse_full_number(j, &jnum) || !parse_full_number(a, &ang)) {
@@ -182,21 +186,49 @@ int cmd_parse(const char *line, ParsedCmd *out)
             out->type = CMD_MOVEJ;
             out->joint = joint;
             out->angle_deg = ang;
-            if (s != NULL) {
-                double spd = 0.0;
-                if (!parse_full_number(s, &spd)) {
-                    printf("[警告] movej 速度须为纯数字：%s\n", s);
-                    return CMD_UNKNOWN;
-                }
-                if (spd <= 0.0) {
-                    printf("[警告] movej 速度须大于 0 rpm\n");
-                    return CMD_UNKNOWN;
-                }
-                out->speed_rpm = spd;
-            } else {
-                out->speed_rpm = 0.0;   /* 0 = 使用默认速度 */
-            }
+            out->rel = 0;                 /* 默认绝对 */
+            out->speed_rpm = 0.0;         /* 0 = 使用默认速度 */
             out->num_joints = 1;
+            /* 解析 f1/f2 两段（顺序无关）：数字段=速度、字母段=模式(r/a)，
+               速度/模式各只允许出现一次，重复或非法段均拒绝 */
+            {
+                char *seg[2];
+                int k, speed_set = 0, mode_set = 0;
+                seg[0] = f1; seg[1] = f2;
+                for (k = 0; k < 2; k++) {
+                    double num;
+                    if (seg[k] == NULL) continue;
+                    if (parse_full_number(seg[k], &num)) {       /* 速度段 */
+                        if (speed_set) {
+                            printf("[警告] movej 速度段重复，应仅一个\n");
+                            return CMD_UNKNOWN;
+                        }
+                        if (num <= 0.0) {
+                            printf("[警告] movej 速度须大于 0 rpm\n");
+                            return CMD_UNKNOWN;
+                        }
+                        out->speed_rpm = num;
+                        speed_set = 1;
+                    } else if (strcmp(seg[k], "r") == 0) {        /* 相对 */
+                        if (mode_set) {
+                            printf("[警告] movej 模式段重复\n");
+                            return CMD_UNKNOWN;
+                        }
+                        out->rel = 1;
+                        mode_set = 1;
+                    } else if (strcmp(seg[k], "a") == 0) {        /* 绝对 */
+                        if (mode_set) {
+                            printf("[警告] movej 模式段重复\n");
+                            return CMD_UNKNOWN;
+                        }
+                        out->rel = 0;
+                        mode_set = 1;
+                    } else {
+                        printf("[警告] movej 模式须为 r(相对) 或 a(绝对)：%s\n", seg[k]);
+                        return CMD_UNKNOWN;
+                    }
+                }
+            }
         }
     } else if (strcmp(cmd, "movel") == 0) {
         char *rest = save;
@@ -293,7 +325,8 @@ static const char HELP_TEXT[] =
     "可用命令:\n"
     "  home                  回零（全轴）\n"
     "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"                      
-    "  movej:N:ANGLE[:SPD]  单关节绝对运动：轴N 至角度ANGLE(度)，速度SPEED(rpm)\n"
+    "  movej:N:ANGLE[:SPD][:r|a]  单关节运动：轴N 至角度ANGLE(度)，速度SPEED(rpm)，\n"
+    "                          末段 r=相对当前位置 / a=绝对(默认)\n"
     "  movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC 多关节同步运动（绝对角度）\n"
     "  movel:X,Y,Z,Rx,Ry,Rz  绝对笛卡尔坐标运动（mm, deg）\n"
     "  disable               全部失能所有关节\n"

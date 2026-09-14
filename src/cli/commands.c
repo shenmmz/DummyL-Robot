@@ -152,7 +152,17 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         if (cmd->num_joints > 1) {
             movej_multi(robot, cmd);
         } else {
-            ErrCode rc = robot_movej(robot, cmd->joint, cmd->angle_deg, cmd->speed_rpm);
+            double target = cmd->angle_deg;
+            if (cmd->rel) {
+                int ok = 0;
+                double cur = robot_read_position_deg(robot, cmd->joint, &ok);
+                if (!ok) {
+                    printf("[错误] 关节%d 读取当前位置失败，相对运动无法执行\n", cmd->joint);
+                    break;
+                }
+                target = cur + cmd->angle_deg;   /* 相对当前实际位置 */
+            }
+            ErrCode rc = robot_movej(robot, cmd->joint, target, cmd->speed_rpm);
             if (rc != ERR_NONE) printf("[错误] 运动指令失败：%s\n", err_str(rc));
         }
         break;

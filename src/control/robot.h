@@ -7,7 +7,7 @@
  * 封装立三（LEESN）闭环步进驱动器 Modbus RTU 操作（手册 V126）：
  *   robot_init  打开串口并初始化
  *   robot_enable / robot_disable  使能/失能关节（0x00D4：写0使能、写1释放）
- *   robot_movej 单关节绝对运动（角度 -> 脉冲，写 0x00E8~0x00E9）
+ *   robot_movej 单关节绝对运动（角度 -> 脉冲，写 0x00E8~0x00E9）；相对运动由 cli 层读当前位置后换算为绝对再调本函数
  *   robot_status 查询关节状态（0x0006~0x0007 位定义）
  * 回零流程见 home.h（堵转/碰撞模式回零）
  * 运动学/轨迹规划由上层（main）调用 kinematics/trajectory 完成，

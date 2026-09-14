@@ -6,7 +6,8 @@
  * 支持命令：
  *   home             回零（全轴）
  *   home:N           仅单独回零关节 N
- *   movej:N:ANGLE[:SPEED]   单关节绝对运动，角度 ANGLE(度)、速度 SPEED(rpm)
+ *   movej:N:ANGLE[:SPEED][:r|a]   单关节运动：角度 ANGLE(度)、速度 SPEED(rpm)，
+ *                                   末段 r=相对当前位置 / a=绝对(默认)
  *   movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步绝对运动
  *   movel:X,Y,Z,Rx,Ry,Rz    绝对笛卡尔坐标运动（mm, 度）
  *   disable          全部失能所有关节
@@ -38,8 +39,9 @@
 typedef struct {
     int      type;       /* CMD_* */
     int      joint;      /* 1..6（关节号），0=全部/未指定 */
-    double   angle_deg;  /* 目标绝对角度（度） */
+    double   angle_deg;  /* 目标角度（度）：rel=0 为绝对，rel=1 为相对增量 */
     double   speed_rpm;  /* 速度（rpm），0表示使用默认 */
+    int      rel;        /* 单关节 movej 模式：1=相对当前位置，0=绝对（默认） */
     double   zero_vals[6]; /* zero_save 写入的 6 个电机角零点 */
     int      num_joints; /* 多关节 movej 的关节数 */
     int      joints[6];  /* 多关节 movej 的关节号 */

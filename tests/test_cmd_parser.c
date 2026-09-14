@@ -46,10 +46,30 @@ int main(void)
     CHECK(rc == CMD_MOVEJ && c.joint == 1 && c.angle_deg == 45.0 && c.speed_rpm == 200.0,
           "movej:1:45:200 解析失败（rc=%d, joint=%d, angle=%.3f, speed=%.3f）", rc, c.joint, c.angle_deg, c.speed_rpm);
 
-    /* movej：关节+角度（默认速度） */
+    /* movej：关节+角度（默认速度，绝对） */
     rc = cmd_parse("movej:2:90", &c);
-    CHECK(rc == CMD_MOVEJ && c.joint == 2 && c.angle_deg == 90.0 && c.speed_rpm == 0.0,
-          "movej:2:90 解析失败（rc=%d, angle=%.3f, speed=%.3f）", rc, c.angle_deg, c.speed_rpm);
+    CHECK(rc == CMD_MOVEJ && c.joint == 2 && c.angle_deg == 90.0 && c.speed_rpm == 0.0 && c.rel == 0,
+          "movej:2:90 解析失败（rc=%d, angle=%.3f, speed=%.3f, rel=%d）", rc, c.angle_deg, c.speed_rpm, c.rel);
+
+    /* movej：相对模式（默认速度） */
+    rc = cmd_parse("movej:2:15:r", &c);
+    CHECK(rc == CMD_MOVEJ && c.joint == 2 && c.angle_deg == 15.0 && c.speed_rpm == 0.0 && c.rel == 1,
+          "movej:2:15:r 相对模式解析失败（rc=%d, angle=%.3f, rel=%d）", rc, c.angle_deg, c.rel);
+
+    /* movej：相对模式 + 速度 */
+    rc = cmd_parse("movej:2:15:200:r", &c);
+    CHECK(rc == CMD_MOVEJ && c.joint == 2 && c.angle_deg == 15.0 && c.speed_rpm == 200.0 && c.rel == 1,
+          "movej:2:15:200:r 相对+速度解析失败（rc=%d, angle=%.3f, spd=%.3f, rel=%d）", rc, c.angle_deg, c.speed_rpm, c.rel);
+
+    /* movej：显式绝对模式 */
+    rc = cmd_parse("movej:2:90:a", &c);
+    CHECK(rc == CMD_MOVEJ && c.rel == 0 && c.speed_rpm == 0.0,
+          "movej:2:90:a 显式绝对模式解析失败（rc=%d, rel=%d）", rc, c.rel);
+
+    /* movej：模式在前、速度在后（顺序无关） */
+    rc = cmd_parse("movej:2:15:r:200", &c);
+    CHECK(rc == CMD_MOVEJ && c.rel == 1 && c.speed_rpm == 200.0,
+          "movej:2:15:r:200 模式优先速度解析失败（rc=%d, rel=%d, spd=%.3f）", rc, c.rel, c.speed_rpm);
 
     /* movej：关节号非法 */
     CHECK(cmd_parse("movej:7:45", &c) == CMD_UNKNOWN, "movej:7:45 关节号非法应被拒绝");
