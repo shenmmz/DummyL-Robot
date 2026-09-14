@@ -21,7 +21,7 @@
 /* 从站地址（六轴 1..6），运行时 ini [modbus] slave_addr_* 可覆盖 */
 #define ROBOT_SLAVE_ADDR_TABLE {1, 2, 3, 4, 5, 6}
 /*机械电机角度零点标定*/
-#define ROBOT_JOINT_ZERO_DEG {-176.85, 72.87, -175.46, 7.38, 118.08, 262.27}
+#define ROBOT_JOINT_ZERO_DEG {-176.54, 74.55, -179.94, 3.74, 115.81, 86.89}
 /*机械电机角度限位*/
 #define ROBOT_JOINT_LIMIT_MIN_DEG { -170.0, -72.0,  30.0, -360.0, -95.0, -360.0 }
 #define ROBOT_JOINT_LIMIT_MAX_DEG {  179.0,  90.0, 180.0,  360.0,  95.0,  360.0 }

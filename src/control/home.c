@@ -10,6 +10,7 @@
 #include "api/motor_reg.h"
 #include "control/robot_internal.h"   /* LEESN_STAT_* 状态位定义 */
 #include "config/robot_config.h"      /* DEG2STEPS */
+#include "kinematics/joint_zero.h"    /* joint_zero_get */
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -36,11 +37,11 @@ typedef struct {
 #define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持 */
 #define HOME_ZERO_TOL_STEPS    500 /**/
  static StallHome stall[7] = {
-     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -176.85, .torque_level = 120 },
-     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .forward_deg = 72.87, .torque_level = 120 },
-     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -85.46, .torque_level = 120 },
-     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 7.38, .torque_level = 120 },
-     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 118.08, .torque_level = 120 },
+     [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -176.54, .torque_level = 120 },
+     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .forward_deg = 74.55, .torque_level = 120 },
+     [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .forward_deg = -179.94, .torque_level = 120 },
+     [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .forward_deg = 3.74, .torque_level = 120 },
+     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .forward_deg = 115.81, .torque_level = 120 },
  };
 
 /* 关节6 传感器回零参数 */
@@ -53,18 +54,17 @@ static struct {
 } sensor = { 300, 90, 30, -1, 100 };
 
 /* 关节6 零点偏置：传感器回零清零点 = 电机角 0，而机械零点 q0_J6=+90
- * （config ROBOT_JOINT_ZERO_DEG 第6项），故回零后须再正向转 q0_J6 度，机械角才归 0。
- * 直接引用 config，避免与零点表漂移；改 config 即自动同步。 */
-static const double joint_zero_deg[ROBOT_JOINT_COUNT] = ROBOT_JOINT_ZERO_DEG;
-#define HOME_J6_ZERO_OFFSET_DEG  (joint_zero_deg[5])
+ * 回零后须再正向转 q0_J6 度，机械角才归 0。
+ * 使用运行时覆盖值（joint_zero_get），zero_save 更新后即同步。 */
 #define HOME_J6_ZERO_RPM         100
 
 /* 回零后转角目标（电机角相对位移量）：
  * 1~5 取 stall 表 forward_deg（含 J3=-88 这类"目标非0"的轴）；
- * 6 轴 = q0_J6（目标机械角 0，故电机目标 = 0 + q0_J6）。 */
+ * 6 轴 = joint_zero_deg[5]（目标机械角 0，故电机目标 = 0 + zero[5]）。 */
 static double home_forward_deg(int j)
 {
-    return (j == 6) ? HOME_J6_ZERO_OFFSET_DEG : stall[j].forward_deg;
+    const double *zero = joint_zero_get();
+    return (j == 6) ? zero[5] : stall[j].forward_deg;
 }
 static int home_forward_rpm(int j)
 {

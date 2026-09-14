@@ -3,7 +3,8 @@
  * ------------------------------------------------------------
  * 所属模块：应用命令层（cli）
  * 对外接口：cmd_dispatch
- * 支持命令：home、movej、disable、motor、getpos、zero、help、exit
+ * 支持命令：home、movej、movel、disable、enable、motor、getpos、zero、
+ *           zero_save、help、exit
  * main.c 仅负责初始化与命令循环。
  */
 
@@ -16,14 +17,25 @@
 #include "utils/ini_rw.h"
 #include "kinematics/joint_zero.h"
 #include "kinematics/dh.h"
+#include "kinematics/ik.h"
+#include "config/robot_config.h"
 
 #include <stdio.h>
 #include <math.h>
 
 #include <windows.h>
 
-/* zero save 修正量提醒阈值（度）：超过仅提示，不阻断保存（用于发现"在错误姿态保存"） */
-#define ZERO_SAVE_WARN_DELTA_DEG 30.0
+/* ====================== 内部辅助 ====================== */
+
+#define MOVEJ_POLL_MS      50
+#define MOVEJ_INPOS_TOL   100
+#define MOVEJ_TIMEOUT_MS  60000
+
+/* 前向声明 */
+static void movej_joints(Robot *robot, int num_joints, const int joints[6],
+                          const double angles[6], double speed,
+                          int accel_ms, int decel_ms);
+static void movej_multi(Robot *robot, const ParsedCmd *cmd);
 
 /* ====================== 电机实时监控线程 ====================== */
 
@@ -124,6 +136,7 @@ int cmd_motor_running(void)
  * 返回 1 表示用户请求退出（exit/quit），否则 0。 */
 int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
 {
+    int j;
     switch (cmd->type) {
     case CMD_HOME: {
         motor_monitor_stop(g_motor_mon);
@@ -136,8 +149,16 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         break;
     }
     case CMD_MOVEJ: {
-        ErrCode rc = robot_movej(robot, cmd->joint, cmd->angle_deg, cmd->speed_rpm);
-        if (rc != ERR_NONE) printf("[错误] 运动指令失败：%s\n", err_str(rc));
+        if (cmd->num_joints > 1) {
+            movej_multi(robot, cmd);
+        } else {
+            ErrCode rc = robot_movej(robot, cmd->joint, cmd->angle_deg, cmd->speed_rpm);
+            if (rc != ERR_NONE) printf("[错误] 运动指令失败：%s\n", err_str(rc));
+        }
+        break;
+    }
+    case CMD_MOSEL: {
+        cmd_movel(robot, cmd->cartesian);
         break;
     }
     case CMD_DISABLE: {
@@ -147,11 +168,30 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
             if (rc != ERR_NONE) printf("[错误] 关节%d 失能失败：%s\n", cmd->joint, err_str(rc));
             else printf("关节%d 已泄力(失能)\n", cmd->joint);
         } else {
-            int j;
             for (j = 1; j <= 6; j++) {
                 ErrCode rc = robot_disable(robot, j);
                 if (rc != ERR_NONE) printf("[错误] 关节%d 失能失败：%s\n", j, err_str(rc));
             }
+        }
+        break;
+    }
+    case CMD_ENABLE: {
+        int failed = 0;
+        int first = (cmd->joint >= 1) ? cmd->joint : 1;
+        int last = (cmd->joint >= 1) ? cmd->joint : 6;
+        for (j = first; j <= last; j++) {
+            ErrCode rc = robot_enable(robot, j);
+            if (rc != ERR_NONE) {
+                printf("[错误] 关节%d 使能失败：%s\n", j, err_str(rc));
+                failed++;
+            }
+        }
+        /* 只有目标轴全部成功才提示成功，避免"最后一轴成功"掩盖前面轴的失败 */
+        if (failed == 0) {
+            if (cmd->joint >= 1) printf("关节%d 已使能\n", cmd->joint);
+            else printf("全部关节已恢复使能\n");
+        } else {
+            printf("[错误] 有 %d 个关节使能失败\n", failed);
         }
         break;
     }
@@ -174,10 +214,10 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         break;
     }
     case CMD_ZERO:
-        cmd_zero(robot, cmd->joint == 1);
+        cmd_zero(robot);
         break;
-    case CMD_ZERO_SET:
-        cmd_zero_set(robot, cmd->zero_vals);
+    case CMD_ZERO_SAVE:
+        cmd_zero_save(robot, cmd->zero_vals);
         break;
     case CMD_GETPOS:
         cmd_getpos(robot);
@@ -199,8 +239,8 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     return 0;
 }
 
-/* cmd_zero：显示零点标定数据；do_save=1 时保存修正值（内存 + ini 持久化） */
-void cmd_zero(Robot *robot, int do_save)
+/* cmd_zero：显示零点标定数据和当前机械角 */
+void cmd_zero(Robot *robot)
 {
     const double *zero = joint_zero_get();
     const double target[6] = {0, 0, 90, 0, 0, 0};
@@ -218,60 +258,191 @@ void cmd_zero(Robot *robot, int do_save)
     printf("当前零点:     {");
     for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", zero[i]);
     printf("}\n");
-    printf("目标机械角:   {");
-    for (int i = 0; i < 6; i++) printf(i ? ", %.1f" : "%.1f", target[i]);
-    printf("}\n");
     printf("当前角度:     {");
     for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", reading[i]);
     printf("}°\n");
+    printf("目前零点:     {");
+    for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
+    printf("}\n");
 
-    if (do_save) {
-        int updated = 0;
-        for (int i = 0; i < 6; i++) {
-            /* 失能状态下手动摆位标定同样有效：只要读取成功就按当前角度重算，
-               不再按"是否失能 / 是否贴近 home"筛选（用户在失能状态下摆到基准位再标定） */
-            if (ok[i]) {
-                corrected[i] = zero[i] + (reading[i] - target[i]);
-                updated++;
-            } else {
-                corrected[i] = zero[i];   /* 仅读取失败的轴保持原标定 */
-            }
-        }
-        joint_zero_save(corrected);
-        if (ini_write_joint_zero(INI_PATH, corrected)) {
-            printf("零点标定已保存（内存 + ini：%s）\n", INI_PATH);
-        } else {
-            printf("零点标定已保存(内存)，但写入 ini 失败\n");
-        }
-        printf("新的标定零点: {");
-        for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", corrected[i]);
-        printf("}\n");
-        if (updated < 6) {
-            printf("[提示] 有 %d 轴读取失败，保持原 q0 未更新。\n", 6 - updated);
-        }
-        for (int i = 0; i < 6; i++) {
-            if (ok[i] && fabs(corrected[i] - zero[i]) > ZERO_SAVE_WARN_DELTA_DEG) {
-                printf("[注意] 关节%d 修正量 %.2f° 偏大，请确认当前是否为标定基准姿态。\n",
-                       i + 1, corrected[i] - zero[i]);
-            }
-        }
-    } else {
-        if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
-    }
+    if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
 }
 
-/* cmd_zero_set：直接写入已知电机角零点（q0..q5），内存 + ini 持久化 */
-void cmd_zero_set(Robot *robot, const double vals[6])
+/* cmd_zero_save：保存指定的零点标定值，内存 + ini 持久化 */
+void cmd_zero_save(Robot *robot, const double vals[6])
 {
     (void)robot;
     joint_zero_save(vals);
     if (ini_write_joint_zero(INI_PATH, vals)) {
-        printf("零点标定已写入（内存 + ini：%s）：\n", INI_PATH);
+        printf("零点标定已保存（内存 + ini：%s）：\n", INI_PATH);
     } else {
-        printf("零点标定已写入(内存)，但写入 ini 失败：\n");
+        printf("零点标定已保存(内存)，但写入 ini 失败\n");
     }
-    printf("  q0 = %.2f, q1 = %.2f, q2 = %.2f, q3 = %.2f, q4 = %.2f, q5 = %.2f\n",
-           vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
+    printf("zero_save:");
+    for (int i = 0; i < 6; i++) printf(i ? ", %.2f" : "%.2f", vals[i]);
+    printf("\n");
+}
+
+/* movej_joints：多关节同时运动核心逻辑 — 按距离比例分配速度，确保同步到位 */
+static void movej_joints(Robot *robot, int num_joints, const int joints[6],
+                         const double angles[6], double speed,
+                         int accel_ms, int decel_ms)
+{
+    const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+    uint8_t pend[7] = {0};
+    int32_t tgt[7] = {0};
+    int remain = 0;
+    int j;
+    uint32_t timeout_ms = MOVEJ_TIMEOUT_MS;
+
+    const double *zero = joint_zero_get();
+    double max_dist = 0;
+    int32_t pos_buf[7] = {0};
+    int32_t tgt_buf[7] = {0};
+
+    /* 速度必须为正：speed<=0 时按距离比例分配会得到非法转速，直接拒绝执行
+     * （movel 与多关节 movej 均经本函数下发，统一在此兜底校验） */
+    if (speed <= 0.0) {
+        printf("[警告] 多关节运动速度须大于 0 rpm，已拒绝执行\n");
+        return;
+    }
+
+    for (int i = 0; i < num_joints; i++) {
+        j = joints[i];
+        if (robot_is_masked(robot, j)) continue;
+        double motor_deg = angles[i] + zero[j - 1];
+        tgt_buf[j] = DEG2STEPS(motor_deg, reductions[j - 1]);
+        int pos_ok = 0;
+        pos_buf[j] = motor_read_position(robot, j, &pos_ok);
+        int32_t dist = pos_ok ? abs(tgt_buf[j] - pos_buf[j]) : 0;
+        if (dist > max_dist) max_dist = dist;
+    }
+
+    for (int i = 0; i < num_joints; i++) {
+        j = joints[i];
+        if (robot_is_masked(robot, j)) continue;
+        double s;
+        if (max_dist > 0) {
+            int32_t dist = abs(tgt_buf[j] - pos_buf[j]);
+            s = (double)dist / max_dist * speed;
+            if (s < 5) s = 5;
+        } else {
+            s = speed;
+        }
+        motor_set_profile(robot, j, accel_ms, decel_ms);
+        if (motor_set_speed(robot, j, s) != ERR_NONE ||
+            motor_move_abs(robot, j, tgt_buf[j]) != ERR_NONE) {
+            printf("[警告] 关节%d 多关节运动发指令失败\n", j);
+            continue;
+        }
+        tgt[j] = tgt_buf[j];
+        pend[j] = 1;
+        remain++;
+    }
+    if (remain == 0) return;
+
+    uint32_t start_ms = GetTickCount();
+    while (remain > 0) {
+        if ((GetTickCount() - start_ms) >= timeout_ms) {
+            for (j = 1; j <= 6; j++) {
+                if (!pend[j]) continue;
+                /* 超时仍未到位的轴可能还在朝目标运动，必须显式急停后再退出 */
+                ErrCode rc = motor_estop(robot, j);
+                printf("[警告] 关节%d 多关节运动超时，已急停%s\n", j,
+                       (rc == ERR_NONE) ? "" : "（急停指令下发失败）");
+                pend[j] = 0; remain--;
+            }
+            break;
+        }
+        for (j = 1; j <= 6; j++) {
+            if (!pend[j]) continue;
+            int32_t pos;
+            int pos_ok;
+            pos = motor_read_position(robot, j, &pos_ok);
+            if (pos_ok && pos >= tgt[j] - MOVEJ_INPOS_TOL &&
+                pos <= tgt[j] + MOVEJ_INPOS_TOL) {
+                pend[j] = 0; remain--;
+            }
+        }
+        if (remain > 0) Sleep(MOVEJ_POLL_MS);
+    }
+}
+
+/* movej_multi：多关节同时运动（从 ParsedCmd 调用） */
+static void movej_multi(Robot *robot, const ParsedCmd *cmd)
+{
+    int joints[6], idx = 0;
+    double angles[6];
+    for (int i = 0; i < cmd->num_joints; i++) {
+        joints[idx] = cmd->joints[i];
+        angles[idx] = cmd->angles[i];
+        idx++;
+    }
+    movej_joints(robot, cmd->num_joints, joints, angles,
+                 cmd->speeds[0], cmd->accel_ms[0], cmd->decel_ms[0]);
+}
+
+/* cmd_movel：笛卡尔坐标运动（X,Y,Z in mm; Rx,Ry,Rz in deg） */
+void cmd_movel(Robot *robot, const double cartesian[6])
+{
+    double pose[4][4];
+    double xyz[3] = {cartesian[0], cartesian[1], cartesian[2]};
+    double rpy[3] = {cartesian[3] * (3.14159265358979323846 / 180.0),
+                     cartesian[4] * (3.14159265358979323846 / 180.0),
+                     cartesian[5] * (3.14159265358979323846 / 180.0)};
+    double sols[IK_MAX_SOLUTIONS][6];
+    double best[6];
+    double current[6];
+    int cnt, i;
+
+    /* 构建 ZYX 欧拉角齐次变换矩阵 */
+    {
+        double cr = cos(rpy[2]), sr = sin(rpy[2]);
+        double cp = cos(rpy[1]), sp = sin(rpy[1]);
+        double cy = cos(rpy[0]), sy = sin(rpy[0]);
+        pose[0][0] = cr*cp;             pose[0][1] = cr*sp*sy - sr*cy;   pose[0][2] = cr*sp*cy + sr*sy;   pose[0][3] = xyz[0];
+        pose[1][0] = sr*cp;             pose[1][1] = sr*sp*sy + cr*cy;   pose[1][2] = sr*sp*cy - cr*sy;   pose[1][3] = xyz[1];
+        pose[2][0] = -sp;               pose[2][1] = cp*sy;              pose[2][2] = cp*cy;              pose[2][3] = xyz[2];
+        pose[3][0] = 0.0;               pose[3][1] = 0.0;                pose[3][2] = 0.0;                pose[3][3] = 1.0;
+    }
+
+    cnt = ik_solve(DH_TABLE, pose, sols);
+    if (cnt <= 0) {
+        printf("[错误] 逆运动学无解\n");
+        return;
+    }
+
+    for (i = 0; i < 6; i++) current[i] = robot_read_position_deg(robot, i + 1, NULL);
+
+    /* 先按 robot_config.h 的真实软限位筛选候选解，再在合法解里选最优：
+     * 若直接对全部候选解选优，可能选中越限位解，下发后会立即触发驱动器软限位保护。 */
+    {
+        const double limit_min[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
+        const double limit_max[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MAX_DEG;
+        JointLimit limits[ROBOT_JOINT_COUNT];
+        double filtered[IK_MAX_SOLUTIONS][6];
+        int filtered_cnt;
+
+        for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
+            limits[i].min_deg = limit_min[i];
+            limits[i].max_deg = limit_max[i];
+        }
+        filtered_cnt = ik_filter_by_limits(sols, cnt, limits, filtered);
+        if (filtered_cnt <= 0) {
+            printf("[错误] 逆运动学候选解全部超出关节软限位，无解\n");
+            return;
+        }
+        if (ik_select_best(filtered, filtered_cnt, current, NULL, best) != 0) {
+            printf("[错误] 逆运动学无合适解\n");
+            return;
+        }
+    }
+
+    int joints[6] = {1, 2, 3, 4, 5, 6};
+    movej_joints(robot, 6, joints, best, 3000.0, 80, 90);
+    printf("movel 到位：");
+    for (i = 0; i < 6; i++) printf(i ? ", J%d=%.2f°" : "J%d=%.2f°", i + 1, best[i]);
+    printf("\n");
 }
 
 /* cmd_getpos：读取当前关节机械角，经正运动学求末端笛卡尔坐标与姿态 */

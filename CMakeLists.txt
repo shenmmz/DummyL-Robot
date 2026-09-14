@@ -70,8 +70,8 @@ add_library(utils STATIC
 )
 
 # ---------- 静态库: cli（命令实现与分发）----------
-# 原 main.c 中的命令逻辑（home/movej/enable/disable/status/scan/diag/
-# torque/mask/unmask/calib/help）整体迁入，main.c 只保留初始化与命令循环。
+# 原 main.c 中的命令逻辑（home/movej/movel/enable/disable/motor/getpos/
+# zero/zero_save/help/exit）整体迁入，main.c 只保留初始化与命令循环。
 add_library(cli STATIC
     src/cli/commands.c
 )
@@ -101,6 +101,7 @@ target_link_libraries(control PUBLIC
 
 # ---------- 应用: CLI 主程序 ----------
 add_executable(dummyrobot src/main.c)
+target_compile_options(dummyrobot PRIVATE -Wall -Wextra)
 # winmm：timeBeginPeriod/timeEndPeriod（抬高系统定时器精度，压低堵转轮询周期）
 target_link_libraries(dummyrobot PRIVATE control utils cli)
 if(WIN32)

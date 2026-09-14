@@ -401,7 +401,9 @@ int robot_read_current_ma(Robot *robot, int joint)
     return motor_read_current(robot, joint);
 }
 
-/* robot_read_speed_rpm：读取关节实时速度（rpm，0x0019），失败返回 -1 */
+/* robot_read_speed_rpm：读取关节实时速度（rpm，寄存器 0x00D6~0x00D7，分辨率 0.01rpm），失败返回 -1
+ * 【修正】底层 motor_read_speed 读的是 0x00D6，不是 0x0019：0x0019 为 INT16，
+ * 且 SV118+ 固件语义已变为"实际给定电流"（详见 robot_internal.h 定义处说明）。 */
 int robot_read_speed_rpm(Robot *robot, int joint)
 {
     return motor_read_speed(robot, joint);

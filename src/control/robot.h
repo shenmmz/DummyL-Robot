@@ -63,7 +63,7 @@ double robot_read_position_deg(Robot *robot, int joint, int *ok);
 /* 读取关节当前电流（mA，0x001A），失败返回 -1 */
 int robot_read_current_ma(Robot *robot, int joint);
 
-/* 读取关节实时速度（rpm，0x0019，0.01rpm），失败返回 -1 */
+/* 读取关节实时速度（rpm，寄存器 0x00D6~0x00D7，分辨率 0.01rpm），失败返回 -1 */
 int robot_read_speed_rpm(Robot *robot, int joint);
 
 /* 读取关节报警代码（0x00A3），失败返回 -1 */

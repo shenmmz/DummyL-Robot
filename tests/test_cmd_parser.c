@@ -2,7 +2,8 @@
  * test_cmd_parser.c —— CLI 命令解析离线单元测试
  * ------------------------------------------------------------
  * 所属：tests（CTest）
- * 覆盖：home、movej、disable、motor、getpos、zero/zero save/zero set、exit、空行、未知命令的解析与参数校验。
+ * 覆盖：home、movej（单/多关节及参数校验）、movel、disable、enable、motor、
+ *       getpos、zero、zero_save、exit、空行、未知命令的解析与参数校验。
  */
 
 #include "utils/cmd_parser.h"
@@ -88,22 +89,55 @@ int main(void)
     rc = cmd_parse("getpos", &c);
     CHECK(rc == CMD_GETPOS, "getpos 解析失败（得到 rc=%d）", rc);
 
-    /* zero / zero save / zerosave */
+    /* zero / zero_save */
     rc = cmd_parse("zero", &c);
     CHECK(rc == CMD_ZERO && c.joint == 0, "zero 应解析为 CMD_ZERO 非保存（得到 rc=%d, joint=%d）", rc, c.joint);
-    rc = cmd_parse("zero save", &c);
-    CHECK(rc == CMD_ZERO && c.joint == 1, "zero save 应解析为 CMD_ZERO 保存（得到 rc=%d, joint=%d）", rc, c.joint);
-    rc = cmd_parse("zerosave", &c);
-    CHECK(rc == CMD_ZERO && c.joint == 1, "zerosave 应解析为 CMD_ZERO 保存（得到 rc=%d, joint=%d）", rc, c.joint);
+    rc = cmd_parse("zero_save:-176.88,72.89,-175.48,7.27,118.11,444.58", &c);
+    CHECK(rc == CMD_ZERO_SAVE, "zero_save 应解析为 CMD_ZERO_SAVE（得到 rc=%d）", rc);
+    CHECK(fabs(c.zero_vals[0] + 176.88) < 1e-6 && fabs(c.zero_vals[5] - 444.58) < 1e-6,
+          "zero_save 数值解析失败（q0=%.4f, q5=%.4f）", c.zero_vals[0], c.zero_vals[5]);
 
-    /* zero set：直接写入已知零点（6 值） */
-    rc = cmd_parse("zero set -176.85 72.87 -175.46 7.38 118.08 262.27", &c);
-    CHECK(rc == CMD_ZERO_SET, "zero set 应解析为 CMD_ZERO_SET（得到 rc=%d）", rc);
-    CHECK(fabs(c.zero_vals[0] + 176.85) < 1e-6 && fabs(c.zero_vals[5] - 262.27) < 1e-6,
-          "zero set 数值解析失败（q0=%.4f, q5=%.4f）", c.zero_vals[0], c.zero_vals[5]);
+    /* multi-joint movej */
+    rc = cmd_parse("movej:1:30,2:60,3000,150,200", &c);
+    CHECK(rc == CMD_MOVEJ && c.num_joints == 2, "多关节 movej 应解析为 CMD_MOVEJ num_joints=2（得到 rc=%d, n=%d）", rc, c.num_joints);
+    CHECK(c.joints[0] == 1 && c.angles[0] == 30.0 && c.joints[1] == 2 && c.angles[1] == 60.0,
+          "多关节 movej 参数解析失败（j0=%d,a0=%.2f,j1=%d,a1=%.2f）",
+          c.joints[0], c.angles[0], c.joints[1], c.angles[1]);
+    CHECK(c.speeds[0] == 3000.0 && c.accel_ms[0] == 150 && c.decel_ms[0] == 200,
+          "多关节 movej 加减速解析失败（spd=%.0f,acc=%d,dec=%d）",
+          c.speeds[0], c.accel_ms[0], c.decel_ms[0]);
 
-    /* zero set：数值不足 6 个应拒绝 */
-    CHECK(cmd_parse("zero set -176.85 72.87", &c) == CMD_UNKNOWN, "zero set 数值不足 6 个应被拒绝");
+    /* movel：笛卡尔坐标 */
+    rc = cmd_parse("movel:100,200,300,0,0,0", &c);
+    CHECK(rc == CMD_MOSEL, "movel 应解析为 CMD_MOSEL（得到 rc=%d）", rc);
+    CHECK(fabs(c.cartesian[0] - 100) < 1e-6 && fabs(c.cartesian[5] - 0) < 1e-6,
+          "movel 数值解析失败（X=%.4f, Rz=%.4f）", c.cartesian[0], c.cartesian[5]);
+
+    /* ---- 多关节 movej 参数不足 / 脏段：必须判错（防静默错位与 atof 误读） ---- */
+    CHECK(cmd_parse("movej:1:30,2:60", &c) == CMD_UNKNOWN,
+          "movej 多关节缺 SPD/ACC/DEC 应被拒绝");
+    CHECK(cmd_parse("movej:1:30,2,3000,150,200", &c) == CMD_UNKNOWN,
+          "movej 关节段缺 ':' 应被拒绝");
+    CHECK(cmd_parse("movej:1:30,abc,150,200", &c) == CMD_UNKNOWN,
+          "movej 末三项非纯数字应被拒绝");
+    CHECK(cmd_parse("movej:1:30,2:60,3000,150,200x", &c) == CMD_UNKNOWN,
+          "movej 末项含非数字尾缀应被拒绝");
+    CHECK(cmd_parse("movej:1:30,2:60,0,150,200", &c) == CMD_UNKNOWN,
+          "movej 多关节速度 0 应被拒绝");
+    CHECK(cmd_parse("movej:1:45:0", &c) == CMD_UNKNOWN,
+          "movej 单关节速度 0 应被拒绝");
+    CHECK(cmd_parse("movej:1:45:200:9", &c) == CMD_UNKNOWN,
+          "movej 单关节多余字段应被拒绝");
+
+    /* ---- enable[:关节号] ---- */
+    rc = cmd_parse("enable", &c);
+    CHECK(rc == CMD_ENABLE && c.joint == 0, "enable 应解析为 CMD_ENABLE joint=0（得到 rc=%d, joint=%d）", rc, c.joint);
+    rc = cmd_parse("enable:3", &c);
+    CHECK(rc == CMD_ENABLE && c.joint == 3, "enable:3 应解析为 CMD_ENABLE joint=3（得到 rc=%d, joint=%d）", rc, c.joint);
+    CHECK(cmd_parse("enable:9", &c) == CMD_UNKNOWN,
+          "enable:9 电机不存在应被拒绝（不得静默误报为全轴使能）");
+    CHECK(cmd_parse("enable:abc", &c) == CMD_UNKNOWN,
+          "enable:abc 非数字关节号应被拒绝");
 
     /* 空行 */
     rc = cmd_parse("", &c);

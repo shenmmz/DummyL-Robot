@@ -73,7 +73,7 @@ static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigne
 int main(int argc, char **argv)
 {
     char port[64];
-    unsigned long baud;
+    unsigned long baud = MODBUS_BAUDRATE;   /* argc>1 分支未读 ini，须给默认值避免未初始化 */
     Robot *robot;
     Monitor *mon = NULL;   /* 后台监控线程对象（退出前停止） */
     char line[256];
