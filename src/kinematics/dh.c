@@ -88,7 +88,7 @@ void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][
     }
 }
 
-/* dh_pose_to_xyz_rpy：位姿矩阵转 XYZ 平移与 ZYX 欧拉角（度用 rad） */
+/* dh_pose_to_xyz_rpy：位姿矩阵转 XYZ 平移与 ZYX 欧拉角；输出顺序 [roll(X),pitch(Y),yaw(Z)]，与命令行(Rx,Ry,Rz) 一致 */
 void dh_pose_to_xyz_rpy(const double pose[4][4], double xyz[3], double rpy[3])
 {
     xyz[0] = pose[0][3];
@@ -102,7 +102,7 @@ void dh_pose_to_xyz_rpy(const double pose[4][4], double xyz[3], double rpy[3])
         rpy[0] = 0.0;
         rpy[2] = atan2(pose[0][1], pose[1][1]);
     } else {
-        rpy[0] = atan2(pose[1][0] / cos(rpy[1]), pose[0][0] / cos(rpy[1]));
-        rpy[2] = atan2(pose[2][1] / cos(rpy[1]), pose[2][2] / cos(rpy[1]));
+        rpy[0] = atan2(pose[2][1] / cos(rpy[1]), pose[2][2] / cos(rpy[1]));  /* roll  about X */
+        rpy[2] = atan2(pose[1][0] / cos(rpy[1]), pose[0][0] / cos(rpy[1]));  /* yaw   about Z */
     }
 }

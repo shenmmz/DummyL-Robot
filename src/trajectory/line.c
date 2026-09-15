@@ -16,20 +16,28 @@
 #define LINE_DEG2RAD (LINE_PI / 180.0)
 #define LINE_EPS    1e-12
 
-/* line_pose_to_matrix：ZYX 欧拉角（deg）-> 4x4 齐次矩阵（行主序） */
+/* line_pose_to_matrix：位姿(deg) -> 4x4 齐次矩阵（行主序）。
+ * 姿态按 ZYX 欧拉角(roll-pitch-yaw)解释：pose6[3]=Rx(绕X), [4]=Ry(绕Y), [5]=Rz(绕Z)，
+ * 矩阵 R = Rz(Rz)·Ry(Ry)·Rx(Rx)，与 dh_pose_to_xyz_rpy 输出顺序 [roll,pitch,yaw] 一致。 */
 void line_pose_to_matrix(const double pose6[6], double m[4][4])
 {
-    double r = pose6[3] * LINE_DEG2RAD;
-    double p = pose6[4] * LINE_DEG2RAD;
-    double y = pose6[5] * LINE_DEG2RAD;
-    double cr = cos(r), sr = sin(r);
-    double cp = cos(p), sp = sin(p);
-    double cy = cos(y), sy = sin(y);
+    double rx = pose6[3] * LINE_DEG2RAD;   /* roll  about X */
+    double ry = pose6[4] * LINE_DEG2RAD;   /* pitch about Y */
+    double rz = pose6[5] * LINE_DEG2RAD;   /* yaw   about Z */
+    double crx = cos(rx), srx = sin(rx);
+    double cry = cos(ry), sry = sin(ry);
+    double crz = cos(rz), srz = sin(rz);
 
-    m[0][0] = cr * cp; m[0][1] = cr * sp * sy - sr * cy; m[0][2] = cr * sp * cy + sr * sy;
-    m[1][0] = sr * cp; m[1][1] = sr * sp * sy + cr * cy; m[1][2] = sr * sp * cy - cr * sy;
-    m[2][0] = -sp;     m[2][1] = cp * sy;                m[2][2] = cp * cy;
-    m[3][0] = 0.0;     m[3][1] = 0.0;                    m[3][2] = 0.0;
+    m[0][0] = crz * cry;
+    m[0][1] = crz * sry * srx - srz * crx;
+    m[0][2] = crz * sry * crx + srz * srx;
+    m[1][0] = srz * cry;
+    m[1][1] = srz * sry * srx + crz * crx;
+    m[1][2] = srz * sry * crx - crz * srx;
+    m[2][0] = -sry;
+    m[2][1] = cry * srx;
+    m[2][2] = cry * crx;
+    m[3][0] = 0.0; m[3][1] = 0.0; m[3][2] = 0.0;
     m[0][3] = pose6[0];
     m[1][3] = pose6[1];
     m[2][3] = pose6[2];

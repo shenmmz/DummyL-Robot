@@ -30,7 +30,7 @@ typedef struct {
     double pose[LINE_MAX_POINTS][6];
 } LinePath;
 
-/* line_pose_to_matrix：6 维位姿 -> 4x4 齐次矩阵（行主序，ZYX 欧拉角） */
+/* line_pose_to_matrix：6 维位姿 -> 4x4 齐次矩阵（行主序；姿态按 ZYX 欧拉角 [Rx,Ry,Rz]=(roll,pitch,yaw) 解释，R = Rz·Ry·Rx） */
 void line_pose_to_matrix(const double pose6[6], double m[4][4]);
 
 /* line_count_for_distance：按步长 step_mm 计算插补点数。

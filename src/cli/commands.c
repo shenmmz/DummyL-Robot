@@ -23,6 +23,7 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 #include <windows.h>
 
@@ -398,8 +399,9 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
 /* ====================== moveL：笛卡尔直线运动 ====================== */
 
 #define MOVL_STEP_MM        2.0     /* 直线插补步长（mm）— 小步长保证IK分支连续 */
-#define MOVL_INPOS_TOL      10      /* 到位判定容差（脉冲），步长越小容差越严 */
+#define MOVL_INPOS_TOL      100      /* 到位判定容差（脉冲），步长越小容差越严 */
 #define MOVL_INPOS_TIMEOUT_MS 10000 /* 单段/整段到位等待上限（ms） */
+#define MOVL_SEG_DT_MIN     0.15    /* 单段下发最小间隔（s）；受串口逐点吞吐限制，低于此值会触发多次启停画弧 */
 
 /* moveL 工作缓冲：257×6 双精度约 12KB，放静态区，避免占用线程栈 */
 static LinePath g_movl_path;
@@ -419,28 +421,62 @@ static void movl_seg_speed(const double q0[6], const double q1[6], double seg_dt
     }
 }
 
-/* movl_send_point：把单个插补点的各关节目标角按各自转速下发（不等待到位）。
+/* movl_send_profile_speed：一次性下发全轴加减速 + 速度（周期刷新模式只发一次）。
+ * 速度须为正，微位移段按最低 1rpm 下发。返回成功下发的轴数。 */
+static int movl_send_profile_speed(Robot *robot, const double v_rpm[6],
+                                   int accel_ms, int decel_ms)
+{
+    int sent = 0, j;
+    double rpm;
+
+    for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
+        if (robot_is_masked(robot, j)) continue;
+        rpm = v_rpm ? v_rpm[j - 1] : 1.0;
+        if (rpm < 1.0) rpm = 1.0;
+        if (motor_set_profile(robot, j, accel_ms, decel_ms) != ERR_NONE) continue;
+        if (motor_set_speed(robot, j, (int)(rpm + 0.5)) != ERR_NONE) continue;
+        sent++;
+    }
+    return sent;
+}
+
+/* movl_send_position：仅下发全轴绝对位置目标（依赖已设的速度/加减速，不重复写）。
+ * 返回成功下发的轴数。 */
+static int movl_send_position(Robot *robot, const double q[6])
+{
+    const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+    const double *zero = joint_zero_get();
+    int sent = 0, j;
+    int32_t steps;
+
+    for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
+        if (robot_is_masked(robot, j)) continue;
+        steps = DEG2STEPS(q[j - 1] + zero[j - 1], reductions[j - 1]);
+        if (motor_move_abs(robot, j, steps) != ERR_NONE) continue;
+        sent++;
+    }
+    return sent;
+}
+
+/* movl_send_point：逐轴"速度+位置"一起下发（逐段到位模式用，每段等到位后再发下一段）。
  * set_profile=1 时同时下发加减速时间。返回成功下发的轴数。 */
 static int movl_send_point(Robot *robot, const double q[6], const double v_rpm[6],
                            int accel_ms, int decel_ms, int set_profile)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
     const double *zero = joint_zero_get();
-    int sent = 0;
-    int j;
+    int sent = 0, j;
+    double rpm;
+    int32_t steps;
 
     for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
-        double motor_deg, rpm;
-
         if (robot_is_masked(robot, j)) continue;
-
-        motor_deg = q[j - 1] + zero[j - 1];
-        rpm = v_rpm ? v_rpm[j - 1] : 0.0;
+        rpm = v_rpm ? v_rpm[j - 1] : 1.0;
         if (rpm < 1.0) rpm = 1.0;   /* 驱动器速度须为正，微位移段按最低转速下发 */
-
+        steps = DEG2STEPS(q[j - 1] + zero[j - 1], reductions[j - 1]);
         if (set_profile) motor_set_profile(robot, j, accel_ms, decel_ms);
-        if (motor_set_speed(robot, j, rpm) != ERR_NONE) continue;
-        if (motor_move_abs(robot, j, DEG2STEPS(motor_deg, reductions[j - 1])) != ERR_NONE) continue;
+        if (motor_set_speed(robot, j, (int)(rpm + 0.5)) != ERR_NONE) continue;
+        if (motor_move_abs(robot, j, steps) != ERR_NONE) continue;
         sent++;
     }
     return sent;
@@ -509,6 +545,9 @@ void cmd_movl(Robot *robot, const ParsedCmd *cmd)
     double start_pose[6], end_pose[6];
     double seg_dt[LINE_MAX_SEGS];
     double vmax[6], v_rpm[6];
+    double seg_dt_eff[LINE_MAX_SEGS];
+    double v_rpm_last[6];
+    int acc, dec;
     double dt_total = 0.0, dist = 0.0, cart_speed = 0.0;
     double pose[4][4], xyz[3], rpy[3];
     int ok, count, fail_idx = -1, stream, sent;
@@ -558,13 +597,28 @@ void cmd_movl(Robot *robot, const ParsedCmd *cmd)
         return;
     }
 
-    /* 4) 按关节限速生成分段时间表：SPD(rpm) -> 各关节角速度上限(deg/s) */
+    /* 4) 按关节限速生成分时间段表：SPD(rpm) -> 各关节角速度上限(deg/s) */
     for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
         vmax[j] = cmd->speeds[0] * 6.0 / (double)reductions[j];
     }
     if (line_time_table(g_movl_q, g_movl_path.count, vmax, seg_dt, &dt_total) != 0) {
-        printf("[错误] 分段时间表生成失败（速度须大于 0）\n");
+        printf("[错误] 分时间段表生成失败（速度须大于 0）\n");
         return;
+    }
+
+    /* 段长下限：单点下发吞吐受串口帧耗时限制，单段真实耗时不可能低于该值。
+     * 自然段长（高速小步长）远低于下限时，按下限反解各段驱动器速度/加减速，
+     * 否则 0x00E8 强断语义会让每段重起梯形 -> 多次启停、末端画弧、整体卡顿。
+     * 按最短有效段长反解加速/减速时间，使单段梯形恰好落在段长内。 */
+    {
+        double min_eff = MOVL_SEG_DT_MIN;
+        for (i = 0; i < g_movl_path.count - 1; i++) {
+            seg_dt_eff[i] = (seg_dt[i] < MOVL_SEG_DT_MIN) ? MOVL_SEG_DT_MIN : seg_dt[i];
+            if (seg_dt_eff[i] < min_eff) min_eff = seg_dt_eff[i];
+        }
+        acc = (int)(min_eff * 1000.0 * 0.25 + 0.5);
+        if (acc > cmd->accel_ms[0]) acc = cmd->accel_ms[0];
+        dec = acc;
     }
     cart_speed = (dt_total > 1e-9) ? dist / dt_total : 0.0;
 
@@ -578,11 +632,10 @@ void cmd_movl(Robot *robot, const ParsedCmd *cmd)
         uint32_t t_start = GetTickCount();
 
         if (!stream) {
-            /* 逐段到位：每段按分段时间表转速下发，等待该点到位后再走下一段 */
+            /* 逐段到位：每段按有效段长反解转速下发，等待该点到位后再走下一段 */
             for (i = 1; i < g_movl_path.count; i++) {
-                movl_seg_speed(g_movl_q[i - 1], g_movl_q[i], seg_dt[i - 1], v_rpm);
-                sent = movl_send_point(robot, g_movl_q[i], v_rpm,
-                                       cmd->accel_ms[0], cmd->decel_ms[0], 1);
+                movl_seg_speed(g_movl_q[i - 1], g_movl_q[i], seg_dt_eff[i - 1], v_rpm);
+                sent = movl_send_point(robot, g_movl_q[i], v_rpm, acc, dec, 1);
                 if (sent == 0) {
                     printf("[错误] 第 %d 段下发失败，movl 中止\n", i);
                     return;
@@ -594,16 +647,37 @@ void cmd_movl(Robot *robot, const ParsedCmd *cmd)
                 }
             }
         } else {
-            /* 周期刷新：按段时长节拍连续刷新目标点（不逐点等待），最后统一判到位 */
-            for (i = 1; i < g_movl_path.count; i++) {
-                movl_seg_speed(g_movl_q[i - 1], g_movl_q[i], seg_dt[i - 1], v_rpm);
-                sent = movl_send_point(robot, g_movl_q[i], v_rpm,
-                                       cmd->accel_ms[0], cmd->decel_ms[0], (i == 1));
-                if (sent == 0) {
-                    printf("[错误] 第 %d 段下发失败，movl 中止\n", i);
-                    return;
+            /* 周期刷新：先一次性下发速度/加减速，之后仅按绝对时刻表刷新位置目标。
+             * 位置目标连续刷新时 0x00E8 强断机制让驱动器自身平滑过渡，无逐点停顿；
+             * 段长受串口吞吐限制设下限，节拍由绝对时刻表 t_next 控制而非 Sleep 估算。 */
+            movl_seg_speed(g_movl_q[0], g_movl_q[1], seg_dt_eff[0], v_rpm);
+            memcpy(v_rpm_last, v_rpm, sizeof(v_rpm_last));
+            movl_send_profile_speed(robot, v_rpm, acc, dec);
+
+            {
+                uint32_t t_next = t_start;
+                for (i = 1; i < g_movl_path.count; i++) {
+                    int changed = 0;
+                    /* 本段速度相对上一段变化 >2% 才补发速度，减少轴间启动偏差 */
+                    movl_seg_speed(g_movl_q[i - 1], g_movl_q[i], seg_dt_eff[i - 1], v_rpm);
+                    for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
+                        double ref = (v_rpm_last[j] > 1.0) ? v_rpm_last[j] : 1.0;
+                        if (fabs(v_rpm[j] - v_rpm_last[j]) / ref > 0.02) { changed = 1; break; }
+                    }
+                    if (changed) {
+                        movl_send_profile_speed(robot, v_rpm, acc, dec);
+                        memcpy(v_rpm_last, v_rpm, sizeof(v_rpm_last));
+                    }
+                    if (movl_send_position(robot, g_movl_q[i]) == 0) {
+                        printf("[错误] 第 %d 点位置下发失败，movl 中止\n", i);
+                        return;
+                    }
+                    t_next += (uint32_t)(seg_dt_eff[i - 1] * 1000.0 + 0.5);
+                    {
+                        uint32_t now = GetTickCount();
+                        if (t_next > now) Sleep(t_next - now);
+                    }
                 }
-                Sleep((DWORD)(seg_dt[i - 1] * 1000.0 + 0.5));
             }
             if (movl_wait_point(robot, g_movl_q[g_movl_path.count - 1],
                                 MOVL_INPOS_TIMEOUT_MS) != 0) {
