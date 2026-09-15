@@ -146,15 +146,21 @@ ErrCode motor_set_speed16(Robot *robot, int joint, int rpm)
 }
 
 /* motor_set_profile：设置加减速时间
- * 分别写 0x0098（加速时间）和 0x0099（减速时间），两寄存器独立
+ * 0x0098（加速）与 0x0099（减速）为连续 WORD 寄存器，合并为一次 0x10 写多寄存器，
+ * 减少每轴下发帧数（原 2×0x06）。字节序：寄存器内高字节在前（手册 §CRC 注），
+ * 与现有 motor_write_i32 的 DWORD 约定一致。
  * accel_ms - 加速时间 ms，从启动速度到目标速度所需时间
  * decel_ms - 减速时间 ms，从目标速度到停止速度所需时间
  * 返回：ERR_NONE 成功 */
 ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms)
 {
-    ErrCode rc = motor_write_u16(robot, joint, LEESN_REG_ACC_TIME, (uint16_t)accel_ms);
-    if (rc != ERR_NONE) return rc;
-    return motor_write_u16(robot, joint, LEESN_REG_DEC_TIME, (uint16_t)decel_ms);
+    uint16_t vals[2];
+    uint8_t frame[32];
+    ModbusFrame resp;
+    vals[0] = (uint16_t)accel_ms;
+    vals[1] = (uint16_t)decel_ms;
+    size_t len = modbus_build_write_multi(joint_slave(joint), LEESN_REG_ACC_TIME, vals, 2, frame);
+    return robot_request(robot, frame, len, &resp);
 }
 
 /* motor_clear_pos：清零当前位置

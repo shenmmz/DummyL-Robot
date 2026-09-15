@@ -401,7 +401,10 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
 #define MOVL_STEP_MM        2.0     /* 直线插补步长（mm）— 小步长保证IK分支连续 */
 #define MOVL_INPOS_TOL      100      /* 到位判定容差（脉冲），步长越小容差越严 */
 #define MOVL_INPOS_TIMEOUT_MS 10000 /* 单段/整段到位等待上限（ms） */
-#define MOVL_SEG_DT_MIN     0.15    /* 单段下发最小间隔（s）；受串口逐点吞吐限制，低于此值会触发多次启停画弧 */
+#define MOVL_SEG_DT_MIN     0.08    /* 单段下发最小间隔（s）；受串口逐点 I/O 限制（6 轴各一次 0x10 帧，每帧 ~5~10ms），
+                                       取略高于单点 I/O(~0.06s) 的下限，避免命令积压重起梯形；旧值 0.15 把每个 ~0.01s 小段
+                                       一律拉到 0.15s 导致 13× 超时 */
+#define MOVL_ACC_FLOOR_MS   60      /* 加减速安全下限（ms），仅当命令 ACC/DEC≤0 时启用防零值，不覆盖命令值 */
 
 /* moveL 工作缓冲：257×6 双精度约 12KB，放静态区，避免占用线程栈 */
 static LinePath g_movl_path;
@@ -548,7 +551,7 @@ void cmd_movl(Robot *robot, const ParsedCmd *cmd)
     double seg_dt_eff[LINE_MAX_SEGS];
     double v_rpm_last[6];
     int acc, dec;
-    double dt_total = 0.0, dist = 0.0, cart_speed = 0.0;
+    double dt_total = 0.0, dt_total_eff = 0.0, dist = 0.0, cart_speed = 0.0;
     double pose[4][4], xyz[3], rpy[3];
     int ok, count, fail_idx = -1, stream, sent;
     int i, j;
@@ -606,26 +609,26 @@ void cmd_movl(Robot *robot, const ParsedCmd *cmd)
         return;
     }
 
-    /* 段长下限：单点下发吞吐受串口帧耗时限制，单段真实耗时不可能低于该值。
-     * 自然段长（高速小步长）远低于下限时，按下限反解各段驱动器速度/加减速，
-     * 否则 0x00E8 强断语义会让每段重起梯形 -> 多次启停、末端画弧、整体卡顿。
-     * 按最短有效段长反解加速/减速时间，使单段梯形恰好落在段长内。 */
+    /* 段长下限：单点下发需 6 轴各一次 0x10 帧（每帧 ~5~10ms），单段真实耗时不可能
+     * 低于该 I/O 下限。下限取"略高于单点 I/O"（实测 ~0.06s）：既保证 t_next 绝对时刻表
+     * 在下一位置下发前已完成本段 I/O（避免 0x00E8 强断语义下命令积压、每段重起梯形导致
+     * 画弧/卡顿），又不像旧值 0.15s 那样把每个 ~0.01s 小段一律拉到 0.15s 造成 13× 超时。
+     * 加减速时间直接采用用户命令（SPD/ACC/DEC，命令第7/8/9位），仅设安全下限防零值；
+     * 不再用"段长*0.25"反向覆盖——那会把命令 300ms 压成 ~38ms，导致 J5 负载轴电流尖峰过流。 */
     {
-        double min_eff = MOVL_SEG_DT_MIN;
         for (i = 0; i < g_movl_path.count - 1; i++) {
             seg_dt_eff[i] = (seg_dt[i] < MOVL_SEG_DT_MIN) ? MOVL_SEG_DT_MIN : seg_dt[i];
-            if (seg_dt_eff[i] < min_eff) min_eff = seg_dt_eff[i];
+            dt_total_eff += seg_dt_eff[i];
         }
-        acc = (int)(min_eff * 1000.0 * 0.25 + 0.5);
-        if (acc > cmd->accel_ms[0]) acc = cmd->accel_ms[0];
-        dec = acc;
+        acc = (cmd->accel_ms[0] > 0) ? cmd->accel_ms[0] : MOVL_ACC_FLOOR_MS;
+        dec = (cmd->decel_ms[0] > 0) ? cmd->decel_ms[0] : MOVL_ACC_FLOOR_MS;
     }
-    cart_speed = (dt_total > 1e-9) ? dist / dt_total : 0.0;
+    cart_speed = (dt_total_eff > 1e-9) ? dist / dt_total_eff : 0.0;
 
     stream = cmd->stream ? 1 : 0;
     printf("MoveL %s：%d 个插补点，路径长 %.2f mm，步长 %.2f mm，预计 %.2f s（末端 %.2f mm/s）\n",
        stream ? "周期刷新" : "逐段到位", g_movl_path.count, dist,
-       dist / (double)(g_movl_path.count - 1), dt_total, cart_speed);
+       dist / (double)(g_movl_path.count - 1), dt_total_eff, cart_speed);
 
     /* 5) 下发 */
     {
