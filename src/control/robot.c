@@ -284,7 +284,7 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
     joint_zero_mech_to_motor(mech, motor);
     steps = DEG2STEPS(motor[joint - 1], reductions[joint - 1]);
     if (speed_rpm <= 0.0) {
-        speed_rpm = 3000.0;
+        speed_rpm = 60.0;
     }
 
     rc = motor_set_speed(robot, joint, speed_rpm);
@@ -325,21 +325,7 @@ ErrCode robot_read_status(Robot *robot, int joint, uint32_t *status)
 /* robot_read_status32：读取关节完整 32 位状态字（0x0006~0x0007），含报警位等高位标志 */
 ErrCode robot_read_status32(Robot *robot, int joint, uint32_t *status)
 {
-    int32_t val;
-    ErrCode rc;
-
-    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT || status == NULL) {
-        return ERR_ARG;
-    }
-    if (robot_is_masked(robot, joint)) {
-        return ERR_MASKED;
-    }
-    rc = motor_read_i32(robot, joint, LEESN_REG_STATUS, &val);
-    if (rc == ERR_NONE) {
-        robot->online[joint - 1] = 1;
-        *status = (uint32_t)val;
-    }
-    return rc;
+    return robot_read_status(robot, joint, status);
 }
 
 /* robot_is_online：读状态成功视为在线，返回 1/0（被屏蔽关节返回 0） */

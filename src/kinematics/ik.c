@@ -2,7 +2,8 @@
  * ik.c —— 六轴机械臂解析逆运动学求解（IK）
  * ------------------------------------------------------------
  * 所属模块：运动学（kinematics）
- * 对外接口：ik_solve、ik_filter_by_limits、ik_select_best
+ * 对外接口：ik_solve、ik_filter_by_limits、ik_select_best、
+ *           ik_wrap_deg、ik_unwrap_near、ik_unwrap_solutions、ik_select_best_continuous
  * 依赖模块：kinematics/dh
  */
 
@@ -287,4 +288,58 @@ int ik_select_best(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cn
         best[j] = solutions[best_idx][j];
     }
     return 0;
+}
+
+/* ---------- 角度归一化 / 分支连续选解 ---------- */
+
+/* ik_wrap_deg：归一化到 (-180, 180]（度） */
+double ik_wrap_deg(double deg)
+{
+    double r = fmod(deg + 180.0, 360.0);
+    if (r <= 0.0) {
+        r += 360.0;                 /* r 落入 (0, 360]，含 r==0 的边界折到 360 */
+    }
+    return r - 180.0;
+}
+
+/* ik_unwrap_near：取距 ref_deg 最近的等价角（相差 360° 整数倍） */
+double ik_unwrap_near(double deg, double ref_deg)
+{
+    return ref_deg + ik_wrap_deg(deg - ref_deg);
+}
+
+/* ik_unwrap_solutions：批量去卷绕 */
+int ik_unwrap_solutions(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
+                        const double *ref_joints, double out[IK_MAX_SOLUTIONS][6])
+{
+    int i, j, n = 0;
+
+    if (solutions == NULL || out == NULL || candidate_cnt <= 0) {
+        return 0;
+    }
+    for (i = 0; i < candidate_cnt && i < IK_MAX_SOLUTIONS; i++) {
+        for (j = 0; j < 6; j++) {
+            double ref = (ref_joints != NULL) ? ref_joints[j] : 0.0;
+            out[n][j] = ik_unwrap_near(solutions[i][j], ref);
+        }
+        n++;
+    }
+    return n;
+}
+
+/* ik_select_best_continuous：去卷绕后按加权变化量最小选解 */
+int ik_select_best_continuous(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
+                              const double *current_joints, const double *weights, double best[6])
+{
+    double unwrapped[IK_MAX_SOLUTIONS][6];
+    int n;
+
+    if (candidate_cnt <= 0 || best == NULL) {
+        return -1;
+    }
+    if (candidate_cnt > IK_MAX_SOLUTIONS) {
+        candidate_cnt = IK_MAX_SOLUTIONS;
+    }
+    n = ik_unwrap_solutions(solutions, candidate_cnt, current_joints, unwrapped);
+    return ik_select_best(unwrapped, n, current_joints, weights, best);
 }

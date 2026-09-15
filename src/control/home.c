@@ -941,8 +941,6 @@ ErrCode robot_home(Robot *robot)
         }
     }
     if (all_ok) {
-        /* 转角前恢复 1~5 轴保护（限位/超差报警/偏差预警），
-         * 保证转角过程中限位和超差保护生效，6 轴已在 sensor6_finish 恢复 */
         for (j = 1; j <= 5; j++) {
             if (robot_is_masked(robot, j)) continue;
             home_restore(robot, j);
@@ -951,7 +949,8 @@ ErrCode robot_home(Robot *robot)
         home_goto_pose(robot, 0);
     } else {
         printf("[警告] 回零：存在未归零/失败轴，跳过统一转角\n");
-        /* 失败场景也要恢复 1~5 轴保护（6 轴已在 sensor6_finish 恢复） */
+        /* 失败场景同样恢复 1~5 轴的超差报警/偏差预警（限位保持关闭），
+         * 6 轴已在 sensor6_finish 恢复 */
         for (j = 1; j <= 5; j++) {
             if (robot_is_masked(robot, j)) continue;
             home_restore(robot, j);

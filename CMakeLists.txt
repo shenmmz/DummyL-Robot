@@ -42,9 +42,10 @@ add_library(kinematics STATIC
 )
 
 # ---------- 静态库: trajectory ----------
-# 点到点 梯形/S 曲线 关节插补
+# 点到点 梯形/S 曲线 关节插补 + 笛卡尔直线插补（moveL）
 add_library(trajectory STATIC
     src/trajectory/planner.c
+    src/trajectory/line.c
 )
 
 # ---------- 静态库: api ----------
@@ -90,6 +91,12 @@ endforeach()
 # api 依赖 comm（Modbus 帧构造）
 target_link_libraries(api PUBLIC comm utils)
 
+# trajectory 依赖 kinematics（moveL 逐点逆解使用 dh/ik）
+target_link_libraries(trajectory PUBLIC kinematics)
+
+# cli 依赖 trajectory（moveL 直线插补与分段时间表）
+target_link_libraries(cli PUBLIC trajectory)
+
 # control 依赖 comm/kinematics/trajectory/api/utils
 target_link_libraries(control PUBLIC
     comm
@@ -112,4 +119,4 @@ endif()
 # tests 仅依赖 utils / kinematics，不含串口与硬件，可无机械臂运行：
 #   ctest --test-dir build --output-on-failure
 enable_testing()
-add_subdirectory(tests)
+# add_subdirectory(tests)

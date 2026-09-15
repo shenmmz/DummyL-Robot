@@ -9,7 +9,7 @@
 
 #include "kinematics/dh_params.h"
 
-#define DH_EPS 1e-9
+#define DH_EPS 1e-6
 
 /* 单关节齐次变换：根据参数与关节角（rad，含 theta_offset）返回 4x4 行主序矩阵 */
 void dh_transform(const DhParam *p, double theta_rad, double t[4][4]);

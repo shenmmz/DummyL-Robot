@@ -231,6 +231,8 @@ ctest --test-dir build
 | `disable` | `disable:N` | 失能关节 N | `disable:1` |
 | `movej` | `movej:N:ANGLE` | 关节 N 绝对运动到 ANGLE 度（相对零位），默认速度 3000 rpm | `movej:1:45` |
 | `movej` | `movej:N:ANGLE:SPEED` | 同上，指定速度（rpm） | `movej:1:45:500` |
+| `movel` | `movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]` | 绝对笛卡尔点到点运动（mm/deg）：仅对终点做一次 IK，各关节按距离比例同时到达——**末端走弧线、非直线**；默认 60 rpm / 80 ms / 90 ms | `movel:150,62,103,-180,0,-180,10,50,50` |
+| `movl` | `movl:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,step\|stream]` | 笛卡尔**直线**运动：位置线性插值 + 姿态走最短路径，逐点 IK 且选解连续；`step`=逐段到位（默认）、`stream`=周期刷新 | `movl:150,52,97,-180,0,-180,60,80,90,step` |
 | `home` | `home` | 回零：组0={1,2,3,5,6}并行→组1={4}→机械原点位姿 | `home` |
 | `mask` | `mask:N` | 屏蔽关节 N（跳过、不发指令、不轮询） | `mask:2` |
 | `unmask` | `unmask:N` | 恢复关节 N | `unmask:2` |

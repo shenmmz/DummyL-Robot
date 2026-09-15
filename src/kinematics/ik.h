@@ -40,4 +40,31 @@ int ik_filter_by_limits(const double solutions[IK_MAX_SOLUTIONS][6], int candida
 int ik_select_best(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
                    const double *current_joints, const double *weights, double best[6]);
 
+/* ---------- 角度归一化 / 分支连续选解（moveL 逐点逆解使用）----------
+ *
+ * 背景：ik_solve 输出的关节角统一归一化到 (-180°, 180°]，同一机械构型的
+ * 等价角（相差 360° 整数倍）会被折回边界侧，例如 J4 实际 180° 被输出为
+ * -180°。若直接按原值计算"相对上一点的变化量"，会把 0.01° 的等价小位移
+ * 误判成 360° 大位移，导致选到腕部翻转的远分支解，末端划弧。
+ * 因此逐点逆解必须先做"去卷绕（unwrap）"，再做最小变化选解。 */
+
+/* ik_wrap_deg：把角度归一化到 (-180°, 180°] */
+double ik_wrap_deg(double deg);
+
+/* ik_unwrap_near：给 deg 叠加 360° 的整数倍，取距 ref_deg 最近的等价角
+ * （|结果-ref_deg| <= 180°）。 */
+double ik_unwrap_near(double deg, double ref_deg);
+
+/* ik_unwrap_solutions：批量把候选解相对 ref_joints 去卷绕后写入 out，
+ * 返回写出的组数（candidate_cnt<0 记 0；ref_joints 为 NULL 时按 0 参考）。 */
+int ik_unwrap_solutions(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
+                        const double *ref_joints, double out[IK_MAX_SOLUTIONS][6]);
+
+/* ik_select_best_continuous：分支连续选解。
+ * 候选解先逐关节相对 current_joints 去卷绕，再按加权变化量最小取最优，
+ * best[6] 输出的是【去卷绕后】的解（可直接用于插值/下发，保证相邻点连续）。
+ * 找到返回 0，candidate_cnt<=0 返回 -1。 */
+int ik_select_best_continuous(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
+                              const double *current_joints, const double *weights, double best[6]);
+
 #endif /* IK_H */

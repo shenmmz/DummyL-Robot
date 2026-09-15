@@ -3,8 +3,9 @@
  * ------------------------------------------------------------
  * 所属模块：工具层（utils）
  * 对外接口：cmd_parse、cmd_print_help
- * 支持命令：home、movej（单/多关节）、movel、disable、enable、motor、getpos、
- *           zero、zero_save、help、exit
+ * 支持命令（命名对齐 ABB RAPID，大小写不敏感）：
+ *           home、MoveJ（单/多关节）、MoveL（笛卡尔直线）、
+ *           disable、enable、motor、getpos、zero、zero_save、help、exit
  */
 
 #include "utils/cmd_parser.h"
@@ -12,9 +13,21 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
-/* movej 多关节用法提示（失败路径统一引用，避免各处字面量漂移） */
-#define MOVEJ_MULTI_USAGE "movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC"
+/* ci_strcmp：大小写不敏感字符串比较，返回 0 表示相等 */
+static int ci_strcmp(const char *a, const char *b)
+{
+    int ca, cb;
+    while (1) {
+        ca = (unsigned char)*a;
+        cb = (unsigned char)*b;
+        if (isalpha(ca)) ca = tolower(ca);
+        if (isalpha(cb)) cb = tolower(cb);
+        if (ca != cb || ca == '\0') return ca - cb;
+        a++; b++;
+    }
+}
 
 /* parse_full_number：严格解析"纯数字"段（strtod 且 endptr 必须走到串尾），
  * 成功返回 1 并写出 *out，否则返回 0。
@@ -101,10 +114,10 @@ int cmd_parse(const char *line, ParsedCmd *out)
         } else {
             out->joint = 0;
         }
-    } else if (strcmp(cmd, "movej") == 0) {
-        char *rest = save;  
+    } else if (ci_strcmp(cmd, "MoveJ") == 0) {
+        char *rest = save;
         if (rest != NULL && strchr(rest, ',') != NULL) {
-            /* 多关节：movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC
+            /* 多关节：MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC
              * 前6项为关节1~6的绝对角度(度)，末3项为速度/加速度/减速度(ms) */
             char *token_ctx = NULL;
             char *toks[16];
@@ -115,11 +128,11 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 tok = strtok_r(NULL, ",", &token_ctx);
             }
             if (tok != NULL) {
-                printf("[警告] movej 参数过多，用法: movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC\n");
+                printf("[警告] MoveJ 参数过多，用法: MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC\n");
                 return CMD_UNKNOWN;
             }
             if (ntok != 9) {
-                printf("[警告] 用法: movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC（6个角度+3个参数）\n");
+                printf("[警告] 用法: MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC（6个角度+3个参数）\n");
                 return CMD_UNKNOWN;
             }
             {
@@ -128,23 +141,23 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 int i;
                 for (i = 0; i < 6; i++) {
                     if (!parse_full_number(toks[i], &ang[i])) {
-                        printf("[警告] movej 角度须为纯数字：%s\n", toks[i]);
+                        printf("[警告] MoveJ 角度须为纯数字：%s\n", toks[i]);
                         return CMD_UNKNOWN;
                     }
                 }
                 if (!parse_full_number(toks[6], &spd) ||
                     !parse_full_number(toks[7], &acc) ||
                     !parse_full_number(toks[8], &dec)) {
-                    printf("[警告] movej SPD/ACC/DEC 须为纯数字：%s,%s,%s\n",
+                    printf("[警告] MoveJ SPD/ACC/DEC 须为纯数字：%s,%s,%s\n",
                            toks[6], toks[7], toks[8]);
                     return CMD_UNKNOWN;
                 }
                 if (spd <= 0.0) {
-                    printf("[警告] movej 速度须大于 0 rpm\n");
+                    printf("[警告] MoveJ 速度须大于 0 rpm\n");
                     return CMD_UNKNOWN;
                 }
                 if (acc <= 0.0 || dec <= 0.0) {
-                    printf("[警告] movej 加减速时间须大于 0 ms\n");
+                    printf("[警告] MoveJ 加减速时间须大于 0 ms\n");
                     return CMD_UNKNOWN;
                 }
                 out->num_joints = 6;
@@ -158,7 +171,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 out->type = CMD_MOVEJ;
             }
         } else {
-            /* 单关节：movej:N:ANGLE[:SPD][:MODE]
+            /* 单关节：MoveJ:N:ANGLE[:SPD][:MODE]
              * SPD 为数字(转速 rpm)，MODE 为字母 r(相对)/a(绝对)，缺省绝对。
              * 靠类型区分段：数字段=速度、字母段=模式，避免空段(:r 缺速度)歧义。
              * 顺序：SPD 可前可后于 MODE，但只有这两个可选段。 */
@@ -171,11 +184,11 @@ int cmd_parse(const char *line, ParsedCmd *out)
             double ang;
             int joint;
             if (j == NULL || a == NULL || extra != NULL) {
-                printf("[警告] 用法: movej:关节号:角度[:速度][:r|a]\n");
+                printf("[警告] 用法: MoveJ:关节号:角度[:速度][:r|a]\n");
                 return CMD_UNKNOWN;
             }
             if (!parse_full_number(j, &jnum) || !parse_full_number(a, &ang)) {
-                printf("[警告] movej 关节号/角度须为纯数字\n");
+                printf("[警告] MoveJ 关节号/角度须为纯数字\n");
                 return CMD_UNKNOWN;
             }
             joint = (int)jnum;
@@ -200,37 +213,40 @@ int cmd_parse(const char *line, ParsedCmd *out)
                     if (seg[k] == NULL) continue;
                     if (parse_full_number(seg[k], &num)) {       /* 速度段 */
                         if (speed_set) {
-                            printf("[警告] movej 速度段重复，应仅一个\n");
+                            printf("[警告] MoveJ 速度段重复，应仅一个\n");
                             return CMD_UNKNOWN;
                         }
                         if (num <= 0.0) {
-                            printf("[警告] movej 速度须大于 0 rpm\n");
+                            printf("[警告] MoveJ 速度须大于 0 rpm\n");
                             return CMD_UNKNOWN;
                         }
                         out->speed_rpm = num;
                         speed_set = 1;
                     } else if (strcmp(seg[k], "r") == 0) {        /* 相对 */
                         if (mode_set) {
-                            printf("[警告] movej 模式段重复\n");
+                            printf("[警告] MoveJ 模式段重复\n");
                             return CMD_UNKNOWN;
                         }
                         out->rel = 1;
                         mode_set = 1;
                     } else if (strcmp(seg[k], "a") == 0) {        /* 绝对 */
                         if (mode_set) {
-                            printf("[警告] movej 模式段重复\n");
+                            printf("[警告] MoveJ 模式段重复\n");
                             return CMD_UNKNOWN;
                         }
                         out->rel = 0;
                         mode_set = 1;
                     } else {
-                        printf("[警告] movej 模式须为 r(相对) 或 a(绝对)：%s\n", seg[k]);
+                        printf("[警告] MoveJ 模式须为 r(相对) 或 a(绝对)：%s\n", seg[k]);
                         return CMD_UNKNOWN;
                     }
                 }
             }
         }
-    } else if (strcmp(cmd, "movel") == 0) {
+    } else if (ci_strcmp(cmd, "MoveL") == 0) {
+        /* 笛卡尔直线（对齐 ABB MoveL）：
+         * MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]
+         * MODE = stream(周期刷新，默认) / step(逐段到位) */
         char *rest = save;
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
@@ -238,34 +254,51 @@ int cmd_parse(const char *line, ParsedCmd *out)
         int n = 0, i;
         while (tok != NULL && n < 9) {
             if (!parse_full_number(tok, &v[n])) {
-                printf("[警告] movel 参数须为纯数字：%s\n", tok);
-                return CMD_UNKNOWN;
+                /* 非数字段：只可能是第 10 段位置的 MODE 关键字（step/stream），
+                 * 交给下方模式判定；若出现在前 6 段则由下方段数校验拦下 */
+                break;
             }
             n++;
             tok = strtok_r(NULL, ",", &ctx);
         }
         if (n != 6 && n != 9) {
-            printf("[警告] 用法: movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]（6 位姿，或 +3 速度参数）\n");
+            printf("[警告] 用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,step|stream]\n");
             return CMD_UNKNOWN;
         }
-        out->type = CMD_MOSEL;
+        out->type = CMD_MOVEL;
+        out->stream = 1;                      
         for (i = 0; i < 6; i++) out->cartesian[i] = v[i];
         if (n == 9) {
             if (v[6] <= 0.0) {
-                printf("[警告] movel 速度须大于 0 rpm\n");
+                printf("[警告] MoveL 速度须大于 0 rpm\n");
                 return CMD_UNKNOWN;
             }
             if (v[7] <= 0.0 || v[8] <= 0.0) {
-                printf("[警告] movel 加减速时间须大于 0 ms\n");
+                printf("[警告] MoveL 加减速时间须大于 0 ms\n");
                 return CMD_UNKNOWN;
             }
             out->speeds[0] = v[6];
             out->accel_ms[0] = (int)v[7];
             out->decel_ms[0] = (int)v[8];
         } else {
-            out->speeds[0] =   60;  // 默认速度
-            out->accel_ms[0] = 80;  // 默认加速度
-            out->decel_ms[0] = 90;  // 默认减速度
+            out->speeds[0] =   60;  /* 默认速度 rpm */
+            out->accel_ms[0] = 80;  /* 默认加速度 ms */
+            out->decel_ms[0] = 90;  /* 默认减速度 ms */
+        }
+        if (tok != NULL) {                     /* 第 10 段：下发模式关键字 */
+            if (strcmp(tok, "step") == 0) {
+                out->stream = 0;
+            } else if (strcmp(tok, "stream") == 0) {
+                out->stream = 1;
+            } else {
+                printf("[警告] MoveL 模式须为 stream(周期刷新，默认) 或 step(逐段到位)：%s\n", tok);
+                return CMD_UNKNOWN;
+            }
+            tok = strtok_r(NULL, ",", &ctx);
+            if (tok != NULL) {
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,step|stream]\n");
+                return CMD_UNKNOWN;
+            }
         }
     } else if (strcmp(cmd, "disable") == 0) {
         char *j = strtok_r(NULL, ":", &save);
@@ -303,7 +336,9 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_GETPOS;
     } else if (strncmp(cmd, "zero", 4) == 0) {
         if (strstr(out->raw, "save") != NULL) {
-            /* zero_save:v1,v2,v3,v4,v5,v6：直接保存指定的零点值 */
+            /* zero_save:v1,v2,v3,v4,v5,v6：直接保存指定的零点值。
+             * 严格解析 + 角度范围校验：拒绝 "abc"/"12x" 被 atof 静默读成 0，
+             * 避免污染零点标定并持久化到 ini。 */
             char *valstr = strchr(out->raw, ':');
             double vals[6];
             int n = 0;
@@ -312,7 +347,17 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 valstr++; /* 跳过 ':' */
                 char *tok = strtok_r(valstr, ",", &ctx);
                 while (tok != NULL && n < 6) {
-                    vals[n] = atof(tok);
+                    double v;
+                    if (!parse_full_number(tok, &v)) {
+                        printf("[警告] zero_save 第 %d 个零点须为纯数字：%s\n", n + 1, tok);
+                        return CMD_UNKNOWN;
+                    }
+                    if (v < -360.0 || v > 360.0) {
+                        printf("[警告] zero_save 第 %d 个零点越界(须在 ±360°)：%.2f\n",
+                               n + 1, v);
+                        return CMD_UNKNOWN;
+                    }
+                    vals[n] = v;
                     n++;
                     tok = strtok_r(NULL, ",", &ctx);
                 }
@@ -338,22 +383,23 @@ int cmd_parse(const char *line, ParsedCmd *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* 命令帮助文本                                                      */
+/* 命令帮助文本                                                       */
 /* ------------------------------------------------------------------ */
 
 static const char HELP_TEXT[] =
-    "可用命令:\n"
+    "可用命令（命名对齐 ABB RAPID，大小写不敏感）:\n"
     "  home                  回零（全轴）\n"
-    "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"                      
-    "  movej:N:ANGLE[:SPD][:r|a]  单关节运动：轴N 至角度ANGLE(度)，速度SPEED(rpm)，\n"
-    "                          末段 r=相对当前位置 / a=绝对(默认)\n"
-    "  movej:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC 多关节同步运动（绝对角度）\n"
-    "  movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]  绝对笛卡尔坐标运动（mm, deg）；\n"
-    "                           SPD=rpm、ACC/DEC=ms，可省略（默认 60/80/90）\n"
+    "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"
+    "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节关节空间运动：轴N 至角度ANGLE(度)，\n"
+    "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
+    "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
+    "  MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]   笛卡尔直线运动；\n"
+    "                          MODE=stream 周期刷新(默认) / step 逐段到位\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"
-    "  motor                 启动/停止电机实时监控（3S/次循环显示）\n"
+    "  enable:N              仅单独使能关节 N\n"
+    "  motor                 启动/停止电机实时监控（1S/次循环显示）\n"
     "  getpos                读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)\n"
     "  zero                  显示当前零点与机械角\n"
     "  zero_save:v1,v2,v3,v4,v5,v6  保存指定的零点标定值\n"

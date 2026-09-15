@@ -36,6 +36,7 @@ ErrCode robot_disable(Robot *robot, int joint);
  * 运行中亦可执行）；速度参数写 0x00D8~0x00D9（0.01 rpm）。
  * 入参为机械角（机械零位为 0，与 status/fk/ik 同口径），
  * 内部经零点标定（config ROBOT_JOINT_ZERO_DEG）换算为电机角后下发。
+ * speed_rpm <= 0 时使用默认 60 rpm。
  * 返回 ErrCode：ERR_NONE / ERR_ARG / ERR_MASKED（屏蔽跳过）/ 通信错误 */
 ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm);
 
