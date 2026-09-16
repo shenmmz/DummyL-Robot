@@ -6,7 +6,7 @@
  * ------------------------------------------------------------
  * 职责：
  *   1) line_plan          把笛卡尔直线段离散为中间位姿序列
- *                         （位置线性插值，姿态 RPY 线性过渡）；
+ *                         （位置线性插值，姿态四元数 SLERP 插值）；
  *   2) line_solve         逐点求逆解，并按【分支连续】选解：候选解相对上一点
  *                         做角度归一化（±180° 等价角去卷绕）后取变化量最小者，
  *                         避免选中腕部翻转分支导致末端划弧；
@@ -38,8 +38,8 @@ void line_pose_to_matrix(const double pose6[6], double m[4][4]);
 int line_count_for_distance(double dist_mm, double step_mm);
 
 /* line_plan：把 start_pose -> end_pose 的直线段离散为 count 个位姿写入 path。
- * 位置线性插值；姿态按最短路径线性过渡（角度增量归一化到 (-180, 180]，
- * 起终点为 ±180° 等价角时姿态保持不变，不会出现腕部整圈翻转）。
+ * 位置线性插值；姿态采用四元数 SLERP 球面插值，确保中间位姿姿态连续
+ * （无 RPY 线性插值的 ±180° 跳变问题）。
  * count 会被夹到 [2, LINE_MAX_POINTS]。成功返回 0，参数非法返回 -1。 */
 int line_plan(const double start_pose[6], const double end_pose[6],
               int count, LinePath *path);
