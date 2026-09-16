@@ -266,7 +266,9 @@ int cmd_parse(const char *line, ParsedCmd *out)
             return CMD_UNKNOWN;
         }
         out->type = CMD_MOVEL;
-        out->stream = 1;                      
+        /* 默认 step（逐段到位）：stream 会按节拍放大弦步长，段内走关节插补会引入弓高
+         * （实测 120mm@60rpm 约 4mm），故只让用户在慢速/长程需要连续无停顿时显式指定 */
+        out->stream = 0;
         for (i = 0; i < 6; i++) out->cartesian[i] = v[i];
         if (n == 9) {
             if (v[6] <= 0.0) {
