@@ -125,11 +125,14 @@ ErrCode motor_stop_slow(Robot *robot, int joint)
  * 注意：0x00D8 是位置/绝对运动(0x00E8/0x00DE)的速度源；
  * 速度模式连续运行(0x00C8)实际取 0x009A（见 motor_set_speed16），
  * 连续运行前必须两个都写，否则按驱动器记忆速度（默认 300rpm）运行。
+ * rpm 必须为 double：寄存器单位 0.01rpm，多关节同步靠"转速按行程比例分配"，
+ * 行程小的轴分到的转速常是个位甚至小数，若截断成整数（甚至截成 0）
+ * 该轴就不动或严重失步 ⇒ 末端画弧。见 commit f835da0 / 本次修正。
  * 返回：ERR_NONE 成功 */
-ErrCode motor_set_speed(Robot *robot, int joint, int rpm)
+ErrCode motor_set_speed(Robot *robot, int joint, double rpm)
 {
     return motor_write_i32(robot, joint, LEESN_REG_VEL_RUN,
-                           LEESN_RPM_TO_VELREG((double)rpm));
+                           LEESN_RPM_TO_VELREG(rpm));
 }
 
 /* motor_set_speed16：设置连续运行速度源（立三 Bug1 修复）

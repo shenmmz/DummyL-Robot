@@ -32,13 +32,17 @@
 #define MOVEJ_POLL_MS      10
 #define MOVEJ_INPOS_TOL   100
 #define MOVEJ_TIMEOUT_MS  60000
-/* 单轴最低转速(rpm)：只用于避免比例分配后向下取整写 0，绝不能抬高。
- * movej_issue 靠"转速按行程比例分配"让六轴同起同停；一旦某轴被下限截断，
- * 它就会提前到位，最后一段只剩其余几轴在动，笛卡尔末端就是一段弧——
- * "逼近目标点画弧"的根因。仿真(94.5mm@10rpm stream)：下限 5rpm 末端偏差 1.01mm，
- * 改 0.05 后 0.42mm。比例分配保证下限只在"该轴行程<最大轴 0.5%(≈不动)"时生效，
- * 此时提前到位也不会有可见偏差。 */
-#define MOVEJ_MIN_RPM       0.05
+/* 单轴最低转速(rpm)：movej_issue 靠"转速按行程比例分配"让六轴同起同停，
+ * 行程小的轴分到的转速是个位甚至小数，这里是防止它小到驱动器执行不了。
+ * 注意两点：
+ *   1) 绝不能抬高——一旦某轴被下限截断，它就提前到位，最后一段只剩其余几轴在动，
+ *      笛卡尔末端就是一段弧（"逼近目标点画弧"的根因）。比例分配保证下限只在
+ *      "该轴行程 < 最大轴的 最低转速/指令转速"（10rpm 时即 10%）时才生效，
+ *      此时提前到位的偏差以该轴自身那点行程为界，可忽略。
+ *   2) 依赖 motor_set_speed 传小数：寄存器单位 0.01rpm，若形参是 int 会把
+ *      0.28rpm 截成 0 ⇒ 该轴完全不动。曾因此把 0.05 写成 0 导致 J2 前两拍不动、
+ *      J3 最终超时急停。 */
+#define MOVEJ_MIN_RPM       1.0
 #define MOVL_ACC_FLOOR_MS   60      /* 加减速安全下限（ms） */
 #define MOVL_STEP_MM        1.0     /* 直线插补弦步长(mm)：越小越直、点越密（封顶 LINE_MAX_POINTS） */
 #define MOVL_STREAM_MIN_MS  20      /* stream 单节拍下限(ms)：防 seg_dt 过小打爆总线；实际节拍由总线耗时与 seg_dt 取大者 */
@@ -406,11 +410,22 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
 
     while (remain > 0) {
         if ((GetTickCount() - start_ms) >= MOVEJ_TIMEOUT_MS) {
+            const uint16_t red_to[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
             for (j = 1; j <= 6; j++) {
+                int pos_ok = 0;
+                int32_t pos;
+                ErrCode rc;
                 if (!pend[j]) continue;
-                ErrCode rc = motor_estop(robot, j);
-                printf("[警告] 关节%d 多关节运动超时，已急停%s\n", j,
+                pos = motor_read_position(robot, j, &pos_ok);
+                rc = motor_estop(robot, j);
+                printf("[警告] 关节%d 多关节运动超时，已急停%s", j,
                        (rc == ERR_NONE) ? "" : "（急停指令下发失败）");
+                if (pos_ok) {
+                    double per_deg = (double)DEG2STEPS(1.0, red_to[j - 1]);
+                    printf("（还差 %.2f° = %ld 步）",
+                           (double)(tgt[j] - pos) / per_deg, (long)(tgt[j] - pos));
+                }
+                printf("\n");
                 pend[j] = 0; remain--;
             }
             break;

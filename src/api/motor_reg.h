@@ -47,11 +47,13 @@ ErrCode motor_estop(Robot *robot, int joint);
  * 连续运行未退出时绝对定位命令(0x00E8)会被忽略，move_abs 前必须调用 */
 ErrCode motor_stop_slow(Robot *robot, int joint);
 
-/* 设置运行速度 rpm（0x00D8~0x00D9，范围 ±9999.99 rpm）
+/* 设置运行速度 rpm（0x00D8~0x00D9，INT32，单位 0.01rpm，范围 ±9999.99 rpm）
+ * rpm 为 double：寄存器有 0.01rpm 分辨率，多关节同步依赖精确的比例转速，
+ * 取整会把小行程轴截成 0（不动）或严重偏慢 ⇒ 失步、末端画弧。
  * 注意：仅位置/绝对运动(0x00E8/0x00DE)使用 0x00D8；连续运行(0x00C8)
  * 的实际速度源是 0x009A（见 motor_set_speed16），只写本函数再 motor_run
  * 会落回驱动器记忆速度（默认 300rpm）——连续运行前必须两个都写 */
-ErrCode motor_set_speed(Robot *robot, int joint, int rpm);
+ErrCode motor_set_speed(Robot *robot, int joint, double rpm);
 
 /* 设置连续运行速度源 rpm（0x009A，UINT16，0~10000）
  * 立三手册：速度模式连续运行(0x00C8)的运行速度为 0x009A 设置值，
