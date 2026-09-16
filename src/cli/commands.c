@@ -673,6 +673,12 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         if (bow > MOVL_BOW_WARN_MM)
             printf("\n[警告] 弓高 %.1f mm 偏大：段数被总线节拍压到 %d 段，建议降速"
                    "（或改用 sync 并接受弧线）", bow, count - 1);
+        /* 段时长若短于加减速时间之和，驱动器每段都在重新爬坡、达不到指令转速，
+         * 实际耗时会显著长于"预计"（预计按匀速算）。实测：段 99ms / 加减速 230ms → 慢 2.9 倍 */
+        if (count > 1 && seg_dt[0] * 1000.0 < (double)(acc + dec))
+            printf("\n[提示] 段时长 %.0f ms 短于加减速时间之和 %d ms，驱动器每段都在重新爬坡，"
+                   "实际耗时会明显长于预计；想提速请调小 ACC/DEC 或放慢速度",
+                   seg_dt[0] * 1000.0, acc + dec);
         printf("\n");
     }
 
