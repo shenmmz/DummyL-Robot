@@ -51,7 +51,8 @@
  * 否则段行程 1.4ms 就走完、剩余 95ms 干等，退化成比 step 更差的"走一步停一下"。
  * 换更快的总线或更少的轴时按实测定值调小本常量。 */
 #define MOVL_STREAM_BEAT_S  0.10    /* stream 目标节拍(s)：段行程应≈一个节拍走完，见上方说明 */
-#define MOVL_BOW_SAMPLES    24      /* 单发同步模式下估算弓高的关节空间采样数 */
+#define MOVL_BOW_SAMPLES    24      /* 估算弓高的关节空间采样数（每段） */
+#define MOVL_BOW_WARN_MM    1.0     /* 弓高超过此值就显式警告：说明段数被节拍压得太少 */
 
 /* 前向声明：line_a/line_b 非空时，等待循环中顺便打印末端相对理想直线的实时偏差 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
@@ -406,6 +407,7 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
                        const double *line_a, const double *line_b)
 {
     uint32_t start_ms = GetTickCount();
+    double worst_dev = 0.0;
     int j;
 
     while (remain > 0) {
@@ -436,10 +438,12 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
                qnow[0], qnow[1], qnow[2], qnow[3], qnow[4], qnow[5],
                motor_read_speed(robot, joints[0]));
         if (line_a != NULL && line_b != NULL) {
-            double m[4][4], xyz[3];
+            double m[4][4], xyz[3], dev;
             dh_forward(DH_TABLE, qnow, m);
             for (j = 0; j < 3; j++) xyz[j] = m[j][3];
-            printf("  偏差%6.2fmm", movl_point_dev_mm(xyz, line_a, line_b));
+            dev = movl_point_dev_mm(xyz, line_a, line_b);
+            if (dev > worst_dev) worst_dev = dev;   /* 实时值被 \r 覆盖，峰值要单独存 */
+            printf("  偏差%6.2fmm", dev);
         }
         fflush(stdout);
         for (j = 1; j <= 6; j++) {
@@ -454,6 +458,9 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
         if (remain > 0) Sleep(20);
     }
     printf("\n");
+    if (line_a != NULL && line_b != NULL)
+        printf("本段实测最大偏差 %.2f mm（实时值比到位判定早约一个轮询周期，末屏不是终点残差）\n",
+               worst_dev);
 }
 
 /* movej_joints：多关节同时运动完整流程 = 下发(读实际位置) + 等待同步到位 */
@@ -642,11 +649,25 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         return;
     }
 
-    printf("MoveL: %d 段, 步长 %.1f mm, 位移 %.1f mm, 节拍 %.3f s, 预计 %.2f s, "
-           "模式 %s（P2 阈值 %d mA %s）\n",
-           count - 1, step_mm, dist, (count > 1) ? seg_dt[0] : 0.0, total_dt,
-           (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream" : "step",
-           (int)stall, (stall > 0.0) ? "开启" : "关闭");
+    /* 段内走关节空间插补 ⇒ 偏离笛卡尔直线，把弓高上界一并打出来。
+     * 段数被总线节拍压到 1 时（速度过快、总时长 < 一个节拍）弓高会很大，
+     * 必须让用户看见，而不是跑完才发现画弧。 */
+    {
+        double bow = 0.0;
+        for (i = 1; i < count; i++) {
+            double d = movl_bow_mm(q_seq[i - 1], q_seq[i], start_pose, end_pose);
+            if (d > bow) bow = d;
+        }
+        printf("MoveL: %d 段, 步长 %.1f mm, 位移 %.1f mm, 节拍 %.3f s, 预计 %.2f s, "
+               "模式 %s, 直线偏差 ≤ %.2f mm（P2 阈值 %d mA %s）",
+               count - 1, step_mm, dist, (count > 1) ? seg_dt[0] : 0.0, total_dt,
+               (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream" : "step", bow,
+               (int)stall, (stall > 0.0) ? "开启" : "关闭");
+        if (bow > MOVL_BOW_WARN_MM)
+            printf("\n[警告] 弓高 %.1f mm 偏大：段数被总线节拍压到 %d 段，建议降速"
+                   "（或改用 sync 并接受弧线）", bow, count - 1);
+        printf("\n");
+    }
 
     /* 3) 逐段下发（密集弦逼近直线），段间做 P2 电流自适应限速 */
     int32_t s_tgt[7] = {0};
