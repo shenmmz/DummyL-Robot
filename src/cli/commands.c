@@ -600,9 +600,13 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
             limits[j].max_deg = lmax[j];
         }
     }
+    /* 速度口径：指令 rpm 与 MoveJ 一致，是【电机轴】rpm（0x00D8 / 0x009A 均为电机轴）。
+     * 而 line_time_table 的 vmax 是【机械角】deg/s，故必须除以减速比。
+     * 曾漏除 ⇒ 时间表比真实快 50 倍 ⇒ stream 段数被算成 1 ⇒ 目标在几毫秒内全砸下去、
+     * 臂其实要走 5 秒 ⇒ 退化成单关节空间直插 ⇒ 末端大弧（84mm 实测 7.9mm）。 */
     {
-        double vmax_deg_s = speed_rpm * 6.0;   /* rpm -> deg/s */
-        for (j = 0; j < 6; j++) vmax[j] = vmax_deg_s;
+        const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+        for (j = 0; j < 6; j++) vmax[j] = speed_rpm * 6.0 / (double)red[j];
     }
 
     double step_mm = MOVL_STEP_MM;
@@ -632,9 +636,12 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     if (cmd->movl_mode == MOVL_MODE_SYNC) {
         const double *q_end = q_seq[count - 1];
         double dmax = 0.0, sync_rpm;
-        for (j = 0; j < 6; j++) {
-            double d = fabs(q_end[j] - q_start[j]);
-            if (d > dmax) dmax = d;
+        {
+            const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+            for (j = 0; j < 6; j++) {
+                double d = fabs(q_end[j] - q_start[j]) * (double)red[j];   /* 电机角度 */
+                if (d > dmax) dmax = d;
+            }
         }
         /* 按笛卡尔规划时长反推转速：保证实际速度不快于指令速度 */
         sync_rpm = (total_dt > 1e-6) ? (dmax / total_dt / 6.0) : base_rpm;
@@ -673,6 +680,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     int32_t s_tgt[7] = {0};
     uint8_t s_pend[7] = {0};
     int s_remain = 0;
+    uint32_t mv_t0 = GetTickCount();
     for (i = 1; i < count; i++) {
         if (stall > 0.0) {
             int max_cur = 0;
@@ -692,20 +700,24 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                 speed_rpm = base_rpm * factor;
                 if (speed_rpm < 1.0) speed_rpm = 1.0;
                 {
-                    double vmax_deg_s = speed_rpm * 6.0;
-                    for (j = 0; j < 6; j++) vmax[j] = vmax_deg_s;
+                    const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+                    for (j = 0; j < 6; j++) vmax[j] = speed_rpm * 6.0 / (double)red[j];
                 }
                 if ((count - i) >= 2)
                     line_time_table(&q_seq[i], count - i, vmax, &seg_dt[i], NULL);
             }
         }
 
-        /* 本段速度：取对时间最紧的关节所需 rpm（movej_joints 按比例同步，整段同时间到达） */
+        /* 本段速度：取对时间最紧的关节所需【电机轴】rpm
+         * （movej_issue 按电机轴行程比例分配，整段同时间到达） */
         double seg_speed = 0.0;
-        for (j = 0; j < 6; j++) {
-            double d = fabs(q_seq[i][j] - q_seq[i - 1][j]);
-            double rpm = d / seg_dt[i - 1] / 6.0;   /* deg/s -> rpm */
-            if (rpm > seg_speed) seg_speed = rpm;
+        {
+            const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+            for (j = 0; j < 6; j++) {
+                double d = fabs(q_seq[i][j] - q_seq[i - 1][j]) * (double)red[j];
+                double rpm = d / seg_dt[i - 1] / 6.0;
+                if (rpm > seg_speed) seg_speed = rpm;
+            }
         }
         if (seg_speed < 1.0) seg_speed = 1.0;
 
@@ -733,7 +745,8 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     if (cmd->movl_mode == MOVL_MODE_STREAM) {
         if (s_remain > 0) movej_wait(robot, joints, s_tgt, s_pend, s_remain,
                                      start_pose, end_pose);
-        printf("MoveL stream %d/%d 段完成\n", count - 1, count - 1);
+        printf("MoveL stream %d/%d 段完成，实际耗时 %.2f s（预计 %.2f s）\n",
+               count - 1, count - 1, (GetTickCount() - mv_t0) / 1000.0, total_dt);
     }
 }
 
