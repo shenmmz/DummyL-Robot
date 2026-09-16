@@ -27,6 +27,9 @@
 
 #define DH_JOINT_COUNT 6
 
+/* J5→法兰面偏距(mm)，即无工具时的 d6 基线；d6 = 法兰偏距 + 工具长(tool_length)。 */
+#define DH_D6_FLANGE_MM 91.5
+
 typedef struct {
     double a;             /* 连杆长度 mm */
     double alpha;         /* 连杆扭转 rad */
@@ -34,7 +37,7 @@ typedef struct {
     double theta_offset;  /* 关节角偏移 rad */
 } DhParam;
 
-/* 关节 1..6 的标准 DH 参数表 */
-extern const DhParam DH_TABLE[DH_JOINT_COUNT];
+/* 关节 1..6 的标准 DH 参数表（运行时可由 dh_set_tool_length 修改 J6 的 d） */
+extern DhParam DH_TABLE[DH_JOINT_COUNT];
 
 #endif /* DH_PARAMS_H */

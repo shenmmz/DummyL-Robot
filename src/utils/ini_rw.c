@@ -99,3 +99,32 @@ int ini_write_joint_zero(const char *path, const double zero[6])
     fclose(out);
     return 1;
 }
+
+/* 读取 [tool] 段（tool_length，单位 mm） */
+int ini_read_tool_length(const char *path, double *tool_mm)
+{
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int in_tool = 0;
+
+    if (f == NULL) return 0;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') {
+            in_tool = (strncmp(p, "[tool]", sizeof("[tool]") - 1) == 0) ? 1 : 0;
+            continue;
+        }
+        if (!in_tool) continue;
+        if (strncmp(p, "tool_length", sizeof("tool_length") - 1) == 0) {
+            char *eq = strchr(p, '=');
+            if (eq != NULL) {
+                *tool_mm = atof(eq + 1);
+                fclose(f);
+                return 1;
+            }
+        }
+    }
+    fclose(f);
+    return 0;
+}

@@ -6,6 +6,7 @@
 #include "utils/cmd_parser.h"
 #include "utils/ini_rw.h"
 #include "kinematics/joint_zero.h"
+#include "kinematics/dh.h"   /* dh_set_tool_length：运行时叠加末端工具长到 d6 */
 #include "cli/commands.h"
 
 #include <stdio.h>
@@ -179,6 +180,18 @@ int main(int argc, char **argv)
             printf("零点标定来源：ini [joint_zero]\n");
         } else {
             printf("零点标定来源：默认（robot_config.h 编译期宏）\n");
+        }
+    }
+
+    /* 读取 ini 的 [tool] 段，将末端工具长叠加到 d6（法兰偏距 91.5 + tool_length） */
+    {
+        double tool_mm = 0.0;
+        if (ini_read_tool_length(INI_PATH, &tool_mm)) {
+            dh_set_tool_length(tool_mm);
+            printf("工具长度来源：ini [tool]，tool_length=%.2fmm → d6=%.2fmm\n", tool_mm, DH_D6_FLANGE_MM + tool_mm);
+        } else {
+            dh_set_tool_length(0.0);
+            printf("工具长度来源：默认 0mm（无工具）→ d6=%.2fmm\n", DH_D6_FLANGE_MM);
         }
     }
 

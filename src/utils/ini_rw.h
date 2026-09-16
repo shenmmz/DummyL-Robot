@@ -17,4 +17,8 @@ int ini_read_joint_zero(const char *path, double zero[6]);
  * 成功返回 1，失败（无法打开写）返回 0。 */
 int ini_write_joint_zero(const char *path, const double zero[6]);
 
+/* 读取 ini 的 [tool] 段，填充 *tool_mm（key 为 tool_length，单位 mm）。
+ * 找到且解析成功返回 1，否则返回 0（调用方按默认 0 处理）。 */
+int ini_read_tool_length(const char *path, double *tool_mm);
+
 #endif /* INI_RW_H */

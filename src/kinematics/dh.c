@@ -25,15 +25,22 @@
 #include <math.h>
 
 
-const DhParam DH_TABLE[DH_JOINT_COUNT] = {
+DhParam DH_TABLE[DH_JOINT_COUNT] = {
     /*  a(mm)    alpha(rad)      d(mm)      theta_offset(rad) */
     { 35.0,     -1.5707963267948966,  140.0,     0.0               }, /* 关节1 */
     { 146.0,     0.0,                   0.0,    -1.5707963267948966 }, /* 关节2 home=-90° */
     { 0.0,       1.5707963267948966,   52.0,     1.5707963267948966 }, /* 关节3 home=90° */
     { 0.0,      -1.5707963267948966,  115.0,     0.0               }, /* 关节4 */
     { 0.0,       1.5707963267948966,    0.0,     0.0               }, /* 关节5 */
-    { 0.0,       0.0,                 183.0,      0.0               }, /* 关节6 腕长 J5→末端实测 *//*把 91.5改成183*/
+    { 0.0,       0.0,                 DH_D6_FLANGE_MM, 0.0       }, /* 关节6 d6 */
 };
+
+/* dh_set_tool_length：设置六轴末端工具长度偏移(mm)，叠加在法兰偏距之上。
+ * 无工具(不装夹爪)传 0；装夹爪按实测夹爪长传入。仅改 DH_TABLE[5].d，FK/IK 自动一致。 */
+void dh_set_tool_length(double tool_mm)
+{
+    DH_TABLE[5].d = DH_D6_FLANGE_MM + tool_mm;
+}
 
 /* 标准 DH 单关节变换：
  * T_i = Rot(z,θ) * Trans(z,d) * Trans(x,a) * Rot(x,α) */

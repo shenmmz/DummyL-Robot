@@ -20,4 +20,7 @@ void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][
 /* 便捷：从 4x4 中取平移向量 (x,y,z) 与欧拉角 ZYX (rx,ry,rz)（rad） */
 void dh_pose_to_xyz_rpy(const double pose[4][4], double xyz[3], double rpy[3]);
 
+/* 设置六轴末端工具长度偏移(mm)：d6 = 法兰偏距 + 工具长。无工具传 0。 */
+void dh_set_tool_length(double tool_mm);
+
 #endif /* DH_H */
