@@ -32,6 +32,13 @@
 #define MOVEJ_POLL_MS      10
 #define MOVEJ_INPOS_TOL   100
 #define MOVEJ_TIMEOUT_MS  60000
+/* 单轴最低转速(rpm)：只用于避免比例分配后向下取整写 0，绝不能抬高。
+ * movej_issue 靠"转速按行程比例分配"让六轴同起同停；一旦某轴被下限截断，
+ * 它就会提前到位，最后一段只剩其余几轴在动，笛卡尔末端就是一段弧——
+ * "逼近目标点画弧"的根因。仿真(94.5mm@10rpm stream)：下限 5rpm 末端偏差 1.01mm，
+ * 改 0.05 后 0.42mm。比例分配保证下限只在"该轴行程<最大轴 0.5%(≈不动)"时生效，
+ * 此时提前到位也不会有可见偏差。 */
+#define MOVEJ_MIN_RPM       0.05
 #define MOVL_ACC_FLOOR_MS   60      /* 加减速安全下限（ms） */
 #define MOVL_STEP_MM        1.0     /* 直线插补弦步长(mm)：越小越直、点越密（封顶 LINE_MAX_POINTS） */
 #define MOVL_STREAM_MIN_MS  20      /* stream 单节拍下限(ms)：防 seg_dt 过小打爆总线；实际节拍由总线耗时与 seg_dt 取大者 */
@@ -351,7 +358,7 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
         double s;
         if (max_dist > 0) {
             s = dist[j] / max_dist * speed;
-            if (s < 5) s = 5;
+            if (s < MOVEJ_MIN_RPM) s = MOVEJ_MIN_RPM;   /* 见 MOVEJ_MIN_RPM 说明，勿抬高 */
         } else {
             s = speed;
         }
