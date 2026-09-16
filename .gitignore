@@ -9,3 +9,6 @@ docs/
 
 # 工具目录
 .workbuddy/
+
+# 测试程序本地编译产物
+tests/*.exe

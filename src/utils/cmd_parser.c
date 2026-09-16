@@ -246,7 +246,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (ci_strcmp(cmd, "MoveL") == 0) {
         /* 笛卡尔直线（对齐 ABB MoveL）：
          * MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]
-         * MODE = stream(周期刷新，默认) / step(逐段到位) */
+         * MODE = sync(单发同步，默认) / step(逐段到位) / stream(周期刷新) */
         char *rest = save;
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
@@ -262,13 +262,13 @@ int cmd_parse(const char *line, ParsedCmd *out)
             tok = strtok_r(NULL, ",", &ctx);
         }
         if (n != 6 && n != 9) {
-            printf("[警告] 用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,step|stream]\n");
+            printf("[警告] 用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,sync|step|stream]\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_MOVEL;
-        /* 默认 step（逐段到位）：stream 会按节拍放大弦步长，段内走关节插补会引入弓高
-         * （实测 120mm@60rpm 约 4mm），故只让用户在慢速/长程需要连续无停顿时显式指定 */
-        out->stream = 0;
+        /* 默认 sync（单发同步）：逐段到位会在每段做一次完整的加减速并等待，
+         * 段数一多就明显一卡一卡（实测 94mm@60rpm 分 95 段） */
+        out->movl_mode = MOVL_MODE_SYNC;
         for (i = 0; i < 6; i++) out->cartesian[i] = v[i];
         if (n == 9) {
             if (v[6] <= 0.0) {
@@ -288,17 +288,19 @@ int cmd_parse(const char *line, ParsedCmd *out)
             out->decel_ms[0] = 90;  /* 默认减速度 ms */
         }
         if (tok != NULL) {                     /* 第 10 段：下发模式关键字 */
-            if (strcmp(tok, "step") == 0) {
-                out->stream = 0;
+            if (strcmp(tok, "sync") == 0) {
+                out->movl_mode = MOVL_MODE_SYNC;
+            } else if (strcmp(tok, "step") == 0) {
+                out->movl_mode = MOVL_MODE_STEP;
             } else if (strcmp(tok, "stream") == 0) {
-                out->stream = 1;
+                out->movl_mode = MOVL_MODE_STREAM;
             } else {
-                printf("[警告] MoveL 模式须为 stream(周期刷新，默认) 或 step(逐段到位)：%s\n", tok);
+                printf("[警告] MoveL 模式须为 sync(单发同步，默认)、step(逐段到位) 或 stream(周期刷新)：%s\n", tok);
                 return CMD_UNKNOWN;
             }
             tok = strtok_r(NULL, ",", &ctx);
             if (tok != NULL) {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,step|stream]\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,sync|step|stream]\n");
                 return CMD_UNKNOWN;
             }
         }
@@ -396,7 +398,7 @@ static const char HELP_TEXT[] =
     "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
     "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
     "  MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]   笛卡尔直线运动；\n"
-    "                          MODE=stream 周期刷新(默认) / step 逐段到位\n"
+    "                          MODE=sync 单发同步(默认) / step 逐段到位 / stream 周期刷新\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"

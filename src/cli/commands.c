@@ -40,6 +40,7 @@
  * 否则段行程 1.4ms 就走完、剩余 95ms 干等，退化成比 step 更差的"走一步停一下"。
  * 换更快的总线或更少的轴时按实测定值调小本常量。 */
 #define MOVL_STREAM_BEAT_S  0.10    /* stream 目标节拍(s)：段行程应≈一个节拍走完，见上方说明 */
+#define MOVL_BOW_SAMPLES    24      /* 单发同步模式下估算弓高的关节空间采样数 */
 
 /* 前向声明 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
@@ -453,18 +454,53 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
     return 0;
 }
 
+/* movl_bow_mm：单发同步模式下，关节空间线性插补相对笛卡尔直线 AB 的最大偏差(弓高, mm)。
+ * 驱动器只对终点做插补，中间走的是关节空间直线，故偏离规划直线，偏离量随行程平方增长。 */
+static double movl_bow_mm(const double q0[6], const double q1[6],
+                          const double a[3], const double b[3])
+{
+    double ab[3], ab2 = 0.0, worst = 0.0;
+    int k, i;
+
+    for (i = 0; i < 3; i++) { ab[i] = b[i] - a[i]; ab2 += ab[i] * ab[i]; }
+    if (ab2 < 1e-9) return 0.0;
+
+    for (k = 1; k < MOVL_BOW_SAMPLES; k++) {
+        double s = (double)k / (double)MOVL_BOW_SAMPLES;
+        double q[6], m[4][4], t = 0.0, d2 = 0.0;
+        for (i = 0; i < 6; i++) q[i] = q0[i] + s * (q1[i] - q0[i]);
+        dh_forward(DH_TABLE, q, m);
+        for (i = 0; i < 3; i++) {
+            double v = m[i][3] - a[i];
+            t += v * ab[i];
+        }
+        t /= ab2;
+        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+        for (i = 0; i < 3; i++) {
+            double e = (m[i][3] - a[i]) - t * ab[i];
+            d2 += e * e;
+        }
+        if (d2 > worst) worst = d2;
+    }
+    return sqrt(worst);
+}
+
 /* ====================== moveL：笛卡尔真直线插补 ======================
  * 实现：起点FK → line_plan(位置线性+姿态SLERP) → line_solve(逐点IK+分支连续)
  *       → line_time_table(按关节限速生成等间隔分段时间表) → 逐段 movej_joints 下发。
  * 末端走空间直线（密集弦逼近），而非单终点 IK 的弧线。
  * P2 电流自适应限速：实时电流逼近 ROBOT_STALL_CURRENT_MA 阈值则按比例降速，
  *       超阈值则急停全部关节（过流=降速/限流，非加力）；阈值=0 时关闭（默认）。
- * step 模式（默认）：逐段下发并等待六轴到位后再发下一段，段间有停顿但绝不过冲。
+ * step 模式：逐段下发并等待六轴到位后再发下一段，段间有停顿但绝不过冲（真直线）。
  * stream 模式：按分段时间表【周期刷新】——段间不等待到位，加减速只在首段写一次，
  *       每个节拍只写速度+绝对位置（6轴×2事务，省去读位置与重复写 profile），
  *       末端走完最后一段后才统一等待真正到位。轨迹连续无段间停顿，
  *       代价是轨迹整体滞后于规划时刻（轴未到位即被下一目标覆盖），
- *       故 stream 依赖节拍 ≥ 总线耗时，开启 P2 电流轮询会拉长每节拍、需放宽节拍。 */
+ *       故 stream 依赖节拍 ≥ 总线耗时，开启 P2 电流轮询会拉长每节拍、需放宽节拍。
+ * sync 模式（默认）：仍用密集弦做整条路径的可达性/限位校验，但【只下发终点】一次，
+ *       六轴按行程比例分配转速同起同停，全程一次加减速，无段间停顿。
+ *       代价是段内走关节空间直线 ⇒ 偏离笛卡尔直线（弓高），已按行程估算并打印。
+ *       P2 电流自适应限速依赖分段，sync 下不生效。 */
 
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
@@ -525,7 +561,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     /* stream：把弦步长放大到"一段≈一个节拍"。
      * 固定 1mm 在 60rpm 下每段仅约 1.4ms，而一个下发节拍要 ~100ms，
      * 轴会瞬间走完再干等，反而比 step 更抖。段数 = 总时长 / 目标节拍。 */
-    if (cmd->stream && count > 2) {
+    if (cmd->movl_mode == MOVL_MODE_STREAM && count > 2) {
         int n_seg = (int)ceil(total_dt / MOVL_STREAM_BEAT_S);
         if (n_seg < 1) n_seg = 1;
         if (n_seg < count - 1) {
@@ -538,10 +574,31 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         }
     }
 
+    /* sync（默认）：只下发终点，六轴按行程分配转速同起同停，全程一次加减速 */
+    if (cmd->movl_mode == MOVL_MODE_SYNC) {
+        const double *q_end = q_seq[count - 1];
+        double dmax = 0.0, sync_rpm;
+        for (j = 0; j < 6; j++) {
+            double d = fabs(q_end[j] - q_start[j]);
+            if (d > dmax) dmax = d;
+        }
+        /* 按笛卡尔规划时长反推转速：保证实际速度不快于指令速度 */
+        sync_rpm = (total_dt > 1e-6) ? (dmax / total_dt / 6.0) : base_rpm;
+        if (sync_rpm > base_rpm) sync_rpm = base_rpm;
+        if (sync_rpm < 1.0) sync_rpm = 1.0;
+        printf("MoveL: 单发同步, 位移 %.1f mm, 速度 %.1f rpm, 预计 %.2f s, "
+               "直线偏差 ≤ %.2f mm（P2 阈值 %d mA %s）\n",
+               dist, sync_rpm, total_dt,
+               movl_bow_mm(q_start, q_end, start_pose, end_pose),
+               (int)stall, (stall > 0.0) ? "开启" : "关闭");
+        movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec);
+        return;
+    }
+
     printf("MoveL: %d 段, 步长 %.1f mm, 位移 %.1f mm, 节拍 %.3f s, 预计 %.2f s, "
            "模式 %s（P2 阈值 %d mA %s）\n",
            count - 1, step_mm, dist, (count > 1) ? seg_dt[0] : 0.0, total_dt,
-           cmd->stream ? "stream" : "step",
+           (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream" : "step",
            (int)stall, (stall > 0.0) ? "开启" : "关闭");
 
     /* 3) 逐段下发（密集弦逼近直线），段间做 P2 电流自适应限速 */
@@ -584,7 +641,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         }
         if (seg_speed < 1.0) seg_speed = 1.0;
 
-        if (cmd->stream) {
+        if (cmd->movl_mode == MOVL_MODE_STREAM) {
             /* 周期刷新：只下发不等待；加减速仅首段写一次，行程参考取上一插补点（省读位置） */
             uint32_t t0 = GetTickCount();
             int r = movej_issue(robot, 6, joints, q_seq[i], q_seq[i - 1],
@@ -604,7 +661,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     }
 
     /* stream：全部段下发完后才统一等待真正到位，避免命令返回时臂仍在运动 */
-    if (cmd->stream) {
+    if (cmd->movl_mode == MOVL_MODE_STREAM) {
         if (s_remain > 0) movej_wait(robot, joints, s_tgt, s_pend, s_remain);
         printf("MoveL stream %d/%d 段完成\n", count - 1, count - 1);
     }

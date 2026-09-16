@@ -36,6 +36,13 @@
 /* 12 号保留（原 CMD_MOSEL 已删除，对应 ABB 中无此语义） */
 #define CMD_MOVEL     13   /* 笛卡尔直线，对应 ABB MoveL */
 
+/* MoveL 下发模式：整段只发一次最平滑，但段内走关节插补会有弓高 */
+typedef enum {
+    MOVL_MODE_SYNC = 0,   /* 单发同步（默认）：整段一次下发，六轴同起同停，无段间停顿 */
+    MOVL_MODE_STEP = 1,   /* 逐段到位：密集弦逼近真直线，段间有停顿 */
+    MOVL_MODE_STREAM = 2  /* 周期刷新：段间不停顿，按节拍刷新目标 */
+} MovlMode;
+
 typedef struct {
     int      type;         /* CMD_* */
     int      joint;        /* 1..6（关节号），0=全部/未指定 */
@@ -50,7 +57,7 @@ typedef struct {
     int      accel_ms[6];  /* 多关节 MoveJ 的加速度 ms */
     int      decel_ms[6];  /* 多关节 MoveJ 的减速度 ms */
     double   cartesian[6]; /* MoveL 目标位姿 X,Y,Z,Rx,Ry,Rz */
-    int      stream;       /* MoveL 下发模式：0=逐段到位(step)，1=周期刷新(stream，默认) */
+    int      movl_mode;    /* MoveL 下发模式，见 MovlMode（默认 MOVL_MODE_SYNC） */
     char     raw[128];     /* 原始输入 */
 } ParsedCmd;
 
