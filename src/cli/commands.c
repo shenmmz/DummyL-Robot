@@ -698,6 +698,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     uint8_t s_pend[7] = {0};
     int s_remain = 0;
     uint32_t mv_t0 = GetTickCount();
+    uint32_t iss_sum = 0, iss_max = 0, iss_n = 0;   /* 单节拍下发实测耗时统计 */
     for (i = 1; i < count; i++) {
         if (stall > 0.0) {
             int max_cur = 0;
@@ -756,6 +757,8 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
             if (period_ms < MOVL_STREAM_MIN_MS) period_ms = MOVL_STREAM_MIN_MS;
             uint32_t used = GetTickCount() - t0;
             if (used < period_ms) Sleep(period_ms - used);
+            iss_sum += used; iss_n++;
+            if (used > iss_max) iss_max = used;
             if (i % 20 == 0) {
                 printf("\rMoveL stream %d/%d 段", i, count - 1);
                 fflush(stdout);
@@ -772,6 +775,17 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                                      start_pose, end_pose);
         printf("MoveL stream %d/%d 段完成，实际耗时 %.2f s（预计 %.2f s）\n",
                count - 1, count - 1, (GetTickCount() - mv_t0) / 1000.0, total_dt);
+        if (iss_n > 0) {
+            double per = (double)iss_sum / (double)iss_n;
+            printf("    下发实测：每节拍 %.0f ms（峰值 %.0f ms），折算单事务 %.1f ms\n",
+                   per, (double)iss_max, per / 12.0);
+            if (per / 12.0 > 8.0)
+                printf("    [提示] 单事务 %.1f ms 明显偏慢（115200 下理论约 2 ms）。\n"
+                       "           常见原因：USB-RS485 转换器的 Latency Timer 为默认 16 ms。\n"
+                       "           设备管理器 → 端口(COM 和 LPT) → 你的串口 → 端口设置 → 高级 →\n"
+                       "           “延迟计时器(毫秒)” 16 改 1 → 确定后重开本程序，可提速数倍。\n",
+                       per / 12.0);
+        }
     }
 }
 
