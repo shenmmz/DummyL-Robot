@@ -51,6 +51,9 @@
  * 否则段行程 1.4ms 就走完、剩余 95ms 干等，退化成比 step 更差的"走一步停一下"。
  * 换更快的总线或更少的轴时按实测定值调小本常量。 */
 #define MOVL_STREAM_BEAT_S  0.10    /* stream 目标节拍(s)：段行程应≈一个节拍走完，见上方说明 */
+#define MOVL_SEG_RAMP_RATIO 3.0     /* 段时长下限 = 本值 ×(ACC+DEC)：段比斜坡短 ⇒ 驱动器反复刹车/爬坡，又慢又顿。
+                                     * 现场标定：每段都是"从 0 加速→巡航→减速到 0"（实测 50 段 ×(99+115)ms ≈ 实跑时长），
+                                     * 所以段数越少越顺；取 3 时巡航占比 ≈63%、弓高仍 <0.15mm，是顺与直的折中。 */
 #define MOVL_BOW_SAMPLES    24      /* 估算弓高的关节空间采样数（每段） */
 #define MOVL_BOW_WARN_MM    1.0     /* 弓高超过此值就显式警告：说明段数被节拍压得太少 */
 
@@ -618,9 +621,15 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 
     /* stream：把弦步长放大到"一段≈一个节拍"。
      * 固定 1mm 在 60rpm 下每段仅约 1.4ms，而一个下发节拍要 ~100ms，
-     * 轴会瞬间走完再干等，反而比 step 更抖。段数 = 总时长 / 目标节拍。 */
+     * 轴会瞬间走完再干等，反而比 step 更抖。段数 = 总时长 / 目标节拍。
+     * 节拍还必须 ≥ 加减速时间之和：段比斜坡还短时，驱动器每段都在刹车+重新爬坡，
+     * 既慢（实测慢 3 倍）又顿。取 max(总线节拍, MOVL_SEG_RAMP_RATIO×(ACC+DEC))。 */
     if (cmd->movl_mode == MOVL_MODE_STREAM && count > 2) {
-        int n_seg = (int)ceil(total_dt / MOVL_STREAM_BEAT_S);
+        double beat_s = MOVL_STREAM_BEAT_S;
+        double ramp_s = MOVL_SEG_RAMP_RATIO * (double)(acc + dec) / 1000.0;
+        int n_seg;
+        if (ramp_s > beat_s) beat_s = ramp_s;
+        n_seg = (int)ceil(total_dt / beat_s);
         if (n_seg < 1) n_seg = 1;
         if (n_seg < count - 1) {
             step_mm = dist / (double)n_seg;
@@ -676,8 +685,10 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         /* 段时长若短于加减速时间之和，驱动器每段都在重新爬坡、达不到指令转速，
          * 实际耗时会显著长于"预计"（预计按匀速算）。实测：段 99ms / 加减速 230ms → 慢 2.9 倍 */
         if (count > 1 && seg_dt[0] * 1000.0 < (double)(acc + dec))
-            printf("\n[提示] 段时长 %.0f ms 短于加减速时间之和 %d ms，驱动器每段都在重新爬坡，"
-                   "实际耗时会明显长于预计；想提速请调小 ACC/DEC 或放慢速度",
+            printf("\n[提示] 段时长 %.0f ms 短于加减速时间之和 %d ms：每段都爬不完坡就要刹车，"
+                   "实际耗时会明显长于预计（实测慢约 2~3 倍）。\n"
+                   "       想又快又顺就调小 ACC/DEC（斜坡短 ⇒ 允许更多段、弓高更小）；"
+                   "想更少停顿就调大 ACC/DEC（但会压低段数、弓高变大）",
                    seg_dt[0] * 1000.0, acc + dec);
         printf("\n");
     }
@@ -715,13 +726,21 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         }
 
         /* 本段速度：取对时间最紧的关节所需【电机轴】rpm
-         * （movej_issue 按电机轴行程比例分配，整段同时间到达） */
+         * （movej_issue 按电机轴行程比例分配，整段同时间到达）
+         *
+         * 梯形斜坡补偿：走完一段的实际耗时 = 行程/巡航速度 + (ACC+DEC)/2，
+         * 直接按 行程/段时长 给速度会永远慢一截（实测慢 3 倍：预计 3.87s 实跑 11.36s）。
+         * 故把可用时间扣掉 (ACC+DEC)/2 再算速度；下限取 0.25×段时长，防段时长被压得
+         * 接近斜坡时间时速度发散。 */
         double seg_speed = 0.0;
         {
             const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+            double t_eff = seg_dt[i - 1] - (double)(acc + dec) / 2000.0;
+            double t_floor = 0.25 * seg_dt[i - 1];
+            if (t_eff < t_floor) t_eff = t_floor;
             for (j = 0; j < 6; j++) {
                 double d = fabs(q_seq[i][j] - q_seq[i - 1][j]) * (double)red[j];
-                double rpm = d / seg_dt[i - 1] / 6.0;
+                double rpm = d / t_eff / 6.0;
                 if (rpm > seg_speed) seg_speed = rpm;
             }
         }
