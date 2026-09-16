@@ -53,7 +53,7 @@ static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, dou
 static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg, double *yaw_deg)
 {
     double roll = atan2(2*(q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
-    double pitch = asin(-2*(q[0]*q[2] - q[1]*q[3]));
+    double pitch = asin(2*(q[0]*q[2] - q[1]*q[3]));
     double yaw = atan2(2*(q[0]*q[3] + q[1]*q[2]), 1 - 2*(q[2]*q[2] + q[3]*q[3]));
     *roll_deg = roll / LINE_DEG2RAD;
     *pitch_deg = pitch / LINE_DEG2RAD;
