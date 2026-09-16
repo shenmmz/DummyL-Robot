@@ -49,11 +49,29 @@
 #define MOVL_STREAM_BEAT_S  0.10    /* stream 目标节拍(s)：段行程应≈一个节拍走完，见上方说明 */
 #define MOVL_BOW_SAMPLES    24      /* 单发同步模式下估算弓高的关节空间采样数 */
 
-/* 前向声明 */
+/* 前向声明：line_a/line_b 非空时，等待循环中顺便打印末端相对理想直线的实时偏差 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
                           const double angles[6], double speed,
-                          int accel_ms, int decel_ms);
+                          int accel_ms, int decel_ms,
+                          const double *line_a, const double *line_b);
 static void movej_multi(Robot *robot, const ParsedCmd *cmd);
+
+/* movl_point_dev_mm：点 x 到直线段 AB 的距离(mm)，用于实测轨迹偏差读数 */
+static double movl_point_dev_mm(const double x[3], const double a[3], const double b[3])
+{
+    double ab[3], ab2 = 0.0, t = 0.0, d2 = 0.0;
+    int i;
+    for (i = 0; i < 3; i++) { ab[i] = b[i] - a[i]; ab2 += ab[i] * ab[i]; }
+    if (ab2 < 1e-9) return 0.0;
+    for (i = 0; i < 3; i++) t += (x[i] - a[i]) * ab[i];
+    t /= ab2;
+    if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+    for (i = 0; i < 3; i++) {
+        double e = (x[i] - a[i]) - t * ab[i];
+        d2 += e * e;
+    }
+    return sqrt(d2);
+}
 
 /* ====================== 电机实时监控线程 ====================== */
 
@@ -376,9 +394,12 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
     return remain;
 }
 
-/* movej_wait：轮询等待 pend 中轴到位（位置进容差即算到位），超时急停 */
+/* movej_wait：轮询等待 pend 中轴到位（位置进容差即算到位），超时急停。
+ * line_a/line_b 非空时额外打印末端相对理想直线的实时偏差(mm)——轮询本来就要读
+ * 六轴角度，故该读数不增加任何总线开销。 */
 static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
-                       uint8_t pend[7], int remain)
+                       uint8_t pend[7], int remain,
+                       const double *line_a, const double *line_b)
 {
     uint32_t start_ms = GetTickCount();
     int j;
@@ -394,14 +415,17 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
             }
             break;
         }
+        double qnow[6];
+        for (j = 0; j < 6; j++) qnow[j] = robot_read_position_deg(robot, j + 1, NULL);
         printf("\rJ1=%6.2f J2=%6.2f J3=%6.2f J4=%6.2f J5=%6.2f J6=%6.2f spd=%d",
-               robot_read_position_deg(robot, 1, NULL),
-               robot_read_position_deg(robot, 2, NULL),
-               robot_read_position_deg(robot, 3, NULL),
-               robot_read_position_deg(robot, 4, NULL),
-               robot_read_position_deg(robot, 5, NULL),
-               robot_read_position_deg(robot, 6, NULL),
+               qnow[0], qnow[1], qnow[2], qnow[3], qnow[4], qnow[5],
                motor_read_speed(robot, joints[0]));
+        if (line_a != NULL && line_b != NULL) {
+            double m[4][4], xyz[3];
+            dh_forward(DH_TABLE, qnow, m);
+            for (j = 0; j < 3; j++) xyz[j] = m[j][3];
+            printf("  偏差%6.2fmm", movl_point_dev_mm(xyz, line_a, line_b));
+        }
         fflush(stdout);
         for (j = 1; j <= 6; j++) {
             if (!pend[j]) continue;
@@ -420,14 +444,15 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
 /* movej_joints：多关节同时运动完整流程 = 下发(读实际位置) + 等待同步到位 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
                          const double angles[6], double speed,
-                         int accel_ms, int decel_ms)
+                         int accel_ms, int decel_ms,
+                         const double *line_a, const double *line_b)
 {
     int32_t tgt[7] = {0};
     uint8_t pend[7] = {0};
     int remain = movej_issue(robot, num_joints, joints, angles, NULL,
                              speed, accel_ms, decel_ms, 1, tgt, pend);
     if (remain <= 0) return;
-    movej_wait(robot, joints, tgt, pend, remain);
+    movej_wait(robot, joints, tgt, pend, remain, line_a, line_b);
 }
 
 /* movej_multi：多关节同时运动（从 ParsedCmd 调用） */
@@ -441,7 +466,7 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
         idx++;
     }
     movej_joints(robot, cmd->num_joints, joints, angles,
-                 cmd->speeds[0], cmd->accel_ms[0], cmd->decel_ms[0]);
+                 cmd->speeds[0], cmd->accel_ms[0], cmd->decel_ms[0], NULL, NULL);
 }
 
 /* movl_plan：按给定弦步长做直线离散 + 逐点 IK + 分段时间表（可被 stream 重规划复用） */
@@ -598,7 +623,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                dist, sync_rpm, total_dt,
                movl_bow_mm(q_start, q_end, start_pose, end_pose),
                (int)stall, (stall > 0.0) ? "开启" : "关闭");
-        movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec);
+        movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec, start_pose, end_pose);
         return;
     }
 
@@ -663,13 +688,15 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                 fflush(stdout);
             }
         } else {
-            movej_joints(robot, 6, joints, q_seq[i], seg_speed, acc, dec);
+            movej_joints(robot, 6, joints, q_seq[i], seg_speed, acc, dec,
+                         start_pose, end_pose);
         }
     }
 
     /* stream：全部段下发完后才统一等待真正到位，避免命令返回时臂仍在运动 */
     if (cmd->movl_mode == MOVL_MODE_STREAM) {
-        if (s_remain > 0) movej_wait(robot, joints, s_tgt, s_pend, s_remain);
+        if (s_remain > 0) movej_wait(robot, joints, s_tgt, s_pend, s_remain,
+                                     start_pose, end_pose);
         printf("MoveL stream %d/%d 段完成\n", count - 1, count - 1);
     }
 }
