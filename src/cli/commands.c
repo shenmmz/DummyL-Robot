@@ -33,6 +33,7 @@
 #define MOVEJ_INPOS_TOL   100
 #define MOVEJ_TIMEOUT_MS  60000
 #define MOVL_ACC_FLOOR_MS   60      /* 加减速安全下限（ms） */
+#define MOVL_STEP_MM        1.0     /* 直线插补弦步长(mm)：越小越直、点越密（封顶 LINE_MAX_POINTS） */
 
 /* 前向声明 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
@@ -408,55 +409,120 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
                  cmd->speeds[0], cmd->accel_ms[0], cmd->decel_ms[0]);
 }
 
-/* ====================== moveL：笛卡尔直线运动 ====================== */
-/* 注意：LEESN驱动器仅支持关节空间绝对位置运动（motor_move_abs），
- * 驱动器内部做关节梯形profile，TCP轨迹必然为弧线。
- * MoveL 实现为：终点逆解 + movej_joints 关节空间平滑运动。 */
+/* ====================== moveL：笛卡尔真直线插补 ======================
+ * 实现：起点FK → line_plan(位置线性+姿态SLERP) → line_solve(逐点IK+分支连续)
+ *       → line_time_table(按关节限速生成等间隔分段时间表) → 逐段 movej_joints 下发。
+ * 末端走空间直线（密集弦逼近），而非单终点 IK 的弧线。
+ * P2 电流自适应限速：实时电流逼近 ROBOT_STALL_CURRENT_MA 阈值则按比例降速，
+ *       超阈值则急停全部关节（过流=降速/限流，非加力）；阈值=0 时关闭（默认）。
+ * stream/step 模式：当前均按逐段到位下发（驱动侧梯形 profile + 弦逼近已足够直）；
+ *       非阻塞前瞻连续 stream 留作后续增强。 */
 
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
-    double end_m[4][4];
-    double sols[IK_MAX_SOLUTIONS][6];
-    double filtered[IK_MAX_SOLUTIONS][6];
-    double q_start[6], q_end[6];
+    const double RAD2DEG = 180.0 / 3.14159265358979323846;
+    double q_start[6];
+    double start_pose[6];
+    double end_pose[6];
+    double q_seq[LINE_MAX_POINTS][6];
+    double seg_dt[LINE_MAX_SEGS];
+    double vmax[6];
     JointLimit limits[ROBOT_JOINT_COUNT];
-    int cnt, n, j;
-
-    /* 1) 读起点关节角 */
-    for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
-        q_start[j] = robot_read_position_deg(robot, j + 1, NULL);
-    }
-
-    /* 2) 终点逆解 + 分支连续选解 */
-    line_pose_to_matrix(cmd->cartesian, end_m);
-    cnt = ik_solve(DH_TABLE, end_m, sols);
-    if (cnt <= 0) {
-        printf("[错误] MoveL 终点逆解失败（无解或超出工作空间），未下发运动\n");
-        return;
-    }
-    const double limit_min[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
-    const double limit_max[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MAX_DEG;
-    for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
-        limits[j].min_deg = limit_min[j];
-        limits[j].max_deg = limit_max[j];
-    }
-    n = ik_unwrap_solutions(sols, cnt, q_start, filtered);
-    n = ik_filter_by_limits(filtered, n, limits, filtered);
-    if (n <= 0) {
-        printf("[错误] MoveL 终点所有候选解超出关节软限位，未下发运动\n");
-        return;
-    }
-    if (ik_select_best_continuous(filtered, n, q_start, NULL, q_end) != 0) {
-        printf("[错误] MoveL 终点选解失败，未下发运动\n");
-        return;
-    }
-
-    /* 3) movej_joints：关节空间平滑运动（驱动器内部梯形profile） */
+    int joints[6] = {1, 2, 3, 4, 5, 6};
+    int count, fail_idx = -1, i, j;
+    double total_dt = 0.0;
+    double base_rpm = (cmd->speeds[0] > 0) ? cmd->speeds[0] : 60.0;
+    double speed_rpm = base_rpm;
     int acc = (cmd->accel_ms[0] > 0) ? cmd->accel_ms[0] : MOVL_ACC_FLOOR_MS;
     int dec = (cmd->decel_ms[0] > 0) ? cmd->decel_ms[0] : MOVL_ACC_FLOOR_MS;
-    int joints[6] = {1, 2, 3, 4, 5, 6};
-    movej_joints(robot, 6, joints, q_end,
-                 cmd->speeds[0] > 0 ? cmd->speeds[0] : 1.0, acc, dec);
+    double stall = ROBOT_STALL_CURRENT_MA;   /* 0 = 关闭 */
+
+    /* 1) 起点关节角 + FK 求起点笛卡尔位姿 */
+    for (j = 0; j < 6; j++) q_start[j] = robot_read_position_deg(robot, j + 1, NULL);
+    {
+        double m[4][4], rpy[3];
+        dh_forward(DH_TABLE, q_start, m);
+        dh_pose_to_xyz_rpy(m, start_pose, rpy);
+        start_pose[3] = rpy[0] * RAD2DEG;
+        start_pose[4] = rpy[1] * RAD2DEG;
+        start_pose[5] = rpy[2] * RAD2DEG;
+    }
+    for (j = 0; j < 6; j++) end_pose[j] = cmd->cartesian[j];
+
+    /* 2) 按位移定插补点数 → 直线离散 + 逐点 IK + 分段时间表 */
+    double dx = end_pose[0] - start_pose[0];
+    double dy = end_pose[1] - start_pose[1];
+    double dz = end_pose[2] - start_pose[2];
+    double dist = sqrt(dx * dx + dy * dy + dz * dz);
+    count = line_count_for_distance(dist, MOVL_STEP_MM);
+
+    LinePath path;
+    if (line_plan(start_pose, end_pose, count, &path) != 0) {
+        printf("[错误] MoveL 直线离散失败，未下发\n");
+        return;
+    }
+    {
+        const double lmin[6] = ROBOT_JOINT_LIMIT_MIN_DEG;
+        const double lmax[6] = ROBOT_JOINT_LIMIT_MAX_DEG;
+        for (j = 0; j < 6; j++) {
+            limits[j].min_deg = lmin[j];
+            limits[j].max_deg = lmax[j];
+        }
+    }
+    if (line_solve(&path, DH_TABLE, limits, q_start, q_seq, &fail_idx) != 0) {
+        printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位，未下发\n", fail_idx);
+        return;
+    }
+    {
+        double vmax_deg_s = speed_rpm * 6.0;   /* rpm -> deg/s */
+        for (j = 0; j < 6; j++) vmax[j] = vmax_deg_s;
+    }
+    if (line_time_table(q_seq, count, vmax, seg_dt, &total_dt) != 0) {
+        printf("[错误] MoveL 分段时间表生成失败，未下发\n");
+        return;
+    }
+    printf("MoveL: %d 段, 位移 %.1f mm, 预计 %.2f s（P2 阈值 %d mA %s）\n",
+           count - 1, dist, total_dt, (int)stall,
+           (stall > 0.0) ? "开启" : "关闭");
+
+    /* 3) 逐段下发（密集弦逼近直线），段间做 P2 电流自适应限速 */
+    for (i = 1; i < count; i++) {
+        if (stall > 0.0) {
+            int max_cur = 0;
+            for (j = 0; j < 6; j++) {
+                int cur = robot_read_current_ma(robot, j + 1);
+                if (cur > 0 && cur > max_cur) max_cur = cur;
+            }
+            if (max_cur >= (int)stall) {
+                printf("[过流保护] 实时电流 %d mA 超阈值 %d mA，急停全部关节\n",
+                       max_cur, (int)stall);
+                for (j = 0; j < 6; j++)
+                    if (!robot_is_masked(robot, j + 1)) motor_estop(robot, j + 1);
+                return;
+            } else if (max_cur > (int)(stall * 0.6)) {
+                double factor = (double)stall / max_cur * 0.8;   /* 留 20% 余量 */
+                if (factor > 1.0) factor = 1.0;
+                speed_rpm = base_rpm * factor;
+                if (speed_rpm < 1.0) speed_rpm = 1.0;
+                {
+                    double vmax_deg_s = speed_rpm * 6.0;
+                    for (j = 0; j < 6; j++) vmax[j] = vmax_deg_s;
+                }
+                if ((count - i) >= 2)
+                    line_time_table(&q_seq[i], count - i, vmax, &seg_dt[i], NULL);
+            }
+        }
+
+        /* 本段速度：取对时间最紧的关节所需 rpm（movej_joints 按比例同步，整段同时间到达） */
+        double seg_speed = 0.0;
+        for (j = 0; j < 6; j++) {
+            double d = fabs(q_seq[i][j] - q_seq[i - 1][j]);
+            double rpm = d / seg_dt[i - 1] / 6.0;   /* deg/s -> rpm */
+            if (rpm > seg_speed) seg_speed = rpm;
+        }
+        if (seg_speed < 1.0) seg_speed = 1.0;
+        movej_joints(robot, 6, joints, q_seq[i], seg_speed, acc, dec);
+    }
 }
 
 /* cmd_getpos：读取当前关节机械角，经正运动学求末端笛卡尔坐标与姿态 */

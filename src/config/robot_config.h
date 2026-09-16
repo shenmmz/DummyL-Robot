@@ -28,4 +28,10 @@
 #define ROBOT_JOINT_LIMIT_MIN_DEG { -170.0, -72.0,  30.0, -360.0, -95.0, -360.0 }
 #define ROBOT_JOINT_LIMIT_MAX_DEG {  179.0,  90.0, 180.0,  360.0,  95.0,  360.0 }
 
+/* 过流保护阈值（mA）：MoveL 轨迹运行中轮询 6 轴实时电流(0x001A)，
+ * 逼近则按比例降速、超阈值则急停（过流=降速/限流，非加力）。
+ * 0 = 关闭（默认）。实际值由用户按电机座额定电流/堵转电流填入；
+ * 参考：J4 用 35 号座，cruise ~352mA / stall ~2186mA。 */
+#define ROBOT_STALL_CURRENT_MA 0
+
 #endif /* ROBOT_CONFIG_H */
