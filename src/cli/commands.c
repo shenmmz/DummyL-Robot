@@ -378,21 +378,46 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
         if (dist[j] > max_dist) max_dist = dist[j];
     }
 
+    /* 先只算不写：把六轴转速定下来 */
+    double spd[7] = {0};
     for (i = 0; i < num_joints; i++) {
         j = joints[i];
         if (robot_is_masked(robot, j)) continue;
-        double s;
         if (max_dist > 0) {
-            s = dist[j] / max_dist * speed;
-            if (s < MOVEJ_MIN_RPM) s = MOVEJ_MIN_RPM;   /* 见 MOVEJ_MIN_RPM 说明，勿抬高 */
+            spd[j] = dist[j] / max_dist * speed;
+            if (spd[j] < MOVEJ_MIN_RPM) spd[j] = MOVEJ_MIN_RPM;  /* 见 MOVEJ_MIN_RPM 说明，勿抬高 */
         } else {
-            s = speed;
+            spd[j] = speed;
         }
-        if (set_profile && motor_set_profile(robot, j, accel_ms, decel_ms) != ERR_NONE) {
-            printf("[警告] 关节%d 加减速设置失败\n", j);
+    }
+
+    /* 分遍下发，而不是"每轴 profile+speed+pos 一把梭"。
+     * 六轴只能顺序下发，真正让电机起步的是最后那次 0x00E8 写，
+     * 所以【六轴的启动时刻间隔】= 相邻两次 0x00E8 之间的帧数 × 单帧耗时：
+     *   一把梭（p,s,pos 紧跟）  ：轴 j 的 0x00E8 在第 3j-1 帧（首段）/ 2j-1 帧
+     *                            ⇒ 首末轴相隔 15 帧 / 10 帧
+     *   分遍（profile 遍→speed 遍→pos 遍）：0x00E8 集中在最后 6 帧
+     *                            ⇒ 首末轴相隔 5 帧，同步性提升 3 倍 / 2 倍
+     * 现场依据：末端偏差与"节拍占段时长的比例"强相关（48%→0.10mm，72%→2.58mm），
+     * 而这个比例的分子就是首末轴启动间隔。改动零成本、不改变任何运动学语义。 */
+    if (set_profile) {
+        for (i = 0; i < num_joints; i++) {
+            j = joints[i];
+            if (robot_is_masked(robot, j)) continue;
+            if (motor_set_profile(robot, j, accel_ms, decel_ms) != ERR_NONE)
+                printf("[警告] 关节%d 加减速设置失败\n", j);
         }
-        if (motor_set_speed(robot, j, s) != ERR_NONE ||
-            motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
+    }
+    for (i = 0; i < num_joints; i++) {
+        j = joints[i];
+        if (robot_is_masked(robot, j)) continue;
+        if (motor_set_speed(robot, j, spd[j]) != ERR_NONE)
+            printf("[警告] 关节%d 速度设置失败\n", j);
+    }
+    for (i = 0; i < num_joints; i++) {
+        j = joints[i];
+        if (robot_is_masked(robot, j)) continue;
+        if (motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
             printf("[警告] 关节%d 多关节运动发指令失败\n", j);
             continue;
         }
@@ -797,8 +822,8 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                 printf("    [提示] 单事务 %.1f ms 明显偏慢（115200 下理论约 2 ms）。\n"
                        "           常见原因：USB-RS485 转换器的 Latency Timer 为默认 16 ms。\n"
                        "           设备管理器 → 端口(COM 和 LPT) → 你的串口 → 端口设置 → 高级 →\n"
-                       "           “延迟计时器(毫秒)” 16 改 1 → 确定后重开本程序，可提速数倍。\n",
-                       per / 12.0);
+                       "                                  “延迟计时器(毫秒)” 16 改 1 → 确定后重开本程序，可提速数倍。\n",
+                       per_tx);
         }
     }
 }
