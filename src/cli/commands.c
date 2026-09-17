@@ -699,6 +699,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     int s_remain = 0;
     uint32_t mv_t0 = GetTickCount();
     uint32_t iss_sum = 0, iss_max = 0, iss_n = 0;   /* 单节拍下发实测耗时统计 */
+    uint32_t iss_tx = 0;                            /* 累计事务数：首段含加减速 = 3/轴，其余 2/轴 */
     for (i = 1; i < count; i++) {
         if (stall > 0.0) {
             int max_cur = 0;
@@ -758,6 +759,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
             uint32_t used = GetTickCount() - t0;
             if (used < period_ms) Sleep(period_ms - used);
             iss_sum += used; iss_n++;
+            iss_tx += (i == 1) ? 18 : 12;   /* set_profile 合并为 1 帧，故首段 3 帧/轴 */
             if (used > iss_max) iss_max = used;
             if (i % 20 == 0) {
                 printf("\rMoveL stream %d/%d 段", i, count - 1);
@@ -777,9 +779,21 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                count - 1, count - 1, (GetTickCount() - mv_t0) / 1000.0, total_dt);
         if (iss_n > 0) {
             double per = (double)iss_sum / (double)iss_n;
+            double per_tx = (double)iss_sum / (double)iss_tx;
+            double seg_ms = (count > 1) ? seg_dt[0] * 1000.0 : 0.0;
             printf("    下发实测：每节拍 %.0f ms（峰值 %.0f ms），折算单事务 %.1f ms\n",
-                   per, (double)iss_max, per / 12.0);
-            if (per / 12.0 > 8.0)
+                   per, (double)iss_max, per_tx);
+            /* 六轴是【顺序】下发的：第 6 轴比第 1 轴晚启动约一整个节拍。
+             * 节拍占段时长的比例越大，段内各轴行程完成度越不一致 ⇒ 路径被扭曲，
+             * 实测偏差会远大于弓高预测（实测：占比 48% → 0.10mm；72% → 2.58mm）。 */
+            if (seg_ms > 0.0)
+                printf("    节拍占段时长 %.0f%%：六轴顺序下发，末轴比首轴晚启动约 %.0f ms\n",
+                       100.0 * per / seg_ms, per);
+            if (seg_ms > 0.0 && per > 0.25 * seg_ms)
+                printf("    [提示] 节拍超过段时长的 25%%，六轴起步严重不同步，末端偏差会远大于弓高。\n"
+                       "           优先把总线提速（延迟计时器改 1ms / 波特率 921600），\n"
+                       "           其次加长段时长（调大 ACC/DEC 或放慢速度）。\n");
+            if (per_tx > 8.0)
                 printf("    [提示] 单事务 %.1f ms 明显偏慢（115200 下理论约 2 ms）。\n"
                        "           常见原因：USB-RS485 转换器的 Latency Timer 为默认 16 ms。\n"
                        "           设备管理器 → 端口(COM 和 LPT) → 你的串口 → 端口设置 → 高级 →\n"
