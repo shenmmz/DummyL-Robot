@@ -294,8 +294,11 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 out->movl_mode = MOVL_MODE_STEP;
             } else if (strcmp(tok, "stream") == 0) {
                 out->movl_mode = MOVL_MODE_STREAM;
+            } else if (strcmp(tok, "smooth") == 0) {
+                out->movl_mode = MOVL_MODE_SMOOTH;
             } else {
-                printf("[警告] MoveL 模式须为 sync(单发同步，默认)、step(逐段到位) 或 stream(周期刷新)：%s\n", tok);
+                printf("[警告] MoveL 模式须为 sync(按弓高预算分段，默认)、step(逐段到位)、"
+                       "stream(周期刷新) 或 smooth(流畅优先，不分段)：%s\n", tok);
                 return CMD_UNKNOWN;
             }
             tok = strtok_r(NULL, ",", &ctx);
@@ -338,6 +341,129 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->type = CMD_MOTOR;
     } else if (strcmp(cmd, "getpos") == 0) {
         out->type = CMD_GETPOS;
+    } else if (strcmp(cmd, "fk") == 0) {
+        /* fk:J1,J2,J3,J4,J5,J6 —— 离线正解预览：不动臂、不下发、不读硬件。
+         * 用来把"模型说应该是什么样"和 getpos 读到的真机值直接对照。 */
+        char *arg = strtok_r(NULL, ":", &save);
+        if (arg == NULL) {
+            printf("[警告] 用法: fk:J1,J2,J3,J4,J5,J6   例 fk:0,0,90,0,90,0\n");
+            return CMD_UNKNOWN;
+        }
+        {
+            char *ctx2 = NULL;
+            char *tok2 = strtok_r(arg, ",", &ctx2);
+            int n = 0;
+            while (tok2 != NULL && n < 6) {
+                double v;
+                if (!parse_full_number(tok2, &v)) {
+                    printf("[警告] fk 第 %d 个关节角须为纯数字：%s\n", n + 1, tok2);
+                    return CMD_UNKNOWN;
+                }
+                out->angles[n++] = v;
+                tok2 = strtok_r(NULL, ",", &ctx2);
+            }
+            if (n != 6) {
+                printf("[警告] 用法: fk:J1,J2,J3,J4,J5,J6（必须 6 个关节角，单位度）\n");
+                return CMD_UNKNOWN;
+            }
+            out->num_joints = 6;
+            out->type = CMD_FK;
+        }
+    } else if (strcmp(cmd, "diag") == 0) {
+        /* diag：总线体检。不动臂，只是拿"读位置"这类只读事务打点，
+         * 把 flush / write / read 三段耗时分开，找出单事务 26ms 的真正去向。 */
+        out->type = CMD_DIAG;
+    } else if (strcmp(cmd, "bcast") == 0) {
+        /* bcast：广播帧验证。用地址 0 写一个无害寄存器（运行速度），
+         * 看几轴跟着变，以此判断 LEESN 是否真的执行广播帧。 */
+        out->type = CMD_BCAST;
+    } else if (strcmp(cmd, "nrtest") == 0) {
+        /* nrtest：noread（只写不等响应）帧完整性测试。
+         * 反复给六轴下发【当前位置】（原地不动，零风险），
+         * 测出"连发不撞车"所需的帧间延迟，以及每轮真实耗时。 */
+        out->type = CMD_NRTEST;
+    } else if (strcmp(cmd, "curtest") == 0) {
+        /* curtest：堵转阈值标定用的电流实测工具（读 0x001A）。
+         *   curtest                 静止采样六轴"使能保持电流"，一动不动
+         *   curtest:N[:DEG[:RPM]]   关节 N 走 +DEG 再走回原位，全程高速采样该轴电流
+         * DEG 默认 2°，上限 10°（摆太大会撞到东西）；RPM 默认 30，上限 300。 */
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *c = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: curtest  或  curtest:关节号[:摆幅度[:转速rpm]]\n");
+            return CMD_UNKNOWN;
+        }
+        out->type = CMD_CURTEST;
+        out->joint = 0;          /* 0 = 静止六轴 */
+        out->angle_deg = 2.0;
+        out->speed_rpm = 30.0;
+        if (a == NULL) return CMD_CURTEST;    /* 无参数：静止采样 */
+        {
+            double jn;
+            if (!parse_full_number(a, &jn) || jn < 1.0 || jn > 6.0 ||
+                jn != (double)(int)jn) {
+                printf("[警告] curtest 关节号须为 1..6 的整数：%s\n", a);
+                return CMD_UNKNOWN;
+            }
+            out->joint = (int)jn;
+        }
+        if (b != NULL) {
+            double d;
+            if (!parse_full_number(b, &d) || d <= 0.0 || d > 10.0) {
+                printf("[警告] curtest 摆幅须在 (0, 10] 度之间（摆太大会撞到东西）：%s\n", b);
+                return CMD_UNKNOWN;
+            }
+            out->angle_deg = d;
+        }
+        if (c != NULL) {
+            double r;
+            if (!parse_full_number(c, &r) || r <= 0.0 || r > 300.0) {
+                printf("[警告] curtest 转速须在 (0, 300] rpm 之间：%s\n", c);
+                return CMD_UNKNOWN;
+            }
+            out->speed_rpm = r;
+        }
+    } else if (strcmp(cmd, "stall") == 0) {
+        /* stall：逐轴堵转电流阈值。
+         *   stall          显示六轴阈值 + 各轴最新电流快照（不下发、不动臂）
+         *   stall:N        显示关节 N 的阈值与电流
+         *   stall:N:MA     设置关节 N 的阈值为 MA mA（0 = 关闭该轴检测）
+         * 运行时改只影响本次运行；要持久化请写 ini [stall] j1..j6。 */
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: stall  或  stall:关节号  或  stall:关节号:阈值mA\n");
+            return CMD_UNKNOWN;
+        }
+        out->type = CMD_STALL;
+        out->joint = 0;
+        out->param = -1.0;
+        if (a == NULL) return CMD_STALL;
+        {
+            double jn;
+            if (!parse_full_number(a, &jn) || jn < 1.0 || jn > 6.0 ||
+                jn != (double)(int)jn) {
+                printf("[警告] stall 关节号须为 1..6 的整数：%s\n", a);
+                return CMD_UNKNOWN;
+            }
+            out->joint = (int)jn;
+        }
+        if (b != NULL) {
+            double ma;
+            if (!parse_full_number(b, &ma) || ma < 0.0 || ma > 20000.0) {
+                printf("[警告] stall 阈值须在 [0, 20000] mA 之间（0=关闭该轴检测）：%s\n", b);
+                return CMD_UNKNOWN;
+            }
+            out->param = ma;
+        }
+    } else if (strcmp(cmd, "poseok") == 0) {
+        /* poseok：人工解除"位姿不可信"闸门。
+         * 只在确认"越软限位是误判"时使用（例如某轴本来就该停在限位附近）。
+         * 若零点真的丢了，解锁后所有位姿与运动都是错的。 */
+        out->type = CMD_POSEOK;
     } else if (strncmp(cmd, "zero", 4) == 0) {
         if (strstr(out->raw, "save") != NULL) {
             /* zero_save:v1,v2,v3,v4,v5,v6：直接保存指定的零点值。
@@ -404,7 +530,20 @@ static const char HELP_TEXT[] =
     "  enable                恢复使能所有关节\n"
     "  enable:N              仅单独使能关节 N\n"
     "  motor                 启动/停止电机实时监控（1S/次循环显示）\n"
-    "  getpos                读取当前关节角(度)与笛卡尔坐标(X,Y,Z,RPY)\n"
+    "  getpos                读取当前关节角(度)、笛卡尔坐标(X,Y,Z,RPY)与法兰倾角\n"
+    "  fk:J1,J2,J3,J4,J5,J6  离线正解预览：按 DH 表算出该组关节角对应的位姿、\n"
+    "                        法兰倾角与臂形；不动臂不下发，用来和 getpos 对照\n"
+    "  diag                  总线时延体检：把单事务拆成 flush/write/read 三段计时，\n"
+    "  bcast                 广播帧验证：地址0写速度再逐轴读回，看几轴响应广播\n"
+    "                        并对照\"只写不读\"，定位刷新率瓶颈；不动臂\n"
+    "  curtest               电流实测（标定堵转阈值用）：静止采样六轴保持电流，不动臂\n"
+    "  curtest:N[:DEG[:RPM]] 关节N 走 +DEG 度再走回原位，全程高速采样该轴电流，\n"
+    "                        输出 保持/运动 的最小·均值·最大(mA) 与建议阈值区间\n"
+    "  stall                 显示六轴堵转阈值(mA)与各轴最新电流\n"
+    "  stall:N:MA            运行时设置关节N的堵转阈值为 MA mA（0=关闭该轴）；\n"
+    "                        只改本次运行，持久化请写 ini [stall] 的 j1..j6\n"
+    "  poseok                人工解除「位姿不可信」闸门（零点丢失时运动命令会被锁住；\n"
+    "                        确认是误判才用，否则所有位姿与运动都是错的）\n"
     "  zero                  显示当前零点与机械角\n"
     "  zero_save:v1,v2,v3,v4,v5,v6  保存指定的零点标定值\n"
     "  help                  帮助\n"

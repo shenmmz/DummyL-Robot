@@ -43,6 +43,54 @@ ErrCode motor_write_i32(Robot *robot, int joint, uint16_t reg, int32_t val)
     return robot_request(robot, frame, len, &resp);
 }
 
+/* motor_write_i32_noread：与 motor_write_i32 完全相同的帧，但【不等从站响应】。
+ * 只用于总线时延对照测量，以及将来确认可行后的纯写快路径。
+ * 见 modbus_transact_noread 说明：RS485 半双工下从站仍会回帧，
+ * 调用方必须自行保证"下一帧发出前，上一帧的响应已经发完"。 */
+ErrCode motor_write_i32_noread(Robot *robot, int joint, uint16_t reg, int32_t val)
+{
+    uint16_t vals[2];
+    uint8_t frame[32];
+    /* 必须走 robot_request_noread 而不是直接 modbus_transact_noread：
+     * "不等响应"不等于"可以并发"。半双工总线上无锁发送会与后台巡检线程的
+     * 帧物理撞车，且其 flush(PurgeComm) 会冲掉巡检线程已收到的响应，
+     * 导致巡检误判"关节N 掉线"。详见 robot_request_noread 注释。 */
+    vals[0] = (uint16_t)((uint32_t)val & 0xFFFFu);      /* 低 16 位 */
+    vals[1] = (uint16_t)(((uint32_t)val >> 16) & 0xFFFFu); /* 高 16 位 */
+    size_t len = modbus_build_write_multi(joint_slave(joint), reg, vals, 2, frame);
+    return robot_request_noread(robot, frame, len);
+}
+
+/* motor_write_i32_broadcast：以【广播地址 0】写 32 位寄存器。
+ *
+ * 协议 §1：地址 0 = 广播，从机识别但【不返回报文】。因此必须走
+ * robot_request_noread —— 用 robot_request 会白等一次 50ms 超时。
+ *
+ * 为什么关心广播：若 LEESN 真的执行广播帧，那"每条总线只挂一个从站 +
+ * 用广播下发位置"就是消除"等响应 15ms"最干净的方案。它比 noread 优越：
+ * noread 是"我不听、但从站照样回一帧"（占线、半双工下会和下一帧撞车），
+ * 广播是"从站根本不发"，既不阻塞也不撞车。
+ * 代价：广播发给总线上所有从站，所以要求每总线单从站（与 6 路总线配套）。 */
+ErrCode motor_write_i32_broadcast(Robot *robot, uint16_t reg, int32_t val)
+{
+    uint16_t vals[2];
+    uint8_t frame[32];
+    vals[0] = (uint16_t)((uint32_t)val & 0xFFFFu);      /* 低 16 位 */
+    vals[1] = (uint16_t)(((uint32_t)val >> 16) & 0xFFFFu); /* 高 16 位 */
+    size_t len = modbus_build_write_multi(0, reg, vals, 2, frame);
+    return robot_request_noread(robot, frame, len);
+}
+
+/* motor_write_u16_broadcast：以【广播地址 0】写单个 16 位寄存器（功能码 06H）。
+ * 与上面 10H 版本并存的原因：部分国产驱动器只在 06H 上实现广播，10H 的
+ * 广播帧被直接丢弃。bcast 命令先测 10H，全无响应再测 06H，一趟跑完两种功能码。 */
+ErrCode motor_write_u16_broadcast(Robot *robot, uint16_t reg, uint16_t val)
+{
+    uint8_t frame[16];
+    size_t len = modbus_build_write_single(0, reg, val, frame);
+    return robot_request_noread(robot, frame, len);
+}
+
 /* motor_read_u16：读单个 16 位寄存器（功能码 03H）
  * robot   - 机器人对象
  * joint   - 关节号 1~6
@@ -336,6 +384,12 @@ ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *s
 ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
 {
     return motor_write_i32(robot, joint, LEESN_REG_ABS_MOVE, steps);
+}
+
+/* motor_move_abs_noread：同上但不读响应，仅供 diag 做对照测量 */
+ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps)
+{
+    return motor_write_i32_noread(robot, joint, LEESN_REG_ABS_MOVE, steps);
 }
 
 /* ================= 状态读取（扩展） ================= */

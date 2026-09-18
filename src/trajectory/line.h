@@ -49,10 +49,14 @@ int line_plan(const double start_pose[6], const double end_pose[6],
  *   limits       关节软限位（NULL 表示不限位）
  *   start_joints 起点参考关节角（度），用于第 0 点的分支选择
  *   q_out        count x 6 关节角（度）输出，与 path->pose 一一对应
+ *   fail_idx     [输出] 失败点下标（可为 NULL）
+ *   fail_reason  [输出] 失败原因描述（可为 NULL；缓冲区需 >= 64 字节）
  * 全部点求解成功返回 0；任一点 IK 无解或候选解全部越软限位返回 -1，
- * 并把该点下标写入 *fail_idx（可为 NULL）。失败时已写入的 q_out 无意义。 */
+ * 并把该点下标写入 *fail_idx、原因写入 *fail_reason。
+ * 失败时已写入的 q_out 无意义。 */
 int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits,
-               const double *start_joints, double (*q_out)[6], int *fail_idx);
+               const double *start_joints, double (*q_out)[6],
+               int *fail_idx, char *fail_reason);
 
 /* line_time_table：按关节限速生成分段时间表。
  *   q_seq      count x 6 关节角（度，应已去卷绕连续）

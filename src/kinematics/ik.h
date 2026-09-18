@@ -22,7 +22,53 @@ typedef struct {
     double max_deg;
 } JointLimit;
 
-/* 解析逆解：给定目标位姿 4x4 行主序矩阵，输出候选解（度）。
+/* IK 解状态：肩/肘/腕三段各标记，对应 Hg_Robot_Arm solFlag 概念 */
+typedef enum {
+    IK_SOL_VALID = 1,        /* 有效 */
+    IK_SOL_OUT_OF_REACH = 0, /* 超出可达范围 */
+    IK_SOL_SINGULAR = -1,    /* 奇异（自由度退化） */
+    IK_SOL_DEGENERATE = -2   /* 几何退化（参数异常） */
+} IkSolStatus;
+
+/* 每组解的奇异标记：肩/肘/腕三段独立标记 + 整体有效标志 */
+typedef struct {
+    IkSolStatus shoulder;
+    IkSolStatus elbow;
+    IkSolStatus wrist;
+    int valid;              /* 1=该组解完整有效，0=至少一段无效 */
+} IkSolInfo;
+
+/* ik_solve_ex：扩展逆解，输出候选解 + 每组解的奇异标记。
+ * solutions 仅填充有效解（前 count 组），info 填充全部 8 个槽位。
+ * info 为 NULL 时不输出标记（等价于 ik_solve）。
+ * 返回有效解组数（0~8）。 */
+int ik_solve_ex(const DhParam *params, const double pose[4][4],
+                double solutions[IK_MAX_SOLUTIONS][6],
+                IkSolInfo info[IK_MAX_SOLUTIONS]);
+
+/* ik_solve_ref：带【腕奇异连续性参考】的逆解。
+ *
+ *   ref_joints  上一点的关节角（度），可 NULL。
+ *               只在腕奇异退化分支里起作用：θ5≈0 时 θ4 与 θ6 无法分别测定
+ *               （只有 θ4+θ6 可定），此时 θ4 沿用它、θ6 = (θ4+θ6) - θ4。
+ *               不传参考的话 θ4 只能糙取 0 —— 路径一旦穿过奇异点，
+ *               θ5 越过判定边界那一刻 θ4 就会从 0 跳到真实值，
+ *               实测 **J4 单次跳变 89.8°**，末端甩出去。
+ *
+ * 【谁该用谁】
+ *   单次求逆解（MoveJ、位姿查询）            → ik_solve_ex / ik_solve
+ *   逐点求逆解（MoveL 的 line_solve）        → 必须 ik_solve_ref，传上一点关节角
+ *
+ * 其余约定与 ik_solve_ex 完全一致（返回值、槽位编号、info 填充规则）。 */
+int ik_solve_ref(const DhParam *params, const double pose[4][4],
+                 const double *ref_joints,
+                 double solutions[IK_MAX_SOLUTIONS][6],
+                 IkSolInfo info[IK_MAX_SOLUTIONS]);
+
+/* ik_sol_status_str：IkSolStatus 转可读字符串，用于诊断输出 */
+const char *ik_sol_status_str(IkSolStatus s);
+
+/* ik_solve：逆解（向后兼容，等价于 ik_solve_ex + info=NULL）。
  * 返回实际解组数（0~8）；solutions[n][6] 为关节角（度）。
  * 若肩/腕退化（奇异）对应组可能被跳过。 */
 int ik_solve(const DhParam *params, const double pose[4][4],

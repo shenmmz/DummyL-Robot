@@ -123,6 +123,17 @@ ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *s
  * 电机运行到目标绝对位置，运行中也可执行
  * steps - 目标位置脉冲数（由 DEG2STEPS 计算） */
 ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps);
+ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps);
+ErrCode motor_write_i32_noread(Robot *robot, int joint, uint16_t reg, int32_t val);
+
+/* 以【广播地址 0】写 32 位寄存器：从机识别但不返回报文，故不等响应。
+ * 会发给总线上所有从站，只有在"每条总线只挂一个从站"时才能用于下发位置。
+ * 详见 motor_reg.c 中实现的注释。 */
+ErrCode motor_write_i32_broadcast(Robot *robot, uint16_t reg, int32_t val);
+
+/* 以【广播地址 0】写单个 16 位寄存器（功能码 06H）。
+ * 部分驱动器只在 06H 上实现广播，10H 广播帧被丢弃；bcast 命令两种都测。 */
+ErrCode motor_write_u16_broadcast(Robot *robot, uint16_t reg, uint16_t val);
 
 /* ================= 状态读取（扩展） ================= */
 

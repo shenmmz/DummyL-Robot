@@ -204,8 +204,31 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* 后台定时监控：程序启动即创建线程，按周期巡检六轴状态/电流/报警 */
-    mon = monitor_create(robot, 0); /* 0=不启用电流堵转事件，只做状态监控 */
+    /* 逐轴堵转阈值：优先 ini [stall] j1..j6，读不到用编译期默认表（全 0 = 全关）。
+     * 【旧行为是 monitor_create(robot, 0)】——传 0 等于堵转检测从来没开过，
+     * 机械臂撞上东西不会有任何反应。现在改成从配置读，填了值就真的生效。 */
+    {
+        int th[ROBOT_JOINT_COUNT];
+        const int def[ROBOT_JOINT_COUNT] = ROBOT_STALL_CURRENT_MA_TABLE;
+        int i, on = 0;
+        int from_ini = ini_read_stall_current(INI_PATH, th);
+        if (!from_ini) {
+            for (i = 0; i < ROBOT_JOINT_COUNT; i++) th[i] = def[i];
+        }
+        for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
+            if (th[i] > 0) on++;
+        }
+        printf("堵转阈值来源：%s（j1..j6 = %d,%d,%d,%d,%d,%d mA，%d 轴启用）\n",
+               from_ini ? "ini [stall]" : "默认（robot_config.h）",
+               th[0], th[1], th[2], th[3], th[4], th[5], on);
+        if (on == 0) {
+            printf("[提示] 堵转保护【未启用】：六轴阈值都是 0。\n"
+                   "       先跑 curtest 量出各轴正常电流，再在 ini [stall] 填 j1..j6 并重启。\n");
+        }
+
+        /* 后台定时监控：程序启动即创建线程，按周期巡检六轴状态/电流/报警 */
+        mon = monitor_create(robot, th);
+    }
     if (mon == NULL) {
         printf("[警告] 监控器创建失败，继续运行\n");
     } else if (!monitor_start(mon, (int)MONITOR_DEFAULT_INTERVAL_MS)) {
@@ -213,6 +236,11 @@ int main(int argc, char **argv)
         monitor_destroy(mon);
         mon = NULL;
     }
+
+    /* 启动位姿体检：驱动器掉电会清空 0x00D2（RAM 无记忆零点），位置计数归零
+     * 而 ini 标定还在 ⇒ 机械角全是假值（2026-09-18 实测读出 6 轴全越软限位）。
+     * 越限时 cmd_dispatch 会锁住 MoveL/MoveJ/curtest，逼着先回零。 */
+    cmd_pose_check(robot);
 
     /* 命令循环：读取一行 → 解析 → 分发（具体命令实现见 cli/commands.c） */
     while (running) {

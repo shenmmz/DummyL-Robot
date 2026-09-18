@@ -15,6 +15,35 @@
 
 #define IK_PI      3.14159265358979323846
 #define IK_EPS     1e-10
+/* 腕奇异阈值：|sin(θ5)| 小于此值即认为 θ5≈0（θ4 与 θ6 同轴，自由度退化）。
+ *
+ * 【2026-09-18 第一次修】旧代码用的是 IK_EPS = 1e-10 —— 小到永不触发
+ * （要 |sinθ5| < 1e-10，即 θ5 < 5.7e-9°），等于【根本没有检测】。
+ * 后果：θ4 = atan2(r23/sinth5, r13/sinth5) 在 sinth5=0 时是 0/0，
+ * J4/J6 在 8 组解之间剧烈跳变。实测：home 位形（J5=0，正是腕部奇异）
+ * 附近做 MoveL，末端偏差 **34.38mm**，臂直接乱甩。
+ *
+ * 【2026-09-18 第二次修】第一版把阈值定在 sin(2°)≈0.0349，结果**矫枉过正**：
+ * 正常公式在 θ5=1° 时数值上非常健康（sinθ5=0.017，而 r36 的浮点噪声只有
+ * 1e-16，信噪比 1e14），根本不需要退化处理。强行把它判成奇异、把 θ5 压成 0，
+ * 反而自己制造了两个新毛病（tests/test_ik_wrist.c 实测）：
+ *   ① 姿态被强行改了 ⇒ 经 91.5mm 的 d6 杠杆放大成 **1.82mm** 末端偏差；
+ *   ② 路径上 θ5 从 1.14° 走到 2.28° 越过 2° 边界时，θ4 从"强制的 0"
+ *      一步跳到"真实的 -89.795°" ⇒ **J4 单次跳变 89.8°**，臂照甩不误。
+ *
+ * 阈值应当由【数值分辨极限】决定，而不是拍脑袋取个角度：
+ *   sinth5 = ±sqrt(1 - r36[2][2]²)，而 r36[2][2] = cos θ5。
+ *   double 的机器精度 eps≈2.2e-16，cos θ5 与 1 的差最小只能分辨到 ~1.1e-16，
+ *   于是 1-c² ≈ 2.2e-16，sqrt 后 |sinθ5| 的最小可分辨值约 **4.7e-8**。
+ *   低于这个量级，sqrt 恒返回 0 —— 信息在减法里被抵消光了，
+ *   此时 r13/r23 还留着值，正常公式就变成 r13/0 = ±inf，θ4 彻底乱掉。
+ * 因此阈值取 1e-7（比 4.7e-8 高一点留余量）。此时强制退化的代价是：
+ *   姿态误差 ≤ 1e-7 rad ⇒ 末端位置误差 ≤ 91.5mm × 1e-7 ≈ **9e-6 mm**。
+ * 相比第一版的 1.82mm，小了 20 万倍。
+ *
+ * 注：J5 软限位为 -95°~95°，所以 θ5≈180°（cos=-1 那一支）不会出现在
+ * 合法解里，这里只需要处理 θ5≈0。 */
+#define IK_WRIST_SINGULAR_SIN  1e-7
 #define IK_DEG2RAD (IK_PI / 180.0)
 
 /* 归一化到 (-PI, PI] */
@@ -93,9 +122,29 @@ static void target_wrist(const double pose[4][4], double d6, double w[3])
     w[2] = pose[2][3] - d6 * pose[2][2];
 }
 
-/* ik_solve：解析逆运动学，目标位姿 -> 最多 8 组关节角解（肩/肘/腕各双解） */
-int ik_solve(const DhParam *params, const double pose[4][4],
-             double solutions[IK_MAX_SOLUTIONS][6])
+/* ik_sol_status_str：IkSolStatus 转可读字符串 */
+const char *ik_sol_status_str(IkSolStatus s)
+{
+    switch (s) {
+    case IK_SOL_VALID:        return "有效";
+    case IK_SOL_OUT_OF_REACH: return "超可达";
+    case IK_SOL_SINGULAR:     return "奇异";
+    case IK_SOL_DEGENERATE:   return "退化";
+    default:                  return "未知";
+    }
+}
+
+/* ik_solve_ref：解析逆运动学（带腕奇异连续性参考）。
+ *
+ *   ref_joints  上一点的关节角（度），仅用于【腕奇异退化分支】里给 θ4 兜底。
+ *               NULL 表示无参考（退化为 θ4 = 0）。
+ *
+ * 8 槽位编号 = shoulder*4 + elbow*2 + wrist。
+ * 有效解按顺序写入 solutions 前 count 组；info 填充全部 8 槽位。 */
+int ik_solve_ref(const DhParam *params, const double pose[4][4],
+                 const double *ref_joints,
+                 double solutions[IK_MAX_SOLUTIONS][6],
+                 IkSolInfo info[IK_MAX_SOLUTIONS])
 {
     double a1 = params[0].a;
     double d1 = params[0].d;
@@ -108,39 +157,71 @@ int ik_solve(const DhParam *params, const double pose[4][4],
     double theta1, theta3, theta2;
     int shoulder, elbow, wrist;
     int count = 0;
+    int idx;
+    /* 腕奇异退化时 θ4 的兜底值：优先锚到参考角（保证路径连续），无参考则 0。
+     * 取值一次即可 —— 8 个槽位共用同一个兜底，这样两个 wrist 分支在奇异点
+     * 必然算出同一个 θ4，不会再给出相差 180° 的两种分法。 */
+    double ref_theta4 = 0.0;
+    if (ref_joints != NULL && isfinite(ref_joints[3])) {
+        ref_theta4 = ref_joints[3] * IK_DEG2RAD;
+    }
+
+    /* 初始化全部 8 槽位为无效 */
+    if (info) {
+        for (idx = 0; idx < IK_MAX_SOLUTIONS; idx++) {
+            info[idx].shoulder = IK_SOL_OUT_OF_REACH;
+            info[idx].elbow = IK_SOL_OUT_OF_REACH;
+            info[idx].wrist = IK_SOL_OUT_OF_REACH;
+            info[idx].valid = 0;
+        }
+    }
 
     if (a2 <= IK_EPS || d4 <= IK_EPS) {
-        return 0; /* 需 a2/d4 非零，实机 DH 确认前无解 */
+        if (info) {
+            for (idx = 0; idx < IK_MAX_SOLUTIONS; idx++)
+                info[idx].shoulder = IK_SOL_DEGENERATE;
+        }
+        return 0;
     }
 
-    target_wrist(pose, d6, w);   /* w = p4 = 关节4 原点（腕心） */
+    target_wrist(pose, d6, w);
     r = sqrt(w[0] * w[0] + w[1] * w[1]);
-    Y = w[2] - d1;               /* 腕心相对基座的高度余量（竖直分量） */
+    Y = w[2] - d1;
     if (r <= fabs(d3) + IK_EPS) {
-        return 0; /* 奇异：腕心水平距离不足以容纳 d3 偏距 */
+        /* 腕心水平距离不足以容纳 d3 偏距 → 全部肩部奇异 */
+        if (info) {
+            for (idx = 0; idx < IK_MAX_SOLUTIONS; idx++)
+                info[idx].shoulder = IK_SOL_SINGULAR;
+        }
+        return 0;
     }
-    /* 标准 DH（α1=-90°）几何（θ_i = q_i + offset）：
-     *   p4x = c1*(a1 + a2c2 + d4s23) - d3*s1
-     *   p4y = s1*(a1 + a2c2 + d4s23) + d3*c1
-     *   p4z = d1 - a2*s2 + d4*c23
-     * 令 r = |p4_xy|，U = ±sqrt(r^2 - d3^2)（肩部两解），P = U - a1：
-     *   θ1 = atan2(-d3*wx + U*wy, U*wx + d3*wy)
-     *   s3 = (P^2 + Y^2 - a2^2 - d4^2) / (2 a2 d4)   （肘部由 c3=±sqrt(1-s3²) 双解）
-     *   c2 = (A*P + B*Y) / (A^2 + B^2)，s2 = (B*P - A*Y) / (A^2 + B^2)
-     *   A = a2 + d4*s3，B = d4*c3 */
+
     d_horiz = sqrt(r * r - d3 * d3);
 
     for (shoulder = 0; shoulder < 2; shoulder++) {
-        /* shoulder=0: U = +d_horiz；shoulder=1: U = -d_horiz（肩部翻转） */
         double U = (shoulder == 0) ? d_horiz : -d_horiz;
         double P = U - a1;
         double s3v, c3abs;
+        int shoulder_reachable = 1;
+
         theta1 = atan2(-d3 * w[0] + U * w[1], U * w[0] + d3 * w[1]);
 
         s3v = (P * P + Y * Y - a2 * a2 - d4 * d4) / (2.0 * a2 * d4);
         if (s3v < -1.0 - 1e-9 || s3v > 1.0 + 1e-9) {
-            continue; /* 该肩部姿态下目标超出肘部可达范围，无解（不 clamp 成伪解） */
+            /* 该肩部姿态下目标超出肘部可达范围 */
+            shoulder_reachable = 0;
+            if (info) {
+                for (elbow = 0; elbow < 2; elbow++) {
+                    for (wrist = 0; wrist < 2; wrist++) {
+                        idx = shoulder * 4 + elbow * 2 + wrist;
+                        info[idx].shoulder = IK_SOL_OUT_OF_REACH;
+                        info[idx].elbow = IK_SOL_OUT_OF_REACH;
+                        info[idx].wrist = IK_SOL_OUT_OF_REACH;
+                    }
+                }
+            }
         }
+        if (!shoulder_reachable) continue;
         if (s3v < -1.0) s3v = -1.0;
         if (s3v > 1.0)  s3v = 1.0;
         c3abs = sqrt(1.0 - s3v * s3v);
@@ -148,18 +229,27 @@ int ik_solve(const DhParam *params, const double pose[4][4],
         for (elbow = 0; elbow < 2; elbow++) {
             double A, B, D0, c2, s2;
             double c3 = (elbow == 0) ? c3abs : -c3abs;
+            int elbow_ok = 1;
+
             theta3 = atan2(s3v, c3);
 
-            /* 由 T0_3 平移 x/y 反解 θ2（α1=-90° 推导）：
-             *   P = a2c2 + d4s23 = (a2 + d4s3)c2 + d4c3*s2
-             *   Y = -a2s2 + d4c23 = d4c3*c2 - (a2 + d4s3)s2
-             * 令 A = a2 + d4*s3，B = d4*c3，D0 = A^2 + B^2 > 0 */
             A = a2 + d4 * s3v;
             B = d4 * c3;
             D0 = A * A + B * B;
             if (D0 < IK_EPS) {
-                continue; /* 退化（a2/d4 均为 0） */
+                /* 几何退化 */
+                elbow_ok = 0;
+                if (info) {
+                    for (wrist = 0; wrist < 2; wrist++) {
+                        idx = shoulder * 4 + elbow * 2 + wrist;
+                        info[idx].shoulder = IK_SOL_VALID;
+                        info[idx].elbow = IK_SOL_DEGENERATE;
+                        info[idx].wrist = IK_SOL_DEGENERATE;
+                    }
+                }
             }
+            if (!elbow_ok) continue;
+
             c2 = (A * P + B * Y) / D0;
             s2 = (B * P - A * Y) / D0;
             theta2 = atan2(s2, c2);
@@ -171,14 +261,14 @@ int ik_solve(const DhParam *params, const double pose[4][4],
                 double sinth5;
                 double theta4, theta5, theta6;
                 double sol[6];
-                int ok = 1;
+
+                idx = shoulder * 4 + elbow * 2 + wrist;
 
                 theta_rad[0] = theta1;
                 theta_rad[1] = theta2;
                 theta_rad[2] = theta3;
                 build_r0i(params, theta_rad, 2, r03);
 
-                /* R3_6 = R0_3^T * R_target */
                 r_transpose(r03, rt);
                 {
                     double rt_r[3][3] = {{rt[0][0], rt[0][1], rt[0][2]},
@@ -190,48 +280,110 @@ int ik_solve(const DhParam *params, const double pose[4][4],
                     r_mul(rt_r, rr, r36);
                 }
 
-                /* 球腕解算（标准 DH：α4=-90°，α5=+90°，a4=a5=a6=0）：
-                 * R3_6 = Rz(θ4)·Rx(-90°)·Rz(θ5)·Rx(+90°)·Rz(θ6)
-                 *      = [c4c5c6 - s4s6,  -c4c5s6 - s4c6,  c4s5;
-                 *         s4c5c6 + c4s6,  -s4c5s6 + c4c6,  s4s5;
-                 *         -s5c6,           s5s6,            c5]
-                 * 对应关系：r13=+c4s5, r23=+s4s5, r31=-s5c6,
-                 *           r32=+s5s6, r33=c5
-                 * 双解：解A θ5∈(0,π)（sinθ5=+√…）；解B θ5∈(-π,0)（sinθ5=-√…）。
-                 * θ4 = atan2(r23/sinθ5, r13/sinθ5)（除以 sinθ5 以兼容双解），
-                 * θ6 用 θ4 旋转消去 c4/s4 后 atan2 求解。 */
-                sinth5 = (wrist == 0) ? sqrt(1.0 - r36[2][2] * r36[2][2])
-                                      : -sqrt(1.0 - r36[2][2] * r36[2][2]);
+                {
+                    double r33sq = 1.0 - r36[2][2] * r36[2][2];
+                    if (r33sq < 0.0) r33sq = 0.0;
+                    sinth5 = (wrist == 0) ? sqrt(r33sq) : -sqrt(r33sq);
+                }
                 r13 = r36[0][2];
                 r23 = r36[1][2];
                 r11 = r36[0][0];
                 r12 = r36[0][1];
                 r21 = r36[1][0];
                 r22 = r36[1][1];
-                if (fabs(sinth5) < IK_EPS) {
-                    ok = 0; /* 腕奇异：θ4 与 θ6 同轴 */
-                } else {
-                    theta5 = atan2(sinth5, r36[2][2]);
-                    theta4 = atan2(r23 / sinth5, r13 / sinth5);
-                    theta6 = atan2(-sin(theta4) * r11 + cos(theta4) * r21,
-                                   -sin(theta4) * r12 + cos(theta4) * r22);
+
+                if (info) {
+                    info[idx].shoulder = IK_SOL_VALID;
+                    info[idx].elbow = IK_SOL_VALID;
                 }
 
-                if (ok) {
-                    /* 输出关节角 q = theta - theta_offset（FK 会再加回） */
-                    int k;
-                    double th[6] = {theta1, theta2, theta3, theta4, theta5, theta6};
-                    for (k = 0; k < 6; k++) {
-                        double q = norm_angle(th[k] - params[k].theta_offset) / IK_DEG2RAD;
-                        sol[k] = q;
+                if (fabs(sinth5) < IK_WRIST_SINGULAR_SIN) {
+                    /* 腕奇异：θ5≈0 ⇒ R36 ≈ Rz(θ4+θ6)，只有两者【之和】可确定，
+                     * θ4 与 θ6 各自怎么分【测不出来】（r13、r23 已被浮点抵消吃掉）。
+                     *
+                     * 【处理原则】测不出来的那个量，就别硬算，交给连续性来定：
+                     *   ① θ5 保留真实值 = atan2(sinth5, r36[2][2])。
+                     *      它是良态的（atan2 在 sinth5→0 时给出 0 或 π，不会爆），
+                     *      保留它才能保住姿态精度 —— 第一版把它压成 0，
+                     *      姿态误差经 91.5mm 的 d6 杠杆放大成 1.82mm 末端偏差。
+                     *   ② φ = θ4+θ6 由位姿定：R36 ≈ Rz(φ)，故 φ = atan2(r21, r11)。
+                     *   ③ θ4 锚到参考角（上一点的 θ4），θ6 = φ - θ4。
+                     *      这是关键：θ4 在这里不可测，任何"算"出来的值都是噪声，
+                     *      唯独"沿用上一点"能让路径连续。第一版硬性取 0，于是
+                     *      θ5 越过阈值边界那一刻 θ4 从 0 跳到真实值，
+                     *      实测 **J4 单次跳变 89.8°** —— 臂照样甩。
+                     *
+                     * 副作用（正是我们要的）：两个 wrist 分支（sinth5 取 ±sqrt）
+                     * 在这里必然算出同一个 θ4，解自然合流，分支竞争消失。 */
+                    theta5 = atan2(sinth5, r36[2][2]);
+                    theta4 = ref_theta4;
+                    theta6 = atan2(r21, r11) - theta4;
+
+                    {
+                        int k;
+                        double th[6] = {theta1, theta2, theta3, theta4, theta5, theta6};
+                        for (k = 0; k < 6; k++) {
+                            double q = norm_angle(th[k] - params[k].theta_offset) / IK_DEG2RAD;
+                            sol[k] = q;
+                        }
+                        memcpy(solutions[count], sol, sizeof(sol));
+                        count++;
                     }
-                    memcpy(solutions[count], sol, sizeof(sol));
-                    count++;
+                    if (info) {
+                        info[idx].wrist = IK_SOL_SINGULAR;
+                        info[idx].valid = 1;   /* 解可用，但已退化，上层应告警 */
+                    }
+                } else {
+                    theta5 = atan2(sinth5, r36[2][2]);
+                    /* 原式是 atan2(r23/sinth5, r13/sinth5)：先各除一遍 sinth5。
+                     * 数学上等价（s>0 时 atan2 的公因子可约，s<0 时两个分量
+                     * 同取反），但先除会白白放大舍入误差，而 sinth5 在这里
+                     * 可能小到 1e-7。不做除法，直接按分支符号取反即可 ——
+                     * 同样的结果，少一次除零风险。 */
+                    if (sinth5 > 0.0) {
+                        theta4 = atan2( r23,  r13);
+                    } else {
+                        theta4 = atan2(-r23, -r13);
+                    }
+                    theta6 = atan2(-sin(theta4) * r11 + cos(theta4) * r21,
+                                   -sin(theta4) * r12 + cos(theta4) * r22);
+
+                    {
+                        int k;
+                        double th[6] = {theta1, theta2, theta3, theta4, theta5, theta6};
+                        for (k = 0; k < 6; k++) {
+                            double q = norm_angle(th[k] - params[k].theta_offset) / IK_DEG2RAD;
+                            sol[k] = q;
+                        }
+                        memcpy(solutions[count], sol, sizeof(sol));
+                        count++;
+                    }
+                    if (info) {
+                        info[idx].wrist = IK_SOL_VALID;
+                        info[idx].valid = 1;
+                    }
                 }
             }
         }
     }
     return count;
+}
+
+/* ik_solve_ex：不带连续性参考的逆解（等价于 ik_solve_ref(ref=NULL)）。
+ * 单次求逆解（MoveJ 等）用这个即可；**逐点**求逆解（MoveL 的 line_solve）
+ * 必须用 ik_solve_ref 把上一点的关节角传进去，否则腕奇异处 θ4 只能糙取 0。 */
+int ik_solve_ex(const DhParam *params, const double pose[4][4],
+                double solutions[IK_MAX_SOLUTIONS][6],
+                IkSolInfo info[IK_MAX_SOLUTIONS])
+{
+    return ik_solve_ref(params, pose, NULL, solutions, info);
+}
+
+/* ik_solve：向后兼容 wrapper，等价于 ik_solve_ex(info=NULL) */
+int ik_solve(const DhParam *params, const double pose[4][4],
+             double solutions[IK_MAX_SOLUTIONS][6])
+{
+    return ik_solve_ex(params, pose, solutions, NULL);
 }
 
 /* ik_filter_by_limits：按关节限位过滤候选解，返回剩余解数 */

@@ -29,9 +29,10 @@ typedef struct {
 
 struct Monitor {
     Robot *robot;
-    int stall_threshold_ma; /* 堵转电流阈值；<=0 表示不检测 */
+    int stall_threshold_ma[ROBOT_JOINT_COUNT]; /* 逐轴堵转电流阈值；<=0 表示不检测 */
     int interval_ms;        /* 巡检周期 ms */
     volatile LONG running;  /* 线程运行标志（Interlocked 访问） */
+    volatile LONG paused;   /* >0 = 运动期间挂起巡检，一个字节都不上总线 */
     HANDLE thread;          /* 后台巡检线程句柄，NULL=未启动 */
     CRITICAL_SECTION snap_lock; /* 保护 online/snap 快照与事件缓存 */
     int online[ROBOT_JOINT_COUNT];
@@ -45,8 +46,40 @@ struct Monitor {
     SnapJoint snap[ROBOT_JOINT_COUNT];
 };
 
-/* monitor_create：创建监控对象，stall_threshold_ma<=0 表示不检测堵转 */
-Monitor *monitor_create(Robot *robot, int stall_threshold_ma)
+/* 当前活跃监控器：供 cli 层在没有 Monitor* 句柄的地方挂起巡检（monitor_pause_active）。
+ * 【必须声明在 monitor_create 之前】monitor_create / monitor_destroy 会注册与注销它。
+ * 此前这个定义被放在文件中部（monitor_pause_active 附近），导致 monitor_create
+ * 里的赋值出现"g_active_monitor 未声明"，整个文件编译失败——而 build/ 里留着一份
+ * 旧版本编译出来的 .obj，把这个问题掩盖了很久。 */
+static Monitor *g_active_monitor = NULL;
+
+/* monitor_stall_hit：纯判定（不访问总线）。见 monitor.h 注释。
+ * 抽成独立函数是为了能离线单测 —— 堵转判定是安全逻辑，不能只在真机上试。 */
+int monitor_stall_hit(int cur_ma, int threshold_ma)
+{
+    if (threshold_ma <= 0) return 0;   /* 该轴未配置阈值 ⇒ 不检测 */
+    if (cur_ma < 0)        return 0;   /* 读数失败 ⇒ 不误报 */
+    return (cur_ma > threshold_ma) ? 1 : 0;
+}
+
+/* monitor_set_stall_threshold / monitor_get_stall_threshold：运行时改单轴阈值 */
+void monitor_set_stall_threshold(Monitor *m, int joint, int ma)
+{
+    if (m == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) return;
+    EnterCriticalSection(&m->snap_lock);
+    m->stall_threshold_ma[joint - 1] = ma;
+    if (ma <= 0) m->prev_stall[joint - 1] = 0;   /* 关检测时清闩锁，避免恢复后漏报 */
+    LeaveCriticalSection(&m->snap_lock);
+}
+
+int monitor_get_stall_threshold(const Monitor *m, int joint)
+{
+    if (m == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) return 0;
+    return m->stall_threshold_ma[joint - 1];
+}
+
+/* monitor_create：创建监控对象，th[6] 为逐轴阈值（NULL = 全 0 = 全关） */
+Monitor *monitor_create(Robot *robot, const int stall_threshold_ma[6])
 {
     Monitor *m;
     int i;
@@ -58,10 +91,16 @@ Monitor *monitor_create(Robot *robot, int stall_threshold_ma)
         return NULL;
     }
     m->robot = robot;
-    m->stall_threshold_ma = stall_threshold_ma;
+    if (stall_threshold_ma != NULL) {
+        for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
+            m->stall_threshold_ma[i] = stall_threshold_ma[i];
+        }
+    }
     m->interval_ms = (int)MONITOR_DEFAULT_INTERVAL_MS;
     m->thread = NULL;
     m->running = 0;
+    m->paused = 0;
+    g_active_monitor = m;
     InitializeCriticalSection(&m->snap_lock);
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
         m->online[i] = 0;
@@ -87,6 +126,7 @@ void monitor_destroy(Monitor *m)
         return;
     }
     monitor_stop(m);
+    if (g_active_monitor == m) g_active_monitor = NULL;
     DeleteCriticalSection(&m->snap_lock);
     free(m);
 }
@@ -176,15 +216,14 @@ static void monitor_scan_joint(Monitor *m, int j)
         m->prev_neg[idx] = neg;
         m->prev_pos[idx] = pos;
 
-        /* 堵转电流闩锁：阈值>0 才启用；电流越阈值报一次，回落不刷屏 */
-        if (m->stall_threshold_ma > 0 && cur >= 0) {
-            latch = (cur > m->stall_threshold_ma) ? 1 : 0;
-            if (!m->prev_stall[idx] && latch) {
-                printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
-                          j, cur, m->stall_threshold_ma);
-            }
-            m->prev_stall[idx] = latch;
+        /* 堵转电流闩锁：逐轴阈值，>0 的轴才启用；电流越阈值报一次，回落不刷屏。
+         * 阈值<=0 或读数失败时 monitor_stall_hit 恒返回 0，故这里无需再判。 */
+        latch = monitor_stall_hit(cur, m->stall_threshold_ma[idx]);
+        if (!m->prev_stall[idx] && latch) {
+            printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
+                      j, cur, m->stall_threshold_ma[idx]);
         }
+        m->prev_stall[idx] = latch;
     }
     LeaveCriticalSection(&m->snap_lock);
 
@@ -263,19 +302,16 @@ int monitor_check_stall(Monitor *m, int joint)
     if (m == NULL || m->robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
         return 0;
     }
-    if (m->stall_threshold_ma <= 0) {
-        return 0; /* 阈值未配置，跳过检测 */
+    if (m->stall_threshold_ma[joint - 1] <= 0) {
+        return 0; /* 该轴阈值未配置，跳过检测 */
     }
     cur = robot_read_current_ma(m->robot, joint);
-    if (cur < 0) {
+    if (!monitor_stall_hit(cur, m->stall_threshold_ma[joint - 1])) {
         return 0;
     }
-    if (cur > m->stall_threshold_ma) {
-        printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
-                  joint, cur, m->stall_threshold_ma);
-        return 1;
-    }
-    return 0;
+    printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
+              joint, cur, m->stall_threshold_ma[joint - 1]);
+    return 1;
 }
 
 /* monitor_online_count：返回最近一次轮询的在线关节数 */
@@ -292,13 +328,40 @@ static DWORD WINAPI monitor_thread_main(LPVOID arg)
     Monitor *m = (Monitor *)arg;
 
     while (InterlockedCompareExchange(&m->running, 1, 1) != 0) {
-        monitor_poll(m);
+        /* 运动期间挂起：见 monitor_pause 说明。挂起时【完全不碰总线】，
+         * 否则每 50ms 的 12 笔巡检会和运动指令抢总线，把控制周期拖到 6Hz。 */
+        if (InterlockedCompareExchange(&m->paused, 0, 0) == 0) {
+            monitor_poll(m);
+        }
         Sleep((DWORD)(m->interval_ms > 0
                           ? m->interval_ms
                           : (int)MONITOR_DEFAULT_INTERVAL_MS));
     }
     InterlockedExchange(&m->running, 0);
     return 0;
+}
+
+/* monitor_pause：运动期间挂起后台巡检。
+ *
+ * 【为什么必须挂起】现场实测（2026-09-18 diag）：
+ *   - 巡检一轮 = 六轴 ×(状态字 1 笔 + 电流 1 笔) = 12 笔事务
+ *   - 周期 50ms ⇒ 需求 240 事务/秒
+ *   - 而 115200 单总线实测能力 ≈ 65 事务/秒（15.5ms/笔）
+ *   ⇒ 后台巡检一个就要吃掉总线能力的 3.7 倍，把总线永久打满。
+ * 后果：运动指令排在巡检后面（控制周期掉到 6Hz、段间一顿一顿），
+ * 巡检自己也超时，刷出"关节N 掉线（状态读取无响应）"的假报警。
+ *
+ * 运动期间整条命令独占总线，结束后恢复巡检。 */
+void monitor_pause(Monitor *m, int on)
+{
+    if (m == NULL) return;
+    InterlockedExchange(&m->paused, on ? 1 : 0);
+}
+
+/* monitor_pause_active：cli 层用的便捷入口，作用于 monitor_create 注册的对象 */
+void monitor_pause_active(int on)
+{
+    monitor_pause(g_active_monitor, on);
 }
 
 /* monitor_start：创建后台巡检线程；interval_ms<=0 用默认周期。

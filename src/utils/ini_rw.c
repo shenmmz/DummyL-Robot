@@ -100,6 +100,48 @@ int ini_write_joint_zero(const char *path, const double zero[6])
     return 1;
 }
 
+/* 读取 [stall] 段（j1..j6，单位 mA）
+ * 逐轴堵转电流阈值；0 表示该轴不检测。缺段或缺任一轴都返回 0，
+ * 调用方回退到编译期默认表（ROBOT_STALL_CURRENT_MA_TABLE）。 */
+int ini_read_stall_current(const char *path, int th[6])
+{
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int in_stall = 0;
+    int got = 0;
+    int i;
+
+    if (f == NULL) return 0;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') {
+            in_stall = (strncmp(p, "[stall]", sizeof("[stall]") - 1) == 0) ? 1 : 0;
+            continue;
+        }
+        /* 注释行也要跳过：段内注释若以 j1..j6 开头（例如被误写成 "j1 = 1500  # 注释"
+         * 之外的形式）会被当成配置读走。行首 # 或 ; 一律整行忽略。 */
+        if (*p == '#' || *p == ';' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+        if (!in_stall) continue;
+        for (i = 0; i < 6; i++) {
+            char key[8];
+            int klen;
+            snprintf(key, sizeof(key), "j%d", i + 1);
+            klen = (int)strlen(key);
+            if (strncmp(p, key, (size_t)klen) == 0) {
+                char *eq = strchr(p, '=');
+                if (eq != NULL) {
+                    th[i] = atoi(eq + 1);
+                    got++;
+                }
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return (got == 6) ? 1 : 0;
+}
+
 /* 读取 [tool] 段（tool_length，单位 mm） */
 int ini_read_tool_length(const char *path, double *tool_mm)
 {

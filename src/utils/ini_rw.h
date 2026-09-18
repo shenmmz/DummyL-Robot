@@ -21,4 +21,9 @@ int ini_write_joint_zero(const char *path, const double zero[6]);
  * 找到且解析成功返回 1，否则返回 0（调用方按默认 0 处理）。 */
 int ini_read_tool_length(const char *path, double *tool_mm);
 
+/* 读取 ini 的 [stall] 段，填充 th[6]（key 为 j1..j6，单位 mA，0=该轴不检测）。
+ * 6 个全部找到且解析成功返回 1，否则返回 0（不修改 th）。
+ * 允许缺段/缺项：调用方拿到 0 就按编译期默认值处理，不要当成致命错误。 */
+int ini_read_stall_current(const char *path, int th[6]);
+
 #endif /* INI_RW_H */

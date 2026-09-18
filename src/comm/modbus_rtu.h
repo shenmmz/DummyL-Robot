@@ -74,4 +74,14 @@ void modbus_comm_set(const CommOps *ops);
 const CommOps *modbus_comm_get(void);
 ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out);
 
+/* ---- 总线时延分段统计（diag 命令用）：flush / write / read 各占多少毫秒 ----
+ * modbus_stats_reset：清零；modbus_stats_get：取平均值（ms）。 */
+void modbus_stats_reset(void);
+void modbus_stats_get(uint32_t *n, double *flush_ms, double *write_ms,
+                      double *read_ms, double *total_ms,
+                      uint32_t *n_noread, double *noread_ms);
+
+/* 只 flush+write、不等从站响应的事务（对照测量 / 将来的纯写快路径） */
+ErrCode modbus_transact_noread(const uint8_t *tx, size_t len);
+
 #endif /* MODBUS_RTU_H */

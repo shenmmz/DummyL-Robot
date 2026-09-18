@@ -61,6 +61,32 @@ ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *o
     return rc;
 }
 
+/* robot_request_noread：与 robot_request 同一把锁，但不等从站响应。
+ *
+ * 【为什么"不等响应"也必须持锁】这里曾经是个真实的坑：
+ * motor_write_i32_noread 原先以"不读响应就不需要加锁"为由直接调
+ * modbus_transact_noread，绕过了本文件的总线锁。后果有两层：
+ *   1) 物理层撞车：RS485 半双工单主站，两个线程同时驱动总线发送，
+ *      两帧在线上叠加，双方都收到畸形帧，CRC 校验失败；
+ *   2) 冲掉对方数据：modbus_transact_noread 第一件事是 flush
+ *      （PurgeComm PURGE_RXCLEAR），会把【另一线程已经收到、还没读走】
+ *      的响应字节直接从驱动缓冲里清掉，对方必然读到超时。
+ * 现场症状（2026-09-18）：跑 diag 时后台巡检线程被 noread 帧踩踏，
+ * 刷出"关节2~6 掉线（状态读取无响应）"，diag 一结束立刻"恢复在线"。
+ * 结论：只要往总线上发字节，就必须持这把锁——与是否等响应无关。 */
+ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len)
+{
+    ErrCode rc;
+
+    if (r == NULL) {
+        return ERR_ARG;
+    }
+    EnterCriticalSection(&r->lock);
+    rc = modbus_transact_noread(frame, len);
+    LeaveCriticalSection(&r->lock);
+    return rc;
+}
+
 /* robot_apply_subdivision：按从站 ID 逐轴写入细分，使驱动器 0x0024
  * 对齐 ENCODER_STEPS_PER_REV（RAM 生效断电丢失，每次上电写入）。
  * 逐轴写+读回校验；屏蔽/离线轴跳过，失败不阻断启动。 */

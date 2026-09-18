@@ -67,7 +67,7 @@ static int home_forward_rpm(int j)
     return (j == 6) ? HOME_J6_ZERO_RPM : stall[j].speed_rpm;
 }
 
-static int    home_timeout_ms  = 60000;//设置回零超时时间
+static int    home_timeout_ms  = 20000;//设置回零超时时间（需求：20秒）
 
 /* 堵转轮询采样周期 ms：顶死电流爬升极快，周期越短越早命中；
  * 实际节拍由读事务耗时(~7~10ms/轮)主导，已贴近 RS485 物理下限，再小无收益 */
@@ -1046,7 +1046,11 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
             printf("关节%d 自动运动到 %.1f° ...\n", joint, angle_deg);
             {
                 const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-                int32_t target = DEG2STEPS(angle_deg, reductions[joint - 1]);
+                double mech[6] = {0}, motor[6] = {0};
+                int32_t target;
+                mech[joint - 1] = angle_deg;
+                joint_zero_mech_to_motor(mech, motor);
+                target = DEG2STEPS(motor[joint - 1], reductions[joint - 1]);
                 int wr = home_wait_inpos(robot, joint, target, home_timeout_ms);
                 if (wr == 1) {
                     printf("关节%d 到位（%.1f°）\n", joint, angle_deg);

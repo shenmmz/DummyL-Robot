@@ -14,6 +14,8 @@
 #include "kinematics/ik.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 #define LINE_PI     3.14159265358979323846
 #define LINE_DEG2RAD (LINE_PI / 180.0)
@@ -171,15 +173,18 @@ int line_plan(const double start_pose[6], const double end_pose[6],
 
 /* line_solve：逐点 IK + 分支连续选解 */
 int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits,
-                const double *start_joints, double (*q_out)[6], int *fail_idx)
+                const double *start_joints, double (*q_out)[6],
+                int *fail_idx, char *fail_reason)
 {
     double prev[6];
     double sols[IK_MAX_SOLUTIONS][6];
     double unwrapped[IK_MAX_SOLUTIONS][6];
     double filtered[IK_MAX_SOLUTIONS][6];
+    IkSolInfo info[IK_MAX_SOLUTIONS];
     int i, j, cnt, n;
 
     if (path == NULL || dh == NULL || q_out == NULL || path->count < 2) {
+        if (fail_reason) snprintf(fail_reason, 64, "参数非法");
         return -1;
     }
 
@@ -191,18 +196,49 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
         double m[4][4];
 
         line_pose_to_matrix(path->pose[i], m);
-        cnt = ik_solve(dh, m, sols);
+        /* 必须传上一点的关节角：腕奇异（θ5≈0）时 θ4 与 θ6 只有【之和】可定，
+         * 靠这个参考值把 θ4 锚住，路径才不会在奇异点附近甩出 180° 的 J4。
+         * 用 ik_solve_ex（无参考）会让 θ4 糙取 0 —— 实测 J4 跳变 89.8°、
+         * 末端偏离 1.8mm（详见 ik.c 的 IK_WRIST_SINGULAR_SIN 注释）。 */
+        cnt = ik_solve_ref(dh, m, prev, sols, info);
         if (cnt <= 0) {
+            /* 扫描 info 找出失败原因：取第一个无效槽位的首个非有效段 */
+            int s, found = 0;
+            for (s = 0; s < IK_MAX_SOLUTIONS && !found; s++) {
+                if (info[s].shoulder != IK_SOL_VALID) {
+                    if (fail_reason) snprintf(fail_reason, 64,
+                             "IK 无解：肩部%s（点%d）",
+                             ik_sol_status_str(info[s].shoulder), i);
+                    found = 1;
+                } else if (info[s].elbow != IK_SOL_VALID) {
+                    if (fail_reason) snprintf(fail_reason, 64,
+                             "IK 无解：肘部%s（点%d）",
+                             ik_sol_status_str(info[s].elbow), i);
+                    found = 1;
+                } else if (info[s].wrist != IK_SOL_VALID) {
+                    if (fail_reason) snprintf(fail_reason, 64,
+                             "IK 无解：腕部%s（点%d）",
+                             ik_sol_status_str(info[s].wrist), i);
+                    found = 1;
+                }
+            }
+            if (!found && fail_reason) {
+                snprintf(fail_reason, 64, "IK 无解（点%d，原因不明）", i);
+            }
             if (fail_idx) *fail_idx = i;
             return -1;
         }
         n = ik_unwrap_solutions(sols, cnt, prev, unwrapped);
         n = ik_filter_by_limits(unwrapped, n, limits, filtered);
         if (n <= 0) {
+            if (fail_reason)
+                snprintf(fail_reason, 64, "候选解全部越软限位（点%d，IK 产出%d组）", i, cnt);
             if (fail_idx) *fail_idx = i;
             return -1;
         }
         if (ik_select_best_continuous(filtered, n, prev, NULL, q_out[i]) != 0) {
+            if (fail_reason)
+                snprintf(fail_reason, 64, "分支连续选解失败（点%d）", i);
             if (fail_idx) *fail_idx = i;
             return -1;
         }

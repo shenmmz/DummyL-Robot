@@ -144,6 +144,11 @@ const char *leesn_alarm_text(int code);
 /* 发送 Modbus 请求并等待响应：返回解析结果（ERR_NONE 成功 / 对应错误码） */
 ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *out);
 
+/* 发送 Modbus 请求但【不等从站响应】。与 robot_request 共用同一把总线锁：
+ * 半双工总线上任何发送都必须串行，否则会与并发线程撞车/冲掉对方响应。
+ * 调用方必须自行保证下一帧发出前上一帧的响应已发完。 */
+ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len);
+
 /* 关节号 -> Modbus 从站地址查表 */
 uint8_t joint_slave(int joint);
 
