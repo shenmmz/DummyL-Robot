@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>      /* isfinite/isnan：robot_movej 的目标角有限性检查 */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -301,6 +302,15 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
     if (robot_is_masked(robot, joint)) {
         printf("关节%d 已屏蔽，跳过运动\n", joint);
         return ERR_MASKED;
+    }
+    /* 【NaN/Inf 检查】单轴 MoveJ 此前完全没有这道检查，直接 DEG2STEPS 就写
+     * 0x00E8 了 —— NaN 转 int32 会变成 ±2147483647 附近的垃圾，驱动器收到
+     * 天文数字目标就猛冲、永不到位、超时急停（2026-09-18 实测甩出 34mm）。
+     * isfinite 用 <math.h>，本文件已包含。 */
+    if (!isfinite(angle_deg)) {
+        printf("[错误] 关节%d 目标角不是有限数（%s），已拒绝下发\n",
+               joint, isnan(angle_deg) ? "NaN" : "Inf");
+        return ERR_ARG;
     }
     /* 机械角 -> 电机角（仅本关节有效，其余位置零不影响单轴换算） */
     for (int i = 0; i < 6; i++) {

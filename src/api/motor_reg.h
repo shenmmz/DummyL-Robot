@@ -124,6 +124,15 @@ ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *s
  * steps - 目标位置脉冲数（由 DEG2STEPS 计算） */
 ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps);
 ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps);
+
+/* motor_move_steps_ok：目标步数量级体检（纯函数，无需串口，可离线单测）。
+ * motor_move_abs / _noread 内部调用它做最后一道出口闸门。
+ * 返回 1 = 允许下发，0 = 量级离谱，拒绝。
+ *
+ * 【挡的是什么】int32 级别的垃圾目标 —— NaN 转 int32 成 ±2147483647、
+ * 高低字写反成 3.28 亿。这类值 isfinite 挡不住（它们就是合法整数），
+ * 只有"大得不合物理"能识别。真机出过两次，代价都是甩臂 + 超时急停。 */
+int motor_move_steps_ok(int32_t steps);
 ErrCode motor_write_i32_noread(Robot *robot, int joint, uint16_t reg, int32_t val);
 
 /* 以【广播地址 0】写 32 位寄存器：从机识别但不返回报文，故不等响应。

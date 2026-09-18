@@ -26,4 +26,11 @@ int ini_read_tool_length(const char *path, double *tool_mm);
  * 允许缺段/缺项：调用方拿到 0 就按编译期默认值处理，不要当成致命错误。 */
 int ini_read_stall_current(const char *path, int th[6]);
 
+/* 读取 ini 的 [safety] 段的 max_step_deg（单次下发位移上限，机械角度）。
+ * 找到且解析成功（>0）返回 1，否则返回 0（调用方按编译期默认值处理）。
+ *
+ * 这是"目标离当前位置太远 ⇒ 拒绝下发"闸门的阈值。允许缺段/缺项 ——
+ * 拿不到就回退默认值，不要因为少配一行就让运动指令全废。 */
+int ini_read_max_step_deg(const char *path, double *deg);
+
 #endif /* INI_RW_H */

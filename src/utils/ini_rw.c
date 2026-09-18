@@ -142,6 +142,41 @@ int ini_read_stall_current(const char *path, int th[6])
     return (got == 6) ? 1 : 0;
 }
 
+/* 读取 [safety] 段（max_step_deg，单次下发位移上限，机械角度） */
+int ini_read_max_step_deg(const char *path, double *deg)
+{
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int in_safety = 0;
+
+    if (f == NULL) return 0;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = line;
+        char *eq;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') {
+            in_safety = (strncmp(p, "[safety]", sizeof("[safety]") - 1) == 0) ? 1 : 0;
+            continue;
+        }
+        if (*p == '#' || *p == ';' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+        if (!in_safety) continue;
+        if (strncmp(p, "max_step_deg", 12) != 0) continue;
+        eq = strchr(p, '=');
+        if (eq == NULL) continue;
+        fclose(f);
+        {
+            double v = atof(eq + 1);
+            if (v > 0.0) {
+                *deg = v;
+                return 1;
+            }
+        }
+        return 0;   /* 解析成 0 或负数 = 无效配置，回退默认而不是"关闭闸门" */
+    }
+    fclose(f);
+    return 0;
+}
+
 /* 读取 [tool] 段（tool_length，单位 mm） */
 int ini_read_tool_length(const char *path, double *tool_mm)
 {

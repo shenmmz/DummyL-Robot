@@ -179,6 +179,19 @@ target_link_libraries(test_line_nan PRIVATE kinematics trajectory m)
 add_test(NAME line_nan COMMAND test_line_nan)
 endif()
 
+# 下发前的目标合理性闸门：守卫"把垃圾目标写给驱动器"这一类事故。
+# 本机出过两次，目标值都是【完全合法的 int32】（NaN→±2147483647、字序写反→3.28 亿），
+# 所以"查 NaN"挡不住，只有量级闸门能拦。解析与量级判定是纯函数，可离线测。
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_safety_gate.c")
+add_executable(test_safety_gate tests/test_safety_gate.c)
+target_include_directories(test_safety_gate PRIVATE src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_safety_gate PRIVATE -Wall -Wextra)
+# 注意：control 与 api 互相引用（control→api 取 motor_*，api→control 取
+# robot_request/joint_slave），静态库有环，必须重复列出让链接器回扫。
+target_link_libraries(test_safety_gate PRIVATE control api control utils)
+add_test(NAME safety_gate COMMAND test_safety_gate)
+endif()
+
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_ik_verify.c")
 add_executable(test_ik_verify tests/test_ik_verify.c)
 target_include_directories(test_ik_verify PRIVATE src ${CMAKE_SOURCE_DIR})

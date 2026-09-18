@@ -8,6 +8,9 @@
 #include "api/motor_reg.h"
 #include "control/robot_internal.h"
 #include "comm/modbus_rtu.h"
+#include "config/robot_config.h"   /* ROBOT_ABS_MOVE_STEPS_LIMIT（出口闸门）*/
+
+#include <stdio.h>                 /* 出口闸门拦下垃圾目标时须打印原因 */
 
 /* ================= 基本寄存器读写 ================= */
 
@@ -378,17 +381,50 @@ ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *s
 
 /* ================= 运动控制 ================= */
 
+/* 目标步数量级体检：不合法返回 0 并打印原因。
+ *
+ * 【为什么放在这里】motor_move_abs / _noread 是写 0x00E8 的唯一出口，
+ * 所有运动指令（MoveJ 单轴/多轴、MoveL、回零、测量摆动）最终都经过它。
+ * 把闸门放在这一层，等于给"任何一路计算出垃圾目标"兜了底 ——
+ * 靠"每一层都小心"防不住，必须在出口拦。
+ *
+ * 【代价对比】写一次垃圾目标的代价：电机朝天文数字猛冲、永远到不了位、
+ * 超时急停，实测把臂甩出 34mm。而这里只是一次整数比较，零成本。 */
+static int abs_move_steps_ok(int joint, int32_t steps)
+{
+    if (!motor_move_steps_ok(steps)) {
+        printf("[错误] 关节%d 目标位置 %d 步超出合理量级（±%d），已拒绝下发。\n"
+               "       这么大的目标只可能是逻辑错误（NaN 转 int32、高低字写反、\n"
+               "       单位搞错），而它的代价是电机猛冲、超时急停、把臂甩出去。\n",
+               joint, (int)steps, ROBOT_ABS_MOVE_STEPS_LIMIT);
+        return 0;
+    }
+    return 1;
+}
+
+/* motor_move_steps_ok：目标步数的量级体检（纯函数，可离线单测）。
+ * 抽出来就是为了能测 —— 这道闸门平时一次都不会触发，
+ * 唯一能证明它没写反的办法就是拿真事故里的那些数去喂它。 */
+int motor_move_steps_ok(int32_t steps)
+{
+    if (steps > ROBOT_ABS_MOVE_STEPS_LIMIT) return 0;
+    if (steps < -ROBOT_ABS_MOVE_STEPS_LIMIT) return 0;
+    return 1;
+}
+
 /* motor_move_abs：绝对位置运动
  * 写 0x00E8~0x00E9（INT32 脉冲），电机运行到目标绝对位置
  * 运行中也可执行，步数由 DEG2STEPS 计算 */
 ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
 {
+    if (!abs_move_steps_ok(joint, steps)) return ERR_ARG;
     return motor_write_i32(robot, joint, LEESN_REG_ABS_MOVE, steps);
 }
 
 /* motor_move_abs_noread：同上但不读响应，仅供 diag 做对照测量 */
 ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps)
 {
+    if (!abs_move_steps_ok(joint, steps)) return ERR_ARG;
     return motor_write_i32_noread(robot, joint, LEESN_REG_ABS_MOVE, steps);
 }
 

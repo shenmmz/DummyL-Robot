@@ -127,6 +127,13 @@ static int    g_tx_written = 0;
  * 最大 0.56°），因此 15° 已经是很宽松的界 —— 真超了基本可以断定是擦过
  * 奇异位形或逆解分支翻转。详见 movl_plan 体检①。 */
 #define MOVL_JUMP_WARN_DEG     15.0
+/* 单次下发的位移上限(机械角度)，ini [safety] max_step_deg 可覆盖。
+ * 依据与取值理由见 movl_max_step_deg 的注释（默认 = J4/J6 软限位全宽 720°）。 */
+#define MOVEJ_MAX_STEP_DEG     720.0
+
+/* 前向声明：定义在下方（与 movl_bow_budget 等 ini 读取函数放一起），
+ * 但 movej_issue 在它之前就要用。 */
+static double movl_max_step_deg(void);
 #define MOVL_EPS_MM         0.05    /* "已在目标位姿"判据：位置位移小于此值(mm)认为没动 */
 #define MOVL_EPS_DEG        0.05    /* 同上，姿态角(deg)；两者同时满足才早退 */
 
@@ -175,6 +182,10 @@ typedef struct {
 } MotorMonitor;
 
 static MotorMonitor *g_motor_mon = NULL;
+
+/* 当前监控器（cmd_dispatch 入口处记下）。MoveL 的过流保护阈值从它读，
+ * 这样 stall:N:MA 的运行时改动能立刻生效 —— 见 movl_stall_thresholds。 */
+static Monitor *g_mon = NULL;
 
 /* motor_monitor_thread：后台线程主循环，每1秒打印一次全部电机信息 */
 static DWORD WINAPI motor_monitor_thread(LPVOID arg)
@@ -615,6 +626,11 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
 {
     int j;
 
+    /* 记下监控器，让 MoveL 能读到【运行时】的堵转阈值。
+     * 不能让 movl_stall_thresholds 自己去读 ini —— 那样用 stall:N:MA
+     * 临时改的阈值对 MoveL 完全无效，而且打印还会谎报"过流保护 开启"。 */
+    g_mon = mon;
+
     /* 【位姿闸门】零点丢失时机械角全是假值，基于位姿的运动命令一律拒绝。
      * 放行 home（它就是要重建零点）、只读命令、以及 enable/disable
      * （手动处理机械臂时要能泄力）。 */
@@ -898,6 +914,39 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
             dist[j] = pos_ok ? (double)abs(tgt[j] - pos) : 0.0;
         }
         if (dist[j] > max_dist) max_dist = dist[j];
+    }
+
+    /* 【防线四 · 相对位移闸门】单次下发的位移不得离谱。
+     *
+     * 出口层（motor_move_abs）那条只挡"绝对值大到不合物理"的垃圾，
+     * 挡不住"数值在合理量级内、但离当前位置十万八千里"的逻辑错误 ——
+     * 比如单位搞错（度当弧度）、符号搞反、坐标系弄错。这类错误算出来的
+     * 目标完全是个"正常的 int32"，只有"相对当前位置太远"能识别。
+     *
+     * 【为什么零成本】dist[j] 在上面已经算好了（算转速本来就要它），
+     * 这里只是加一次比较，不额外占用总线。MoveL 每段都要下发，
+     * 多一笔读事务就是 15ms × 6 轴，能省则省。
+     *
+     * 【阈值】ini [safety] max_step_deg，默认 MOVEJ_MAX_STEP_DEG。
+     * 取该关节软限位全宽 + 余量：既然起点终点都在限位内（合法运动的
+     * 必要条件），单次位移就不该超过全宽。这跟"用户能不能走出限位"
+     * 是两件事 —— 这里只拦明显离谱的，限位本身由 pose_scan_bad 与
+     * line_solve 的限位过滤负责。 */
+    for (i = 0; i < num_joints; i++) {
+        double max_steps;
+        j = joints[i];
+        if (robot_is_masked(robot, j)) continue;
+        max_steps = (double)DEG2STEPS(movl_max_step_deg(), reductions[j - 1]);
+        if (max_steps < 0) max_steps = -max_steps;
+        if (dist[j] > max_steps) {
+            printf("[错误] 关节%d 本次位移 %.1f° 超过单步上限 %.0f°，已拒绝下发。\n"
+                   "       目标离当前位置这么远，通常是单位/符号/坐标系搞错了，\n"
+                   "       真发出去就是电机猛冲 + 超时急停。确认无误就调大\n"
+                   "       ini [safety] max_step_deg（当前 %.0f）。\n",
+                   j, dist[j] / (double)DEG2STEPS(1.0, reductions[j - 1]),
+                   movl_max_step_deg(), movl_max_step_deg());
+            return 0;
+        }
     }
 
     /* 先只算不写：把六轴转速定下来 */
@@ -1260,18 +1309,32 @@ static int movl_noread_gap_ms(void)
     return MOVEJ_NR_GAP_MS;
 }
 
-/* movl_stall_thresholds：逐轴堵转/过流阈值(mA)，从 ini [stall] j1..j6 读。
- * 读不到（缺段或缺任一项）回退到编译期默认表 ROBOT_STALL_CURRENT_MA_TABLE（全 0 = 全关）。
- * 与 main.c 创建 monitor 用的是同一个 ini 段，两处口径必须一致。
+/* movl_stall_thresholds：取六轴堵转阈值(mA)。
  *
  * 【为什么逐轴】旧代码是 double stall = ROBOT_STALL_CURRENT_MA（全局单值），
  * 六轴机座大小不同、额定电流能差好几倍，一个值必然要么大轴一动就误报、
- * 要么小轴撞死都不报。 */
+ * 要么小轴撞死都不报。
+ *
+ * 【取值优先级】运行时（Monitor） > ini > 编译期默认。
+ *
+ * 【2026-09-18 修】原来这里只读 ini，完全无视运行时用 stall:N:MA 改过的值，
+ * 造成两个后果：
+ *   ① MoveL 打印谎报 —— 明明已经 stall:1:0 关掉了，仍打印"过流保护 开启"；
+ *   ② 更糟：临时改的阈值对 MoveL **根本不生效**。想临时压低阈值让保护更
+ *      灵敏（比如换新工件时调到 300mA），MoveL 照样用 ini 的老值；
+ *      反过来想临时关掉做对比测试，也关不掉 —— A/B 测出来的"两组一样"
+ *      其实是假象，两组都还在保护。
+ * 现在改为优先从 Monitor 读（cmd_stall 改的就是它），没有监控器才回退 ini。 */
 static void movl_stall_thresholds(int th[6])
 {
     const int def[ROBOT_JOINT_COUNT] = ROBOT_STALL_CURRENT_MA_TABLE;
     int i;
 
+    if (g_mon != NULL) {
+        for (i = 0; i < ROBOT_JOINT_COUNT; i++)
+            th[i] = monitor_get_stall_threshold(g_mon, i + 1);
+        return;
+    }
     if (ini_read_stall_current(INI_PATH, th)) return;
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) th[i] = def[i];
 }
@@ -1443,6 +1506,24 @@ static double movl_bow_mm(const double q0[6], const double q1[6],
  *       六轴按行程比例分配转速同起同停，全程一次加减速，无段间停顿。
  *       代价是段内走关节空间直线 ⇒ 偏离笛卡尔直线（弓高），已按行程估算并打印。
  *       P2 电流自适应限速依赖分段，sync 下不生效。 */
+
+/* movl_max_step_deg：单次下发的最大位移(机械角，度)，从 ini [safety] max_step_deg 读，
+ * 读不到用 MOVEJ_MAX_STEP_DEG。这是下发前的【相对位移闸门】阈值 —— 见 movej_issue。
+ *
+ * 【为什么由用户定】它决定"多远算离谱"，取决于你怎么用这台臂：
+ * 只做小范围画图的可以设到 30° 挡得更死；要整圈转 J4/J6 的就得放宽。
+ * 代码只提供默认值与实测依据，不替用户拍板。
+ *
+ * 【默认值 720° 的依据】关节软限位最宽的是 J4/J6（±360°，全宽 720°）。
+ * 合法运动的起点终点都在限位内 ⇒ 单次位移不会超过全宽。取全宽恰好让
+ * "任何限位内的点到另一个限位内的点"都放行，同时把 3.28 亿步
+ * （= 约 118000°）这类逻辑错误死死挡住。 */
+static double movl_max_step_deg(void)
+{
+    double v;
+    if (ini_read_max_step_deg(INI_PATH, &v)) return v;
+    return MOVEJ_MAX_STEP_DEG;
+}
 
 /* movl_bow_budget：弓高预算(mm)，从 ini [movel] bow_mm 读，读不到用 MOVL_SYNC_BOW_MM。
  *
