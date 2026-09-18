@@ -167,6 +167,18 @@ target_link_libraries(test_ik_wrist PRIVATE kinematics trajectory m)
 add_test(NAME ik_wrist COMMAND test_ik_wrist)
 endif()
 
+# 直线插补的 NaN 防线：守卫 2026-09-18 那次"34mm 乱甩 + 超时急停"的真正根因
+# —— home 姿态 Ry=90° 正踩万向锁，quat_to_euler 的 asin 自变量浮点越界
+# （1.0000000000000002）返回 NaN，一路转成 ±2147483647 的垃圾目标写给驱动器。
+# 三条防线（asin clamp / line_plan 查有限 / movej_issue 拒发）逐条验证。
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_line_nan.c")
+add_executable(test_line_nan tests/test_line_nan.c)
+target_include_directories(test_line_nan PRIVATE src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_line_nan PRIVATE -Wall -Wextra)
+target_link_libraries(test_line_nan PRIVATE kinematics trajectory m)
+add_test(NAME line_nan COMMAND test_line_nan)
+endif()
+
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_ik_verify.c")
 add_executable(test_ik_verify tests/test_ik_verify.c)
 target_include_directories(test_ik_verify PRIVATE src ${CMAKE_SOURCE_DIR})

@@ -51,11 +51,33 @@ static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, dou
     quat_mul(q_yaw, tmp, q);
 }
 
+/* 夹到 [-1, 1]。asin/acos 的自变量一旦因浮点误差略微越界（1.0000000000000002），
+ * 返回值立刻变 NaN —— 详见 quat_to_euler 里的注释，这条 clamp 是守着它的。 */
+static double clamp_pm1(double x)
+{
+    if (x > 1.0) return 1.0;
+    if (x < -1.0) return -1.0;
+    return x;
+}
+
 /* 四元数 -> 欧拉角(ZYX) 度 */
 static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg, double *yaw_deg)
 {
+    /* 【2026-09-18 事故根因】pitch = asin(2*(q0*q2 - q1*q3))。
+     * 当姿态正好落在万向锁（pitch = ±90°）时，asin 的自变量理论上是 ±1，
+     * 但四元数插值出来的值常带着浮点误差算成 1.0000000000000002，
+     * asin 越界直接返回 **NaN**。
+     *
+     * 后果链条（真机实测）：NaN 位姿 → IK 解出 NaN 关节角 → 转 int32 步数时
+     * 变成 ±2147483647 附近的垃圾 → 下发给驱动器一个天文数字目标 →
+     * 臂朝那个方向猛冲、永远到不了位 → 超时急停 → **末端偏差 34mm、臂乱甩**。
+     * home 姿态 Ry 恰好 = 90°（万向锁），所以从 home 出发的 MoveL 必中。
+     *
+     * 修法：asin 自变量先 clamp 到 [-1,1]。只 clamp 还不够 —— 下游另有两道
+     * 防线（line_plan 查位姿、movl 下发前查目标），防止别处再冒出 NaN 时
+     * 又把垃圾写给驱动器。 */
     double roll = atan2(2*(q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
-    double pitch = asin(2*(q[0]*q[2] - q[1]*q[3]));
+    double pitch = asin(clamp_pm1(2*(q[0]*q[2] - q[1]*q[3])));
     double yaw = atan2(2*(q[0]*q[3] + q[1]*q[2]), 1 - 2*(q[2]*q[2] + q[3]*q[3]));
     *roll_deg = roll / LINE_DEG2RAD;
     *pitch_deg = pitch / LINE_DEG2RAD;
@@ -164,7 +186,15 @@ int line_plan(const double start_pose[6], const double end_pose[6],
         }
         slerp(q_start, q_end, t, q_interp);
         quat_to_euler(q_interp, &pose_interp[3], &pose_interp[4], &pose_interp[5]);
+        /* 【防线二】逐点查有限性。
+         * 上游 quat_to_euler 已 clamp 过 asin，但插值链路里还有别的可能产生
+         * NaN/Inf（四元数未归一化、起点终点姿态退化等）。这里不拦的话，
+         * NaN 会一路穿到驱动器、变成天文数字的目标位置（真机实测甩 34mm
+         * 并超时急停，见 quat_to_euler 注释）。宁可明确失败，也不下发垃圾。 */
         for (j = 0; j < 6; j++) {
+            if (!isfinite(pose_interp[j])) {
+                return -1;
+            }
             path->pose[i][j] = pose_interp[j];
         }
     }

@@ -864,6 +864,27 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
         return 0;
     }
 
+    /* 【防线三 · 最后一道闸】目标角里只要有一个是 NaN/Inf，就地拒绝下发。
+     *
+     * 为什么必须在这里拦：DEG2STEPS 把 double 转 int32，NaN 转出来是
+     * ±2147483647 附近的垃圾，写进 0x00E8 后驱动器就会朝一个天文数字目标
+     * 猛冲、永远到不了位 —— 真机实测：臂乱甩、末端偏差 34mm、最后超时急停
+     * （日志里表现为「还差 ±2147228222 步」）。
+     * 那次的源头是 line_plan 的 quat_to_euler 在万向锁处 asin 越界返回 NaN
+     * （已在 line.c 修根因 + 加了位姿有限性检查），但 NaN 还可能从别的路径
+     * 冒出来，而【任何一路 NaN 的代价都是撞机】，所以下发前必须无条件拦。
+     * 宁可明确报错不动，也绝不能把垃圾写给驱动器。 */
+    for (i = 0; i < num_joints; i++) {
+        if (!isfinite(angles[i])) {
+            printf("[错误] 关节%d 的目标角不是有限数（%s），已拒绝下发。\n"
+                   "       下发 NaN/Inf 会被转成 ±2147483647 附近的步数写进驱动器，\n"
+                   "       电机会朝天文数字目标猛冲并超时急停（曾实测甩出 34mm）。\n"
+                   "       请检查目标位姿是否落在万向锁（Ry≈±90°）等退化姿态上。\n",
+                   joints[i], isnan(angles[i]) ? "NaN" : "Inf");
+            return 0;
+        }
+    }
+
     for (i = 0; i < num_joints; i++) {
         j = joints[i];
         if (robot_is_masked(robot, j)) continue;
@@ -1363,8 +1384,10 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
                    "       此处 θ4 与 θ6 同轴、关节分配不唯一。IK 已做退化处理\n"
                    "       （保留真实 θ5、θ4 锚定上一点），末端位姿仍然精确；\n"
                    "       但离开奇异点时 θ4 会被位姿唯一锁死，可能要求 J4 大角度转动。\n"
-                   "       【实测代价】home 位形（J5=0）做 MoveL 曾末端偏差 34mm、臂乱甩。\n"
-                   "       建议先用 MoveJ:J1..J6 把 J5 移出 ±%.0f° 再做笛卡尔直线。\n",
+                   "       【实测】home 位形出发沿 +Y 走 30mm：第 1 段就要 J4 转 89.98°。\n"
+                   "       建议先用 MoveJ:J1..J6 把 J5 移出 ±%.0f° 再做笛卡尔直线。\n"
+                   "       注：2026-09-18 那次「末端偏差 34mm、臂乱甩」的真因不是它，\n"
+                   "       而是万向锁处 asin 越界产生 NaN（见 test_line_nan.c），已修。\n",
                    i, count, q_seq[i][4], MOVL_WRIST_SINGULAR_DEG);
             break;
         }
