@@ -68,4 +68,11 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
 int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint[6],
                     double *seg_dt, double *dt_total);
 
+/* line_max_joint_jump：相邻插补点之间的【最大单关节角度跳变】(度)。
+ * 规划层的"甩臂"判据 —— 抽成纯函数以便离线单测（CLI 里的 movl_plan 不好测）。
+ * out_joint / out_seg 可为 NULL；非 NULL 时写出该跳变发生在第几轴(1..6)、
+ * 第几段(1..count-1)。count<2 或 q_seq 为 NULL 时返回 0。 */
+double line_max_joint_jump(const double (*q_seq)[6], int count,
+                           int *out_joint, int *out_seg);
+
 #endif /* LINE_H */

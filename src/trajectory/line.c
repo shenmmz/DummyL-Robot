@@ -310,3 +310,39 @@ int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint
     }
     return 0;
 }
+
+/* line_max_joint_jump：扫出相邻插补点之间【最大的单关节角度跳变】(度)。
+ *
+ * 【为什么单独抽成纯函数】"单段跳变太大"是甩臂最通用的前兆 —— 不管成因是
+ * 腕部奇异、逆解分支翻转还是选解抖动，最终都表现为"一小段笛卡尔位移需要
+ * 某个关节转一大圈"。这个判据要在规划层做拦截，逻辑必须能脱离 CLI 单测。
+ *
+ * 【实测基准 2026-09-18】
+ *   正常：home 出发沿 -Z 走 50mm（1mm 弦 ⇒ 51 点），J3 全程 21° 分 50 段
+ *         ⇒ 单段最大约 0.9°。
+ *   病态：home 出发沿 +Y 走 30mm（起点 J5=0，正踩腕部奇异）
+ *         ⇒ **第 1 段就要 J4 转 89.98°**（θ5 一离开 0，θ4 立刻被位姿唯一
+ *         锁死 —— 奇异位形的物理本质，IK 层消不掉，只能绕开）。
+ *   两者差两个数量级，所以用固定阈值（默认 30°）区分非常安全。
+ *
+ * out_joint/out_seg 可为 NULL；非 NULL 时写出"第几轴的哪一段"（均从 1 起算）。
+ * count < 2 或 q_seq 为 NULL 时返回 0。 */
+double line_max_joint_jump(const double (*q_seq)[6], int count,
+                           int *out_joint, int *out_seg)
+{
+    double worst = 0.0;
+    int worst_j = 0, worst_seg = 0;
+    int i, j;
+
+    if (q_seq == NULL || count < 2) return 0.0;
+
+    for (i = 1; i < count; i++) {
+        for (j = 0; j < 6; j++) {
+            double dj = fabs(q_seq[i][j] - q_seq[i - 1][j]);
+            if (dj > worst) { worst = dj; worst_j = j + 1; worst_seg = i; }
+        }
+    }
+    if (out_joint != NULL) *out_joint = worst_j;
+    if (out_seg   != NULL) *out_seg   = worst_seg;
+    return worst;
+}

@@ -40,6 +40,14 @@ ErrCode robot_disable(Robot *robot, int joint);
  * 返回 ErrCode：ERR_NONE / ERR_ARG / ERR_MASKED（屏蔽跳过）/ 通信错误 */
 ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm);
 
+/* 软限位判定（纯函数，不碰总线，可离线单测）：目标机械角是否落在软限位内。
+ * 返回 1 = 合法；0 = 越限；-1 = 关节号非法（与"越限"分开，两者处置不同）。
+ * out_min / out_max 可为 NULL；非 NULL 时写出该轴限位区间（度），供报错打印。
+ *
+ * ⚠️ robot_movej 【不】做这条检查 —— 回零必须能顶到限位，详见 robot.c 的实现注释。
+ * 只用于拦截【用户显式指定的目标角】（CLI 层在下发前调用）。 */
+int robot_angle_in_soft_limit(int joint, double deg, double *out_min, double *out_max);
+
 /* 查询关节在线状态（读 0x0006~0x0007 状态字）：返回 1 在线，0 离线/失败/屏蔽 */
 int robot_is_online(Robot *robot, int joint);
 

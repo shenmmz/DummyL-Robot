@@ -33,4 +33,17 @@ int ini_read_stall_current(const char *path, int th[6]);
  * 拿不到就回退默认值，不要因为少配一行就让运动指令全废。 */
 int ini_read_max_step_deg(const char *path, double *deg);
 
+/* 通用读取：指定段 + 键，值必须 > 0（安全阈值配成 0/负数一律视为无效，
+ * 回退默认，绝不解释为"关闭闸门"）。section 不带方括号，如 "safety"。
+ * 返回 1 = 读到；0 = 打不开 / 段或键不存在 / 值 <= 0。 */
+int ini_read_positive_double(const char *path, const char *section,
+                             const char *key, double *out);
+
+/* 读取 ini 的 [safety] 段的 max_jump_deg（MoveL 规划层相邻插补点之间的
+ * 单关节跳变上限，机械角度）。找到且 >0 返回 1，否则返回 0（回退默认）。
+ *
+ * 这是"一段笛卡尔位移需要某个关节转一大圈 ⇒ 拒绝整条 MoveL"闸门的阈值。
+ * 判据本体是 trajectory/line.c 的 line_max_joint_jump()（纯函数，已单测）。 */
+int ini_read_max_jump_deg(const char *path, double *deg);
+
 #endif /* INI_RW_H */

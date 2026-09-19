@@ -130,10 +130,20 @@ static int    g_tx_written = 0;
 /* 单次下发的位移上限(机械角度)，ini [safety] max_step_deg 可覆盖。
  * 依据与取值理由见 movl_max_step_deg 的注释（默认 = J4/J6 软限位全宽 720°）。 */
 #define MOVEJ_MAX_STEP_DEG     720.0
+/* MoveL 规划层"单段跳变"的【拒绝】阈值(度)，ini [safety] max_jump_deg 可覆盖。
+ * 与上面 MOVL_JUMP_WARN_DEG 是两档：15° 只告警、30° 直接拒绝。
+ *
+ * 【为什么是 30】实测两端差两个数量级：
+ *   正常路径单段 <1°（home 沿 -Z 走 50mm，1mm 弦 ⇒ J3 全程 21° 分 50 段）；
+ *   病态路径第 1 段就要 J4 转 89.98°（home 沿 +Y 走，起点 J5=0 正踩腕奇异）。
+ * 取 30° 两边都留了极大余量：既不误伤正常作业，也绝不会放过 90° 的甩臂。
+ * 判据本体 line_max_joint_jump() 在 trajectory/line.c（纯函数，已单测）。 */
+#define MOVL_JUMP_MAX_DEG      30.0
 
 /* 前向声明：定义在下方（与 movl_bow_budget 等 ini 读取函数放一起），
  * 但 movej_issue 在它之前就要用。 */
 static double movl_max_step_deg(void);
+static double movl_max_jump_deg(void);
 #define MOVL_EPS_MM         0.05    /* "已在目标位姿"判据：位置位移小于此值(mm)认为没动 */
 #define MOVL_EPS_DEG        0.05    /* 同上，姿态角(deg)；两者同时满足才早退 */
 
@@ -681,6 +691,22 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
                     target = cur + cmd->angle_deg;   /* 相对当前实际位置 */
                 }
             }
+            /* 越软限位拦截（含相对运动换算出来的目标 —— 当前位置 + 位移，
+             * 一样可能越过限位）。判据与 movej_issue 里那条完全同源。 */
+            if (can_move) {
+                double lmin = 0.0, lmax = 0.0;
+                int r = robot_angle_in_soft_limit(cmd->joint, target, &lmin, &lmax);
+                if (r < 0) {
+                    printf("[错误] 关节号 %d 非法（应为 1..6），已拒绝下发\n", cmd->joint);
+                    can_move = 0;
+                } else if (r == 0) {
+                    printf("[错误] 关节%d 目标 %.2f° 超出软限位 [%.0f, %.0f]°，已拒绝下发。\n"
+                           "       越限位的目标必然让电机一路顶到机械极限并触发堵转/过流，\n"
+                           "       是一次纯粹的无效冲撞。请改到限位内的角度。\n",
+                           cmd->joint, target, lmin, lmax);
+                    can_move = 0;
+                }
+            }
             if (can_move) {
                 ErrCode rc = robot_movej(robot, cmd->joint, target, cmd->speed_rpm);
                 if (rc != ERR_NONE) printf("[错误] 运动指令失败：%s\n", err_str(rc));
@@ -932,6 +958,35 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
      * 必要条件），单次位移就不该超过全宽。这跟"用户能不能走出限位"
      * 是两件事 —— 这里只拦明显离谱的，限位本身由 pose_scan_bad 与
      * line_solve 的限位过滤负责。 */
+    /* 【防线五 · 越软限位拦截】目标角必须落在该轴的软限位区间内。
+     *
+     * 【2026-09-18 用户拍板：拦截】此前单轴 MoveJ 完全不查限位（movej:1:500
+     * 会照发，而 J1 限位是 -170~179）。理由：目标越限位意味着电机必然一路
+     * 顶到机械极限、触发堵转/过流，是一次纯粹的无效冲撞。
+     *
+     * 【为什么不放进 robot_movej】回零（home.c）也走 robot_movej，而回零的
+     * 原理就是朝一个方向顶到堵转 —— 起点已贴着限位、过程中必然越限。塞进
+     * robot_movej 会让六轴全部回不了零。所以只拦【用户显式指定的目标角】。
+     *
+     * 【不影响谁】J4/J6 的限位是 ±360°，整圈转动完全在范围内，不受影响；
+     * MoveL 与回零不走这条路径（MoveL 的限位由 line_solve 的限位过滤负责）。 */
+    for (i = 0; i < num_joints; i++) {
+        double lmin = 0.0, lmax = 0.0;
+        int r = robot_angle_in_soft_limit(joints[i], angles[i], &lmin, &lmax);
+        if (r < 0) {
+            printf("[错误] 关节号 %d 非法（应为 1..6），已拒绝下发\n", joints[i]);
+            return 0;
+        }
+        if (r == 0) {
+            printf("[错误] 关节%d 目标 %.2f° 超出软限位 [%.0f, %.0f]°，已拒绝下发。\n"
+                   "       越限位的目标必然让电机一路顶到机械极限并触发堵转/过流，\n"
+                   "       是一次纯粹的无效冲撞。请改到限位内的角度。\n"
+                   "       （限位值在 config/robot_config.h 的 ROBOT_JOINT_LIMIT_MIN/MAX_DEG）\n",
+                   joints[i], angles[i], lmin, lmax);
+            return 0;
+        }
+    }
+
     for (i = 0; i < num_joints; i++) {
         double max_steps;
         j = joints[i];
@@ -1412,31 +1467,51 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
     *out_count = count;
 
     /* ---------- 规划体检测（两条，都是"甩臂"的前兆）---------- */
-    int warn_j = 0;
-    double warn_at = 0.0, warn_deg = 0.0;
+    int warn_j = 0, warn_seg = 0;
+    double warn_deg;
 
     /* 体检①：相邻插补点之间的单关节跳变。
      * 这是最通用的"甩臂"前兆 —— 不管成因是奇异、分支翻转还是选型跳变，
      * 最终都表现为"一小段笛卡尔位移需要某个关节转一大圈"。
-     * 【为什么不直接拦截】末端位姿是精确的，只是关节走得凶；是否接受由
-     * 用户判断（有些工况就是要过奇异）。但必须把数字和后果摆在明面上。
-     * 【实测 2026-09-18】home 位形（J5=0，腕部奇异）出发沿 +Y 走 30mm：
+     *
+     * 【2026-09-18 用户拍板：从"只告警"改成"超阈值直接拒绝"】
+     * 原先的考虑是"末端位姿仍然精确，是否接受由用户判断"，但实测下来这个
+     * 自由度没有价值：真到了 90° 那一档，段时长只有几毫秒，关节根本跑不完，
+     * 结果不是"走得凶"，而是臂以一种你没预料到的姿态扫过去（实测：该段被
+     * 时间表按关节限速拉长到 12.5 s，期间末端只挪 1mm、J4 却转过 89.97°）。
+     * 留着让用户选，等于把撞机风险当成选项。
+     * 现在两档：>15° 只告警（提示，仍执行）；>30° 拒绝整条 MoveL。
+     *
+     * 【实测】home 位形（J5=0，腕部奇异）出发沿 +Y 走 30mm：
      * 第 1 段就要 J4 转 89.98° —— θ5 一离开 0，θ4 就被位姿唯一锁死，
-     * 这是奇异位形的物理本质，IK 层无法消掉，只能绕开。 */
-    for (i = 1; i < count; i++) {
-        int j;
-        for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
-            double dj = fabs(q_seq[i][j] - q_seq[i - 1][j]);
-            if (dj > warn_deg) { warn_deg = dj; warn_j = j + 1; warn_at = (double)i; }
-        }
+     * 这是奇异位形的物理本质，IK 层无法消掉，只能绕开（先用 MoveJ 挪开 J5）。
+     *
+     * 【为什么用 line_max_joint_jump】判据抽成了 trajectory/line.c 里的纯函数，
+     * 这样它能被离线单测覆盖 —— 这段逻辑原本埋在 CLI 里，没法测。 */
+    warn_deg = line_max_joint_jump(q_seq, count, &warn_j, &warn_seg);
+
+    if (warn_deg > movl_max_jump_deg()) {
+        printf("[拒绝] 规划路径第 %d/%d 段：关节%d 单段要转 %.1f°,\n"
+               "       超过单段跳变上限 %.0f°（ini [safety] max_jump_deg）⇒ 整条 MoveL 不下发。\n"
+               "       【实测后果】时间表按关节限速自动把这一段拉长到十几秒 ——\n"
+               "       这段时间里末端只挪 1mm，而 J4 转过 90°：臂会以一种你\n"
+               "       完全没预料到的大幅度慢慢扫过去，肘部/法兰扫过一大片空间。\n"
+               "       不是「猛冲」，但撞到周围东西的概率极高，而且看起来根本不像直线。\n"
+               "       成因通常是路径擦过腕部奇异位形（J5≈0）或逆解分支翻转。\n"
+               "       【怎么绕开】先用 MoveJ:J1..J6 把姿态挪开（尤其把 J5 移出 ±5°），\n"
+               "       再从新姿态走笛卡尔直线。确认要强走就把 max_jump_deg 调大,\n"
+               "       但那等于自己承担甩臂风险。\n",
+               warn_seg, count, warn_j, warn_deg, movl_max_jump_deg());
+        return -4;
     }
     if (warn_deg > MOVL_JUMP_WARN_DEG) {
-        printf("[警告] 规划路径第 %.0f/%d 段：关节%d 单段要转 %.1f°（阈值 %.0f°）。\n"
-               "       末端位姿是精确的，但关节会走得很凶 —— 段时长有限，\n"
-               "       很可能触发过流急停，或者把臂甩出去。\n"
-               "       成因通常是路径擦过奇异位形/逆解分支翻转，\n"
+        printf("[警告] 规划路径第 %d/%d 段：关节%d 单段要转 %.1f°（告警阈值 %.0f°）。\n"
+               "       末端位姿是精确的，但关节会走得很凶 —— 时间表会把这一段\n"
+               "       按关节限速拉长，期间末端几乎不动而某个关节转过一大片角度，\n"
+               "       臂会以一种你没预料到的姿态扫过去。留意周围有没有东西可撞。\n"
+               "       成因通常是路径擦过奇异位形/逆解分支翻转,\n"
                "       建议先用 MoveJ:J1..J6 把姿态挪开再走笛卡尔直线。\n",
-               warn_at, count, warn_j, warn_deg, MOVL_JUMP_WARN_DEG);
+               warn_seg, count, warn_j, warn_deg, MOVL_JUMP_WARN_DEG);
     }
 
     /* 体检②：路径是否进入腕部奇异区（θ5≈0）。
@@ -1523,6 +1598,17 @@ static double movl_max_step_deg(void)
     double v;
     if (ini_read_max_step_deg(INI_PATH, &v)) return v;
     return MOVEJ_MAX_STEP_DEG;
+}
+
+/* movl_max_jump_deg：MoveL 规划层允许的单段关节跳变上限(度)，
+ * 从 ini [safety] max_jump_deg 读，读不到用 MOVL_JUMP_MAX_DEG。
+ * 超过就【拒绝整条 MoveL】—— 见 movl_plan 返回值 -4 处。
+ * 默认 30° 的依据见 MOVL_JUMP_MAX_DEG 的注释（正常 <1° vs 病态 89.98°）。 */
+static double movl_max_jump_deg(void)
+{
+    double v;
+    if (ini_read_max_jump_deg(INI_PATH, &v)) return v;
+    return MOVL_JUMP_MAX_DEG;
 }
 
 /* movl_bow_budget：弓高预算(mm)，从 ini [movel] bow_mm 读，读不到用 MOVL_SYNC_BOW_MM。
@@ -1649,9 +1735,18 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     }
 
     double step_mm = MOVL_STEP_MM;
-    if (movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,
-                  q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason) != 0) {
-        printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位：%s\n", fail_idx, fail_reason);
+    int rc = 0;                  /* movl_plan 的返回码：-4 需要与普通失败区分 */
+
+    /* rc == -4 = 规划层拒绝（单段跳变过大），movl_plan 自己已把原因打印清楚，
+     * 这里不能再套"逆解失败/越软限位"的文案 —— 那会把用户往错误方向引。
+     * 其余负值才是逆解/时间表失败，fail_idx 与 fail_reason 此时才有意义。 */
+    rc = movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,
+                   q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
+    if (rc != 0) {
+        if (rc != -4) {
+            printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位：%s\n",
+                   fail_idx, fail_reason);
+        }
         return;
     }
 
@@ -1669,9 +1764,13 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         if (n_seg < 1) n_seg = 1;
         if (n_seg < count - 1) {
             step_mm = dist / (double)n_seg;
-            if (movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,
-                          q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason) != 0) {
-                printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位：%s\n", fail_idx, fail_reason);
+            rc = movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,
+                           q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
+            if (rc != 0) {
+                if (rc != -4) {
+                    printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位：%s\n",
+                           fail_idx, fail_reason);
+                }
                 return;
             }
         }

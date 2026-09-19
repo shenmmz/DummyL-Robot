@@ -472,6 +472,112 @@ static void test_no_false_positive(void)
     }
 }
 
+/* ====== 7. 规划层"甩臂"判据：line_max_joint_jump ======
+ *
+ * 【为什么要有这一节】2026-09-18 用户拍板：home 位形（J5=0，正踩腕部奇异）
+ * 出发沿 +Y 走，第 1 段就要 J4 转 89.98° —— 这是奇异位形的物理本质，IK 层
+ * 消不掉。原先只打印告警照常执行，现在改成超过阈值（默认 30°）直接拒绝。
+ * 判据抽成 line_max_joint_jump() 就是为了让它能被离线测到 —— 埋在 CLI 里
+ * 的 movl_plan 是没法单测的。
+ *
+ * 【测两件事】
+ *   ① 病态路径必须**超阈值**（否则闸门形同虚设）
+ *   ② 正常路径必须**远低于阈值**（否则闸门误伤正常作业）
+ * 只测①是典型的"测试为结论服务"：一个永远返回 90° 的函数也能过①。 */
+static void test_jump_gate(void)
+{
+    struct Case {
+        const char *name;
+        double q0[6];      /* 起点关节角 */
+        double d[3];       /* 笛卡尔位移 mm */
+        int  want_reject;  /* 1 = 期望被拒绝（>30°）；0 = 期望放行 */
+    } cases[] = {
+        /* 从精确奇异点出发沿 +Y：θ5 一离开 0，θ4 立刻被位姿锁死 ⇒ 首段 89.98° */
+        { "病态：home(J5=0) +Y 30mm", { 0,0,90,0,0,0 }, {  0, 30,   0 }, 1 },
+        { "病态：home(J5=0) +Y 50mm", { 0,0,90,0,0,0 }, {  0, 50,   0 }, 1 },
+        /* 同一奇异起点但沿 -Z：不走奇异方向，正常 */
+        { "正常：home(J5=0) -Z 50mm", { 0,0,90,0,0,0 }, {  0,  0, -50 }, 0 },
+        { "正常：home(J5=0) +X 50mm", { 0,0,90,0,0,0 }, { 50,  0,   0 }, 0 },
+        /* 起点 J5=20°（远离奇异），随便走都该正常 */
+        { "正常：J5=20° -Z 50mm",     { 0,0,90,0,20,0 }, {  0,  0, -50 }, 0 },
+        { "正常：J5=20° +Y 50mm",     { 0,0,90,0,20,0 }, {  0, 50,   0 }, 0 },
+    };
+    const double JUMP_LIMIT = 30.0;   /* 与 MOVL_JUMP_MAX_DEG / ini max_jump_deg 一致 */
+    size_t ci;
+
+    printf("\n=== 7. 规划层甩臂判据 line_max_joint_jump（拒绝阈值 %.0f°）===\n",
+           JUMP_LIMIT);
+    for (ci = 0; ci < sizeof(cases) / sizeof(cases[0]); ci++) {
+        const double RAD2DEG = 180.0 / 3.14159265358979323846;
+        double start6[6], end6[6], rpy[3], m[4][4];
+        double q_seq[LINE_MAX_POINTS][6];
+        LinePath path;
+        JointLimit lim[6];
+        int count, fail_idx = -1, wj = 0, ws = 0;
+        char fail_reason[64] = {0};
+        double jump;
+        char buf[192];
+
+        make_limits(lim);
+        dh_forward(DH_TABLE, cases[ci].q0, m);
+        dh_pose_to_xyz_rpy(m, start6, rpy);
+        start6[3] = rpy[0] * RAD2DEG;
+        start6[4] = rpy[1] * RAD2DEG;
+        start6[5] = rpy[2] * RAD2DEG;
+        end6[0] = start6[0] + cases[ci].d[0];
+        end6[1] = start6[1] + cases[ci].d[1];
+        end6[2] = start6[2] + cases[ci].d[2];
+        end6[3] = start6[3];
+        end6[4] = start6[4];
+        end6[5] = start6[5];
+
+        count = line_count_for_distance(fabs(cases[ci].d[0]) +
+                                        fabs(cases[ci].d[1]) +
+                                        fabs(cases[ci].d[2]), 1.0);  /* MOVL_STEP_MM */
+        if (line_plan(start6, end6, count, &path) != 0 ||
+            line_solve(&path, DH_TABLE, lim, cases[ci].q0, q_seq,
+                       &fail_idx, fail_reason) != 0) {
+            snprintf(buf, sizeof buf, "规划/逆解失败 @%d：%s", fail_idx, fail_reason);
+            check(cases[ci].name, 0, buf);
+            continue;
+        }
+
+        jump = line_max_joint_jump(q_seq, path.count, &wj, &ws);
+
+        /* 顺带量一下"这一段实际要花多久" —— 时间表是按关节限速算的，
+         * 段时长会被自动拉长。别想当然地写成"几毫秒跑完 90°"。 */
+        {
+            const uint16_t red[6] = { 50, 100, 50, 50, 50, 50 };  /* ROBOT_REDUCTION_TABLE */
+            double vmax[6], seg_dt[LINE_MAX_SEGS], dt_total = 0.0;
+            int k;
+            for (k = 0; k < 6; k++) vmax[k] = 60.0 * 6.0 / (double)red[k];  /* 60 rpm 电机轴 */
+            if (line_time_table(q_seq, path.count, vmax, seg_dt, &dt_total) == 0 && ws >= 1) {
+                snprintf(buf, sizeof buf,
+                         "单段最大跳变 %.2f°（J%d 第%d段/%d，该段 %.1f s）⇒ %s",
+                         jump, wj, ws, path.count, seg_dt[ws - 1],
+                         (jump > JUMP_LIMIT) ? "拒绝" : "放行");
+            } else {
+                snprintf(buf, sizeof buf, "单段最大跳变 %.2f°（J%d 第%d段/%d）⇒ %s",
+                         jump, wj, ws, path.count,
+                         (jump > JUMP_LIMIT) ? "拒绝" : "放行");
+            }
+        }
+        check(cases[ci].name, (jump > JUMP_LIMIT) == cases[ci].want_reject, buf);
+    }
+
+    /* 纯函数的退化输入：不能崩，也不能返回"很大"把正常路径误判成甩臂 */
+    {
+        double q[2][6] = { {0,0,90,0,0,0}, {0,0,91,0,0,0} };
+        double j1 = line_max_joint_jump(q, 2, NULL, NULL);
+        double j0 = line_max_joint_jump(NULL, 2, NULL, NULL);
+        double jn = line_max_joint_jump(q, 1, NULL, NULL);
+        char buf[128];
+        snprintf(buf, sizeof buf, "2点=%.2f° / NULL=%.2f / count<2=%.2f", j1, j0, jn);
+        check("退化输入不崩且返回 0 或正常值",
+              fabs(j1 - 1.0) < 1e-9 && j0 == 0.0 && jn == 0.0, buf);
+    }
+}
+
 int main(void)
 {
     dh_set_tool_length(0.0);
@@ -482,6 +588,7 @@ int main(void)
     test_from_singular();
     test_cross_singular();
     test_no_false_positive();
+    test_jump_gate();
 
     printf("\n%s（失败项 %d）\n",
            g_fail ? "*** 有失败 ***" : "全部通过", g_fail);

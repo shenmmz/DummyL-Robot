@@ -142,32 +142,48 @@ int ini_read_stall_current(const char *path, int th[6])
     return (got == 6) ? 1 : 0;
 }
 
-/* 读取 [safety] 段（max_step_deg，单次下发位移上限，机械角度） */
-int ini_read_max_step_deg(const char *path, double *deg)
+/* ini_read_positive_double：通用读取 —— 指定段 + 键，值必须 > 0。
+ * section 传不带方括号的段名（如 "safety"），key 传键名（如 "max_step_deg"）。
+ * 返回 1 = 读到；0 = 文件打不开 / 段不存在 / 键不存在 / 值 <= 0。
+ *
+ * 【为什么值必须 > 0】这些键全是安全阈值。配成 0 或负数时若当成"读到了 0"
+ * 回传，调用方会把它解释成"不限"——等于用户手滑一下就把闸门拆了。
+ * 宁可回退编译期默认，也不要让一个无效配置悄悄关掉保护。
+ *
+ * 【为什么键匹配用 strncmp 而不是精确比较】沿用本文件既有风格，允许
+ * "max_step_deg = 720" 这类写法；注释行（行首 # 或 ;）整行跳过，
+ * 段外同名键不串味 —— 这三条都有单测（tests/test_safety_gate.c 第 3 节）。 */
+int ini_read_positive_double(const char *path, const char *section,
+                             const char *key, double *out)
 {
-    FILE *f = fopen(path, "r");
+    FILE *f;
     char line[256];
-    int in_safety = 0;
+    char sec_hdr[64];
+    int in_sec = 0;
 
+    if (path == NULL || section == NULL || key == NULL || out == NULL) return 0;
+    snprintf(sec_hdr, sizeof(sec_hdr), "[%s]", section);
+
+    f = fopen(path, "r");
     if (f == NULL) return 0;
     while (fgets(line, sizeof(line), f) != NULL) {
         char *p = line;
         char *eq;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '[') {
-            in_safety = (strncmp(p, "[safety]", sizeof("[safety]") - 1) == 0) ? 1 : 0;
+            in_sec = (strncmp(p, sec_hdr, strlen(sec_hdr)) == 0) ? 1 : 0;
             continue;
         }
         if (*p == '#' || *p == ';' || *p == '\n' || *p == '\r' || *p == '\0') continue;
-        if (!in_safety) continue;
-        if (strncmp(p, "max_step_deg", 12) != 0) continue;
+        if (!in_sec) continue;
+        if (strncmp(p, key, strlen(key)) != 0) continue;
         eq = strchr(p, '=');
         if (eq == NULL) continue;
         fclose(f);
         {
             double v = atof(eq + 1);
             if (v > 0.0) {
-                *deg = v;
+                *out = v;
                 return 1;
             }
         }
@@ -175,6 +191,18 @@ int ini_read_max_step_deg(const char *path, double *deg)
     }
     fclose(f);
     return 0;
+}
+
+/* 读取 [safety] max_step_deg（单次下发位移上限，机械角度） */
+int ini_read_max_step_deg(const char *path, double *deg)
+{
+    return ini_read_positive_double(path, "safety", "max_step_deg", deg);
+}
+
+/* 读取 [safety] max_jump_deg（MoveL 规划层相邻插补点单关节跳变上限，机械角度） */
+int ini_read_max_jump_deg(const char *path, double *deg)
+{
+    return ini_read_positive_double(path, "safety", "max_jump_deg", deg);
 }
 
 /* 读取 [tool] 段（tool_length，单位 mm） */

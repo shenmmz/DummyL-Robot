@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "api/motor_reg.h"
+#include "control/robot.h"
 #include "utils/ini_rw.h"
 #include "config/robot_config.h"
 
@@ -202,6 +203,75 @@ skip_ini:
         snprintf(buf, sizeof buf, "读到 %.1f°（路径 %s）", v,
                  r ? ini : "未找到");
         check("项目 ini 的 [safety] max_step_deg", r == 1 && v > 0.0, buf);
+
+        v = -1.0; r = 0;
+        if (resolve_path("src/config/robot_config.ini", ini, sizeof ini, 0))
+            r = ini_read_max_jump_deg(ini, &v);
+        snprintf(buf, sizeof buf, "读到 %.1f°（路径 %s）", v,
+                 r ? ini : "未找到");
+        check("项目 ini 的 [safety] max_jump_deg", r == 1 && v > 0.0, buf);
+    }
+
+    /* === 5. 越软限位拦截：robot_angle_in_soft_limit（纯函数）===
+     *
+     * 【背景】单轴 MoveJ 此前完全不查限位 —— `movej:1:500` 会照发，而 J1 的
+     * 限位是 -170~179。目标越限位意味着电机必然一路顶到机械极限、触发
+     * 堵转/过流，是一次纯粹的无效冲撞。2026-09-18 用户拍板拦截。
+     *
+     * 【为什么不能放进 robot_movej】回零（home.c）也走 robot_movej，而回零
+     * 的原理就是朝一个方向顶到堵转 —— 起点已贴着限位、过程中必然越限。
+     * 塞进去会让六轴全部回不了零。所以只拦【用户显式指定的目标角】。
+     *
+     * 【本节也顺带锁住"整圈转 J4/J6"这个用法不能被引擎误伤】
+     * J4/J6 限位 ±360°，整圈转动完全在范围内，必须放行。 */
+    printf("\n=== 5. 越软限位拦截（robot_angle_in_soft_limit）===\n");
+    {
+        /* { 关节号, 目标角, 期望: 1=放行 0=越限 -1=关节号非法 } */
+        struct { int jt; double deg; int want; const char *why; } cs[] = {
+            { 1,    0.0,  1, "home 位" },
+            { 3,   90.0,  1, "home 位 J3" },
+            { 1,  500.0,  0, "事故写法 movej:1:500（限位 -170~179）" },
+            { 1, -500.0,  0, "反向同样要拦" },
+            { 1,  179.0,  1, "上边界（含）" },
+            { 1,  179.1,  0, "上边界外 0.1°" },
+            { 1, -170.0,  1, "下边界（含）" },
+            { 1, -170.1,  0, "下边界外 0.1°" },
+            { 5,   95.0,  1, "J5 上边界（含）" },
+            { 5,  -95.0,  1, "J5 下边界（含）" },
+            { 5,   95.5,  0, "J5 越界" },
+            { 4,  360.0,  1, "J4 整圈：必须放行，不能被误伤" },
+            { 4, -360.0,  1, "J4 整圈反向" },
+            { 6,  360.0,  1, "J6 整圈：必须放行" },
+            { 6,  360.5,  0, "J6 越界" },
+            { 0,    0.0, -1, "关节号 0 非法（≠越限，两者处置不同）" },
+            { 7,    0.0, -1, "关节号 7 非法" },
+        };
+        size_t k;
+        for (k = 0; k < sizeof cs / sizeof cs[0]; k++) {
+            double lmin = -9999, lmax = -9999;
+            int r = robot_angle_in_soft_limit(cs[k].jt, cs[k].deg, &lmin, &lmax);
+            char buf[192];
+            if (r == 1) {
+                snprintf(buf, sizeof buf, "放行（限位 [%.0f, %.0f]）—— %s",
+                         lmin, lmax, cs[k].why);
+            } else if (r == 0) {
+                snprintf(buf, sizeof buf, "拦截（限位 [%.0f, %.0f]）—— %s",
+                         lmin, lmax, cs[k].why);
+            } else {
+                snprintf(buf, sizeof buf, "关节号非法 —— %s", cs[k].why);
+            }
+            {
+                char tag[128];
+                snprintf(tag, sizeof tag, "J%d 目标 %.1f°", cs[k].jt, cs[k].deg);
+                check(tag, r == cs[k].want, buf);
+            }
+        }
+
+        /* out_min/out_max 允许传 NULL（调用方不关心区间时） */
+        {
+            int r = robot_angle_in_soft_limit(3, 90.0, NULL, NULL);
+            check("out_min/out_max 传 NULL 不崩", r == 1, NULL);
+        }
     }
 
     printf("\n%s（失败项 %d）\n",

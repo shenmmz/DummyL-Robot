@@ -285,6 +285,28 @@ ErrCode robot_disable(Robot *robot, int joint)
     return rc;
 }
 
+/* robot_angle_in_soft_limit：目标机械角是否落在软限位内（纯函数，可离线单测）。
+ *
+ * 【为什么不放进 robot_movej】回零（home.c）也走 robot_movej，而回零的原理
+ * 就是"朝一个方向顶到堵转"—— 起点已经贴着限位、过程中必然越限。把这条
+ * 检查塞进 robot_movej 会让六轴全部回不了零。所以它只用于【用户显式指定的
+ * 目标角】（CLI 的 MoveJ / MoveL 目标），放在下发之前由调用方决定要不要拦。
+ *
+ * 【返回值】1 = 在限位内（合法）；0 = 越限；-1 = 关节号非法。
+ *   关节号非法与"越限"分开：前者是调用方的 bug，后者是操作员的输入问题，
+ *   两种错误的处置完全不同，混成同一个 0 会让报错文案说谎。
+ * out_min / out_max 可为 NULL；非 NULL 时写出该轴限位区间，供报错打印。 */
+int robot_angle_in_soft_limit(int joint, double deg, double *out_min, double *out_max)
+{
+    const double lmin[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
+    const double lmax[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MAX_DEG;
+
+    if (joint < 1 || joint > ROBOT_JOINT_COUNT) return -1;
+    if (out_min != NULL) *out_min = lmin[joint - 1];
+    if (out_max != NULL) *out_max = lmax[joint - 1];
+    return (deg >= lmin[joint - 1] && deg <= lmax[joint - 1]) ? 1 : 0;
+}
+
 /* robot_movej：关节绝对运动到指定【机械角】（立三 0x00E8~0x00E9 绝对位置，
  * 速度写 0x00D8~0x00D9，单位 0.01 rpm），返回 ErrCode。
  * 入参为机械角（机械零位为 0，与 status/fk/ik 同一口径），
