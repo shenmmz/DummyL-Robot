@@ -76,8 +76,14 @@ static int plan_movl(const double q_start[RJ], const double end_pose[6],
     for (int i = 0; i < RJ; i++) { limits[i].min_deg = LIM_MIN[i]; limits[i].max_deg = LIM_MAX[i]; }
 
     int fail_idx = -1;
-    if (line_solve(&path, DH_TABLE, limits, q_start, g_q_out, &fail_idx) != 0) {
+    char fail_reason[128] = {0};
+    /* 【2026-09-19 修】line_solve 现已增加 fail_reason 出参（缓冲区 >= 64 字节），
+     * 本文件没跟着改 ⇒ 一直编译不过、工具失修。失败原因要打出来，否则只能看到
+     * 一个 -3，不知道是"无解"还是"越软限位"。 */
+    if (line_solve(&path, DH_TABLE, limits, q_start, g_q_out, &fail_idx, fail_reason) != 0) {
         *out_fail_idx = fail_idx;
+        printf("    [line_solve 失败] 点 %d：%s\n", fail_idx,
+               fail_reason[0] ? fail_reason : "(无原因)");
         return -3;
     }
     *out_fail_idx = -1;
