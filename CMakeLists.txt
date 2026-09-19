@@ -192,6 +192,17 @@ target_link_libraries(test_safety_gate PRIVATE control api control utils)
 add_test(NAME safety_gate COMMAND test_safety_gate)
 endif()
 
+# 球腕几何自洽性：IK 解析算法成立的前提（三轴共点、相邻轴垂直、θ5=0 为奇异点、
+# TCP 在 J6 轴上、wrist-flip 等价）。同时算出清单 #5/#6（J4/J6 符号、J5 零点）
+# 真机验证所需的预测值 —— 这些量光靠读数是查不出来的（读数+FK 永远自洽）。
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_wrist_geom.c")
+add_executable(test_wrist_geom tests/test_wrist_geom.c)
+target_include_directories(test_wrist_geom PRIVATE src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_wrist_geom PRIVATE -Wall -Wextra)
+target_link_libraries(test_wrist_geom PRIVATE kinematics m)
+add_test(NAME wrist_geom COMMAND test_wrist_geom)
+endif()
+
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_ik_verify.c")
 add_executable(test_ik_verify tests/test_ik_verify.c)
 target_include_directories(test_ik_verify PRIVATE src ${CMAKE_SOURCE_DIR})
