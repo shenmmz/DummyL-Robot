@@ -86,7 +86,8 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 
 - **通信抽象**：`comm_if.h` 定义 `CommOps` 函数指针表，控制层不直接依赖串口实现，可注入假串口做单测
 - **内部共享**：`robot_internal.h` 暴露寄存器定义和 `robot_request()` 给 home.c，不对外公开
-- **单一产物**：只编译 `dummyrobot.exe`，工具和测试已清理
+- **产物**：主控台 `dummyrobot.exe` + 10 个离线单元测试（`ctest --test-dir build`，当前 10/10）。
+  早期附带的独立工具（`scan_motors.exe`、`servo_calib.exe`）已删除
 
 ### 2.5 数据流向
 
@@ -223,25 +224,39 @@ ctest --test-dir build
 
 ## 5. CLI 命令
 
+命令名**大小写不敏感**（`movel` / `MoveL` 都行）。下表按 `src/utils/cmd_parser.c`
+实际识别的命令列出 —— 以代码为准，不以本文档为准。
+
 | 命令 | 格式 | 作用 | 示例 |
 |---|---|---|---|
+| `home` | `home` / `home:N` | 回零：组0={1,2,3,5,6}并行→组1={4}→机械原点位姿；`:N` 只回零第 N 轴 | `home:3` |
+| `MoveJ` | `MoveJ:N:ANGLE[:SPD][:r\|a]` | 单关节运动到 ANGLE 度；末段 `r`=相对当前位置、`a`=绝对（默认）。省略 SPD 时 60 rpm | `MoveJ:1:45` |
+| `MoveJ` | `MoveJ:A1,A2,A3,A4,A5,A6,SPD,ACC,DEC` | 六轴同步关节空间运动，按行程比例分配转速（同起同停） | `MoveJ:0,0,90,0,20,0,60,100,100` |
+| `MoveL` | `MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]` | 笛卡尔**直线**：位置线性插值 + 姿态四元数 SLERP，逐点 IK 且选解连续。默认 60 rpm / 80 ms / 90 ms；`MODE`=`sync`（默认，按弓高预算分段+逐航点等到位）/ `step` / `stream` / `smooth`（流畅优先，不分段） | `MoveL:241.5,52,236,-90,90,-90` |
+| `enable` | `enable` / `enable:N` | 恢复使能（全部或单轴） | `enable:1` |
+| `disable` | `disable` / `disable:N` | 泄力失能（全部或单轴） | `disable` |
+| `motor` | `motor` | 启动/停止电机实时监控（约 1 s/次循环显示） | `motor` |
+| `getpos` | `getpos` | 读当前关节角(度)、笛卡尔坐标(X,Y,Z,RPY)与法兰倾角 | `getpos` |
+| `fk` | `fk:J1,...,J6` | 离线正解预览：算该组关节角的位姿，**不动臂不下发**，用来和 `getpos` 对照 | `fk:0,0,90,0,0,0` |
+| `diag` | `diag` | 总线时延体检：把单事务拆成 flush/write/read 三段计时，不动臂 | `diag` |
+| `bcast` | `bcast` | 广播帧验证（地址 0 写速度再逐轴读回），定位刷新率瓶颈，不动臂 | `bcast` |
+| `curtest` | `curtest` / `curtest:N[:DEG[:RPM]]` | 电流实测（标定堵转阈值用）。无参数=静止采样六轴保持电流；带参数=关节 N 走 +DEG 度再回原位并全程采样。默认摆幅 2°、30 rpm | `curtest:5:2:30` |
+| `stall` | `stall` / `stall:N:MA` | 查看/运行时设置逐轴堵转阈值(mA)，`0`=该轴不启用。只改本次运行，持久化写 ini `[stall]` | `stall:1:1000` |
+| `poseok` | `poseok` | 人工解除「位姿不可信」闸门（零点丢失时运动命令会被锁住；确认是误判才用） | `poseok` |
+| `zero` | `zero` | 显示当前零点与机械角 | `zero` |
+| `zero_save` | `zero_save:v1,...,v6` | 保存指定的零点标定值（6 个电机角，度） | `zero_save:-176.66,74.58,-180.03,4.27,115.44,84.89` |
 | `help` | `help` 或 `?` | 打印命令帮助 | `help` |
-| `status` | `status` | 查询所有关节状态（在线/状态/位置/电流）；屏蔽关节显示"已屏蔽" | `status` |
-| `enable` | `enable:N` | 使能关节 N（1..6），屏蔽关节自动跳过 | `enable:1` |
-| `disable` | `disable:N` | 失能关节 N | `disable:1` |
-| `movej` | `movej:N:ANGLE` | 关节 N 绝对运动到 ANGLE 度（相对零位），默认速度 3000 rpm | `movej:1:45` |
-| `movej` | `movej:N:ANGLE:SPEED` | 同上，指定速度（rpm） | `movej:1:45:500` |
-| `movel` | `movel:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC]` | 绝对笛卡尔点到点运动（mm/deg）：仅对终点做一次 IK，各关节按距离比例同时到达——**末端走弧线、非直线**；默认 60 rpm / 80 ms / 90 ms | `movel:150,62,103,-180,0,-180,10,50,50` |
-| `movl` | `movl:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,step\|stream]` | 笛卡尔**直线**运动：位置线性插值 + 姿态走最短路径，逐点 IK 且选解连续；`step`=逐段到位（默认）、`stream`=周期刷新 | `movl:150,52,97,-180,0,-180,60,80,90,step` |
-| `home` | `home` | 回零：组0={1,2,3,5,6}并行→组1={4}→机械原点位姿 | `home` |
-| `mask` | `mask:N` | 屏蔽关节 N（跳过、不发指令、不轮询） | `mask:2` |
-| `unmask` | `unmask:N` | 恢复关节 N | `unmask:2` |
-| `scan` | `scan` | 提示运行独立工具 `scan_motors.exe` 扫描总线 | `scan` |
-| `calib` | `calib` | 提示运行独立工具 `servo_calib.exe` 单关节标定 | `calib` |
 | `exit` | `exit` 或 `quit` | 退出程序 | `exit` |
 
-> 关节号 N 范围 1..6，1~6 号电机全部在线；故障/未安装关节可用 `mask:N` 屏蔽、`unmask:N` 恢复。
-> 独立可执行程序：`scan_motors.exe`（总线扫描）、`servo_calib.exe`（单关节手动标定），均位于 `build/bin/`。
+> 关节号 N 范围 1..6。
+> **已移除的命令**（文档别再写）：`status`、`mask`/`unmask`、`scan`、`calib`，
+> 以及独立可执行程序 `scan_motors.exe` / `servo_calib.exe` —— 均已随工具清理删除。
+> 另有未列入帮助的调试命令 `nrtest`（连发帧间延迟实测），不常用。
+
+> **⚠️ 下发前的安全闸门**（2026-09-18/19 两次事故后加的，命令被拒时看这里的提示）：
+> 目标角 NaN/Inf、目标越该轴软限位、单次位移 > ini `[safety] max_step_deg`、
+> 目标步数 \|steps\| > 1e8、MoveL 规划路径单段关节跳变 > ini `[safety] max_jump_deg`
+> —— 任一命中即拒绝下发，一动不动。详见 `未完成任务清单.md` 的 #12 / #13 / #14。
 
 ## 6. 设计原则
 
