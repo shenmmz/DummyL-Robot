@@ -48,6 +48,18 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
  * 只用于拦截【用户显式指定的目标角】（CLI 层在下发前调用）。 */
 int robot_angle_in_soft_limit(int joint, double deg, double *out_min, double *out_max);
 
+/* 读回值体检（纯函数，可单测）：这一组六轴机械角有没有可能是真的？
+ * ok[i]!=0 才参与判定（读失败的轴在调用方常被填成 0，而 0 对 J3 来说是
+ * "越限 30°"，不区分就会把单次读失败误判成总线异常）。
+ * 判据：① 任一轴越限 > big_margin_deg（默认 15°）；② 越限 >0.5° 的轴数 >= 3。
+ * 返回 1=异常 / 0=正常。bad_joint、bad_excess 可为 NULL。
+ *
+ * 【由来】2026-09-19 那次"六轴读回同时变垃圾、干等 60s 超时、急停还发不出去"。
+ * 详见 robot.c 的实现注释与 未完成任务清单 #14。 */
+int robot_readback_anomaly(const double deg[6], const int ok[6],
+                           double big_margin_deg,
+                           int *bad_joint, double *bad_excess);
+
 /* 查询关节在线状态（读 0x0006~0x0007 状态字）：返回 1 在线，0 离线/失败/屏蔽 */
 int robot_is_online(Robot *robot, int joint);
 

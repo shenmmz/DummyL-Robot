@@ -307,6 +307,58 @@ int robot_angle_in_soft_limit(int joint, double deg, double *out_min, double *ou
     return (deg >= lmin[joint - 1] && deg <= lmax[joint - 1]) ? 1 : 0;
 }
 
+/* robot_readback_anomaly：读回的六轴机械角是否"不可能为真"（纯函数，可单测）。
+ *
+ * 【由来 2026-09-19】一次 MoveL 途中六轴读回同时变垃圾：
+ *     J1=176.66 J2=-74.58 J3=180.03 J4=-4.27 J5=-115.44 J6=-84.89
+ * 其中 J2/J3/J5 越软限位（分别超 2.58° / 0.03° / 20.44°），末端偏差读数
+ * 冻结在 258.92mm 一动不动。当时"等到位"循环只能干等到 60s 超时，
+ * 而真超时后急停指令还发不出去 —— 整整一分钟完全失控。
+ *
+ * 【判据】两条，任一命中即异常。都刻意保守：宁可漏报，不可误报
+ * （误报会把一次完全正常的运动打断，那是更常见的工况）。
+ *   ① 任一轴越软限位幅度 > big_margin（默认 15°）
+ *      规划出来的目标角全在限位内，真的越限 15° 只可能是跑飞或读回是假的。
+ *   ② 越限超过 0.5° 的轴数 >= 3
+ *      机械臂不可能真的三根轴同时越软限位还毫无报警。
+ *      0.5° 的死区是为了容忍到位 overshoot —— 限位边界上的正常抖动不能算。
+ *
+ * 【为什么必须传 ok[]】读失败的轴在调用方常被填成 0，而 0 对 J3（限位 30~180）
+ * 来说是"越限 30°"—— 不区分就会把【单次读失败】误判成总线异常。
+ * 只统计本轮真正读到的轴。
+ *
+ * 返回 1=异常 / 0=正常。bad_joint、bad_excess 可为 NULL，非 NULL 时写出
+ * 超得最狠的那一根轴(1..6)与超出量(度，>0)。 */
+int robot_readback_anomaly(const double deg[6], const int ok[6],
+                           double big_margin_deg,
+                           int *bad_joint, double *bad_excess)
+{
+    const double lmin[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
+    const double lmax[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MAX_DEG;
+    const double DEADZONE = 0.5;   /* 容忍到位 overshoot 的死区(度) */
+    int n_over = 0, worst_j = 0;
+    double worst_ex = 0.0;
+    int i;
+
+    if (deg == NULL || ok == NULL) return 0;
+
+    for (i = 0; i < 6; i++) {
+        double ex = 0.0;
+        if (!ok[i]) continue;                 /* 没读到就别拿来判 */
+        if (deg[i] < lmin[i]) ex = lmin[i] - deg[i];
+        else if (deg[i] > lmax[i]) ex = deg[i] - lmax[i];
+        else continue;
+        if (ex > DEADZONE) n_over++;
+        if (ex > worst_ex) { worst_ex = ex; worst_j = i + 1; }
+    }
+    if (bad_joint  != NULL) *bad_joint  = worst_j;
+    if (bad_excess != NULL) *bad_excess = worst_ex;
+
+    if (worst_ex > big_margin_deg) return 1;  /* 判据①：单轴离谱地越限 */
+    if (n_over >= 3) return 1;                /* 判据②：多轴同时越限 */
+    return 0;
+}
+
 /* robot_movej：关节绝对运动到指定【机械角】（立三 0x00E8~0x00E9 绝对位置，
  * 速度写 0x00D8~0x00D9，单位 0.01 rpm），返回 ErrCode。
  * 入参为机械角（机械零位为 0，与 status/fk/ik 同一口径），

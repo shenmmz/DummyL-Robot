@@ -140,6 +140,14 @@ static int    g_tx_written = 0;
  * 判据本体 line_max_joint_jump() 在 trajectory/line.c（纯函数，已单测）。 */
 #define MOVL_JUMP_MAX_DEG      30.0
 
+/* 读回体检阈值（movej_wait 的"读回不可能是真的"检测）：
+ * MARGIN  单轴越软限位超过这么多度就判异常。取 15° —— 规划目标全在限位内，
+ *         正常 overshoot 是零点几度，15° 只有"跑飞/读回假"才够得着；
+ *         2026-09-19 事故里 J5 越了 20.44°，正好被这条逮住。
+ * POLLS   连续这么多轮都异常才认定，滤掉单次干扰（一轮约 160ms ⇒ 约 0.5s 内收敛）。 */
+#define MOVEJ_ANOM_MARGIN_DEG  15.0
+#define MOVEJ_ANOM_MIN_POLLS   3
+
 /* 前向声明：定义在下方（与 movl_bow_budget 等 ini 读取函数放一起），
  * 但 movej_issue 在它之前就要用。 */
 static double movl_max_step_deg(void);
@@ -1124,6 +1132,7 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
     /* 位置读数跨轮保留：见下方"只读没到位的轴"说明。 */
     int32_t pos[7] = {0};
     int      ok[7] = {0};
+    int      anom_n = 0;    /* 连续"读回异常"轮数，见下方读回体检 */
 
     (void)joints;
     while (remain > 0) {
@@ -1163,6 +1172,47 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
         for (j = 0; j < 6; j++)
             motor[j] = ok[j + 1] ? STEPS2DEG(pos[j + 1], red[j]) : 0.0;
         joint_zero_motor_to_mech(motor, mech);
+
+        /* 【读回体检：读回不可能是真的 ⇒ 立刻停，别干等 60s】
+         *
+         * 2026-09-19 事故：六轴读回同时变垃圾（J5 读成 -115.44，越软限位 20°），
+         * 到位判定永远不满足，于是循环干等到 MOVEJ_TIMEOUT_MS 才罢手，而真超时后
+         * 急停指令还发不出去 —— 整整一分钟完全失控（清单 #14）。
+         *
+         * 现在每轮都查一次"这组读数有没有可能是真的"，连续 MOVEJ_ANOM_MIN_POLLS
+         * 轮都为异常就立刻中止并尽力急停。要求连续多轮是为了滤掉单次干扰。
+         *
+         * 【为什么用 ok[] 过滤】读失败的轴上面被填成 0，而 0 对 J3（限位 30~180）
+         * 等于"越限 30°"—— 不过滤会把一次普通读失败当成总线异常。 */
+        {
+            int ok6[6], bad_j = 0;
+            double bad_ex = 0.0;
+            for (j = 0; j < 6; j++) ok6[j] = ok[j + 1];
+            if (robot_readback_anomaly(mech, ok6, MOVEJ_ANOM_MARGIN_DEG,
+                                       &bad_j, &bad_ex)) {
+                if (++anom_n >= MOVEJ_ANOM_MIN_POLLS) {
+                    status_clear();
+                    printf("[危险] 关节%d 读回 %.2f° 越软限位 %.1f°，且连续 %d 轮如此 ——\n"
+                           "       这不是真实位置，是总线/读回异常（2026-09-19 实测：六轴\n"
+                           "       读回同时变成越限值，末端偏差冻结在 258.92mm 不动）。\n"
+                           "       不再等 %d ms 超时，立即中止并尽力急停。\n"
+                           "       【请检查】USB-RS485 适配器与驱动器供电，别急着改软件。\n",
+                           bad_j, mech[bad_j - 1], bad_ex, anom_n, MOVEJ_TIMEOUT_MS);
+                    for (j = 1; j <= 6; j++) {
+                        ErrCode rc;
+                        if (!pend[j]) continue;
+                        rc = motor_estop(robot, j);
+                        if (rc != ERR_NONE) {
+                            printf("[警告] 关节%d 急停指令下发失败（总线确实不通了）\n", j);
+                        }
+                        pend[j] = 0; remain--;
+                    }
+                    break;
+                }
+            } else {
+                anom_n = 0;
+            }
+        }
 
         if (line_a != NULL && line_b != NULL) {
             double m[4][4], xyz[3];
