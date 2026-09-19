@@ -1841,7 +1841,13 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
      * 1.77mm，等于起点→终点一条长弦的弓高——中间航点被驱动器的 replan 丢弃了。 */
     dev_reset();   /* 全程偏差峰值从 0 开始累计，结束时只汇总一行 */
 
-    if (cmd->movl_mode == MOVL_MODE_SYNC) {
+    /* SMOOTH 必须和 SYNC 走同一个块 —— 块内才有"按弓高预算定段数"的逻辑，
+     * SMOOTH 就是把它强制成 1 段（见下方 target_n = 1）。
+     * 【2026-09-19 实测修 bug】原来只有 SYNC 能进 ⇒ SMOOTH 掉到后面的 step
+     * 路径被切成 101 段（步长 1.0mm），"流畅不分段"**从来没有真正生效过**；
+     * 而下方的打印又把 sync/smooth 一律显示成"模式 step"，把排查带偏了。 */
+    if (cmd->movl_mode == MOVL_MODE_SYNC ||
+        cmd->movl_mode == MOVL_MODE_SMOOTH) {
         const double *q_end = q_seq[count - 1];
         const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
         const double *zero = joint_zero_get();
@@ -2036,7 +2042,9 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         printf("MoveL: %d 段, 步长 %.1f mm, 位移 %.1f mm, 节拍 %.3f s, 预计 %.2f s, "
                "模式 %s, 几何弓高 ≤ %.2f mm（过流保护 %s）",
                count - 1, step_mm, dist, (count > 1) ? seg_dt[0] : 0.0, total_dt,
-               (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream" : "step", bow,
+               (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream"
+                   : (cmd->movl_mode == MOVL_MODE_SMOOTH) ? "smooth"
+                   : (cmd->movl_mode == MOVL_MODE_SYNC) ? "sync" : "step", bow,
                movl_stall_on(stall_th) ? "开启" : "关闭（六轴阈值均为 0）");
         /* 只在【超出用户自己配的预算】时才警告。
          * 旧判据是写死的 MOVL_BOW_WARN_MM=1.0mm，在 bow_mm=2.5 的新默认值下
