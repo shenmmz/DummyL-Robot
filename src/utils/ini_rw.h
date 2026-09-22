@@ -21,6 +21,16 @@ int ini_write_joint_zero(const char *path, const double zero[6]);
  * 找到且解析成功返回 1，否则返回 0（调用方按默认 0 处理）。 */
 int ini_read_tool_length(const char *path, double *tool_mm);
 
+/* 读取 ini 的 [tool] 段的 pen_length（笔长 mm）。
+ * 【与 tool_length 的区别 —— 别混】
+ *   tool_length 会真的改坐标语义：d6 = 91.5 + tool_length，TCP 从法兰面移到笔尖，
+ *   于是 getpos/movel 的 Z 全部偏移。用户 2026-09-19 已决定保持 0（笔在法兰中心，
+ *   X/Y 与法兰逐位相同，只有 Z 差一个常量，形状/直线度零差异）。
+ *   pen_length **不改任何坐标**，只供 movl_pose_warn 把"姿态偏差多少度"换算成
+ *   "笔尖会摆多少 mm"这一句人话。两者可以并存，互不干扰。
+ * 找到且解析成功返回 1，否则返回 0（调用方按默认 0 处理）。 */
+int ini_read_pen_length(const char *path, double *pen_mm);
+
 /* 读取 ini 的 [stall] 段，填充 th[6]（key 为 j1..j6，单位 mA，0=该轴不检测）。
  * 6 个全部找到且解析成功返回 1，否则返回 0（不修改 th）。
  * 允许缺段/缺项：调用方拿到 0 就按编译期默认值处理，不要当成致命错误。 */

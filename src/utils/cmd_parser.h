@@ -71,6 +71,13 @@ typedef struct {
     int      accel_ms[6];  /* 多关节 MoveJ 的加速度 ms */
     int      decel_ms[6];  /* 多关节 MoveJ 的减速度 ms */
     double   cartesian[6]; /* MoveL 目标位姿 X,Y,Z,Rx,Ry,Rz */
+    /* keep_pose：1 = 姿态【保持当前不变】，只走位置。
+     * 触发方式两种：① 只给 X,Y,Z 三个数；② 数字段后带 keep 关键字。
+     * 【为什么要有它 —— 2026-09-19】Rx,Ry,Rz 抄错是"画斜线"的头号根因：
+     * 抄成别的姿态的值 ⇒ SLERP 把姿态一路拧过去 ⇒ 法兰下方的笔尖绕法兰摆，
+     * 实测 80mm 线笔尖偏离 7.71mm，而法兰直线度 0.0000mm（看不出来）。
+     * 大多数人要的就是"平移过去、姿态别动"，那就别让他抄这三个数。 */
+    int      keep_pose;
     int      movl_mode;    /* MoveL 下发模式，见 MovlMode（默认 MOVL_MODE_SYNC） */
     double   param;        /* 通用数值参数：stall 的阈值(mA)；-1 = 未指定（只显示） */
     char     raw[128];     /* 原始输入 */

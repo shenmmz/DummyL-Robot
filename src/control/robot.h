@@ -91,8 +91,14 @@ int robot_read_speed_rpm(Robot *robot, int joint);
 int robot_read_alarm(Robot *robot, int joint);
 
 /* 按从站 ID 逐轴写入细分，对齐驱动器 0x0024 与 ENCODER_STEPS_PER_REV；
- * robot_init 内部自动调用，屏蔽/离线轴跳过，失败不阻断启动。 */
+ * robot_init 内部自动调用，屏蔽/离线轴跳过。
+ * 写后会【读回比对】，只有确实等于配置值才把该轴标记为"已确认"。
+ * 未确认的轴由 motor_move_abs 出口拦下（ERR_SUBDIV），禁止下发运动。 */
 void robot_apply_subdivision(Robot *robot);
+
+/* 查询某关节的每转脉冲数是否已确认对齐（1=可信任角度换算；0=禁止运动）。
+ * 离线/被屏蔽的关节返回 1（不该因一台坏电机锁死其余轴）。 */
+int robot_subdivision_ok(const Robot *robot, int joint);
 
 /* 屏蔽/恢复关节（1=屏蔽）：屏蔽后所有操作自动跳过该关节，不发指令、不轮询。
  * 返回 ErrCode：ERR_NONE / ERR_ARG */

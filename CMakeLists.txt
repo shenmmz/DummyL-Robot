@@ -71,7 +71,14 @@ add_library(utils STATIC
     src/utils/cmd_parser.c
     src/utils/err.c
     src/utils/ini_rw.c
+    src/utils/telemetry.c
 )
+
+# telemetry 用 UDP 回环发给 3D 镜像，Windows 下要链 Winsock。
+# 注意：只在 Windows 链，别把它挂到 utils 上让所有 target 都背这个依赖。
+if(WIN32)
+    target_link_libraries(utils PUBLIC ws2_32)
+endif()
 
 # ---------- 静态库: cli（命令实现与分发）----------
 # 原 main.c 中的命令逻辑（home/movej/movel/enable/disable/motor/getpos/
@@ -116,25 +123,6 @@ target_compile_options(dummyrobot PRIVATE -Wall -Wextra)
 target_link_libraries(dummyrobot PRIVATE control utils cli)
 if(WIN32)
     target_link_libraries(dummyrobot PRIVATE winmm)
-endif()
-
-# ---------- 离线工具: 驱动时序保真回放器 ----------
-# 不接硬件，在 PC 上复现 MoveL 实际画出来的轨迹，用于定位
-# "画不出直线 / 画不出正方形" 的成因（段弓高 vs 六轴起步相位差）。
-# 构建：cmake --build build --target replay
-# 用法：build/bin/replay.exe --path "150,52,175;210,52,175;..." --tx 27 --out replay.html
-option(BUILD_REPLAY "构建离线回放器 replay" ON)
-# 【2026-09-18】tools/replay/replay.c 当前不在工作区里，加了 EXISTS 判断：
-# 源文件缺失时跳过本目标，不要让整个 CMake 配置失败、连主程序都编不了。
-if(BUILD_REPLAY AND EXISTS "${CMAKE_SOURCE_DIR}/tools/replay/replay.c")
-    add_executable(replay tools/replay/replay.c)
-    target_include_directories(replay PRIVATE src ${CMAKE_SOURCE_DIR})
-    target_compile_options(replay PRIVATE -Wall -Wextra)
-    target_link_libraries(replay PRIVATE trajectory kinematics m)
-    # 生成 HTML 时把 three.js / OrbitControls / 回放脚本整段内联，产出页离线自包含
-    target_compile_definitions(replay PRIVATE
-        REPLAY_VENDOR_DIR="${CMAKE_SOURCE_DIR}/tools/replay/vendor"
-        REPLAY_SRC_DIR="${CMAKE_SOURCE_DIR}/tools/replay")
 endif()
 
 # ---------- 离线单元测试（CTest）----------
@@ -248,10 +236,52 @@ target_link_libraries(test_stall PRIVATE control utils)
 add_test(NAME stall COMMAND test_stall)
 endif()
 
+# MoveL "省略姿态 / keep 关键字" 解析行为单测。
+# 锁死【向后兼容】红线：6 个数字段不带 keep 时必须仍解释为 X,Y,Z,Rx,Ry,Rz，
+# 一旦改坏，用户所有老命令会静默变成"速度参数"。
+# 只调 cmd_parse 纯解析，不开串口、不需要机械臂在场。
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_movel_keep.c")
+add_executable(test_movel_keep tests/test_movel_keep.c)
+target_include_directories(test_movel_keep PRIVATE src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_movel_keep PRIVATE -Wall -Wextra)
+target_link_libraries(test_movel_keep PRIVATE utils)
+add_test(NAME movel_keep COMMAND test_movel_keep)
+endif()
+
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_z170.c")
 add_executable(test_z170 tests/test_z170.c)
 target_include_directories(test_z170 PRIVATE src ${CMAKE_SOURCE_DIR})
 target_compile_options(test_z170 PRIVATE -Wall -Wextra)
 target_link_libraries(test_z170 PRIVATE kinematics trajectory m)
 add_test(NAME z170 COMMAND test_z170)
+endif()
+
+# ============================================================
+# 离线诊断工具（不是 ctest —— 都需要命令行参数，无法无人值守跑）
+# ------------------------------------------------------------
+# 【2026-09-21 整理】这四个此前只靠文件头注释里的 gcc 命令手工编译，
+# CMake 里没有目标 ⇒ 源码在但构建系统不认，属于事实上的孤儿文件。
+# 现已登记，统一走 cmake --build build --target <名字>，
+# 产物与其它目标一样落在 build/bin/。
+# 用法摘要（详见各文件头部注释）：
+#   movl_tip_trace   J1..J6  X,Y,Z,Rx,Ry,Rz [tool_length]   笔尖 vs 法兰轨迹
+#   movl_reach       J1..J6  X,Y,Z,Rx,Ry,Rz                 下发前可达性预检
+#   ik_pose_check    X,Y,Z,Rx,Ry,Rz  J1..J6                 位姿↔关节角双向核对
+#   udp_telemetry_test                                        UDP 遥测链路自检
+# ============================================================
+foreach(tool movl_tip_trace movl_reach ik_pose_check movl_verify)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/${tool}.c")
+        add_executable(${tool} tests/${tool}.c)
+        target_include_directories(${tool} PRIVATE src ${CMAKE_SOURCE_DIR})
+        target_compile_options(${tool} PRIVATE -Wall -Wextra)
+        target_link_libraries(${tool} PRIVATE kinematics trajectory m)
+    endif()
+endforeach()
+
+# UDP 遥测要链 Winsock（utils 已 PUBLIC 引出 ws2_32）
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/udp_telemetry_test.c")
+    add_executable(udp_telemetry_test tests/udp_telemetry_test.c)
+    target_include_directories(udp_telemetry_test PRIVATE src ${CMAKE_SOURCE_DIR})
+    target_compile_options(udp_telemetry_test PRIVATE -Wall -Wextra)
+    target_link_libraries(udp_telemetry_test PRIVATE utils)
 endif()

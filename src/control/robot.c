@@ -42,6 +42,14 @@ struct Robot {
     uint32_t baudrate;
     int online[ROBOT_JOINT_COUNT];
     int masked[ROBOT_JOINT_COUNT];   /* 1=屏蔽（故障电机跳过） */
+    /* 1=该轴 0x0024（每转脉冲数）已被写入【并读回确认】等于 ENCODER_STEPS_PER_REV。
+     * 由 robot_apply_subdivision 维护；motor_move_abs 出口据此拦截运动。
+     * 【为什么单独立一个状态】写成功≠写对了。0x0024 出厂是 4000、断电即回 4000，
+     * 而 DEG2STEPS 用的是 ENCODER_STEPS_PER_REV=10000；没对齐就下发，同样一个
+     * "90°"会被驱动器理解成 2.5 倍（2026-09-19 实测：250000 步在 4000 下 = 225°）。
+     * 更阴的是：编码器在电机侧，下发和读回用的是同一个常量 ⇒ 程序永远自洽、
+     * getpos 永远显示"正确"，只有真机转过头才看得出来。⇒ 只能靠"写后读回比对"证明。 */
+    int subdiv_ok[ROBOT_JOINT_COUNT];
     CRITICAL_SECTION lock;           /* 总线互斥：多线程（CLI + 监控线程）共享单串口时逐帧串行 */
 };
 
@@ -98,6 +106,11 @@ void robot_apply_subdivision(Robot *robot)
     if (robot == NULL) {
         return;
     }
+    /* 先全部清零：本函数可能被重复调用（如重新上电后），不能让上一次的
+     * "成功"残留下来骗过闸门。subdiv_ok 只在【本次】读回比对通过后才置 1。 */
+    for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
+        robot->subdiv_ok[i] = 0;
+    }
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
         int joint = i + 1;
         int32_t rb;
@@ -119,6 +132,7 @@ void robot_apply_subdivision(Robot *robot)
         rb = motor_read_subdivision(robot, joint);
         if (rb == ENCODER_STEPS_PER_REV) {
             ok_cnt++;
+            robot->subdiv_ok[i] = 1;      /* 唯一置 1 的地方：写后读回确实等于配置值 */
         } else if (rb < 0) {
             printf("[警告] 关节%d 写细分成功但读回失败，实际值未知\n", joint);
             fail_cnt++;
@@ -131,7 +145,35 @@ void robot_apply_subdivision(Robot *robot)
     if (fail_cnt > 0) {
         printf("[警告] 细分对齐完成：成功 %d 轴，失败 %d 轴（角度换算可能失真）\n",
                  ok_cnt, fail_cnt);
+        printf("[警告] 未确认的关节【禁止运动】——驱动器出厂值是 4000，若仍是 4000，\n"
+               "       下发的角度会被放大 2.5 倍（实测 90° → 225°）。\n"
+               "       处理：检查该轴供电/接线后重启本程序，启动时会重跑对齐。\n");
+    } else {
+        /* 成功也要留痕：这道闸门平时一次都不会触发，若完全静默就无法区分
+         * "对齐成功"和"根本没跑"。启动时看到这一行才算本次对齐确实生效。 */
+        printf("[细分对齐] %d 轴已确认：0x0024 = %d 脉冲/转（出厂 4000，写后读回比对通过）\n",
+               ok_cnt, (int)ENCODER_STEPS_PER_REV);
     }
+}
+
+/* robot_subdivision_ok：该关节的每转脉冲数是否已被写入【并读回确认】。
+ * 返回 1 = 可以信任 DEG2STEPS/STEPS2DEG；0 = 不可信，禁止下发运动。
+ *
+ * 离线 / 被屏蔽的关节一律返回 1：它们本来就不会收到运动指令，
+ * 不能因为一台坏电机就把其余五轴也一起锁死。
+ *
+ * 【为什么必须显式问一次】见 struct Robot 里 subdiv_ok 的注释 —— 这类错误
+ * 软件内部永远自洽（下发与读回用同一个常量），只有外部物理测量才看得出来，
+ * 所以"看起来一切正常"不构成证据，必须有读回比对留下的记录。 */
+int robot_subdivision_ok(const Robot *robot, int joint)
+{
+    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
+        return 0;
+    }
+    if (!robot->online[joint - 1] || robot->masked[joint - 1]) {
+        return 1;
+    }
+    return robot->subdiv_ok[joint - 1] ? 1 : 0;
 }
 
 /* robot_init：初始化机器人，注入的 CommOps 打开总线，失败返回 NULL */

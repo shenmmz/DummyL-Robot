@@ -245,32 +245,80 @@ int cmd_parse(const char *line, ParsedCmd *out)
         }
     } else if (ci_strcmp(cmd, "MoveL") == 0) {
         /* 笛卡尔直线（对齐 ABB MoveL）：
-         * MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]
-         * MODE = sync(单发同步，默认) / step(逐段到位) / stream(周期刷新) */
+         *   MoveL:X,Y,Z                        姿态【保持当前不变】，速度用默认
+         *   MoveL:X,Y,Z,SPD,ACC,DEC,keep       姿态保持 + 自定义速度
+         *   MoveL:X,Y,Z,Rx,Ry,Rz               完整写法（姿态角要抄 getpos 打印的原值）
+         *   MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC
+         *   后两种再可加 ,sync|step|stream|smooth
+         *
+         * 【为什么加"省略姿态" —— 2026-09-19 真机事故】
+         * Rx,Ry,Rz 抄错是"画斜线"的头号根因：抄成【别的姿态】下的值
+         * （home 姿态 getpos 打印 Ry=89.99，绘图位姿实际是 0）⇒ SLERP 把姿态
+         * 从起点一路拧到目标 ⇒ 法兰下方的笔尖绕法兰摆。实测 80mm 线：
+         * 姿态抄对 笔尖偏离 0.0000mm；抄成 115,90,115 ⇒ 偏离 7.71mm，
+         * 而法兰直线度始终是 0.0000mm（只看法兰坐标永远发现不了）。
+         * 大多数人要的其实就是"平移过去、姿态别动" —— 那就别让他抄这三个数。
+         *
+         * 【歧义与取舍】6 个数字段有两种解释：X,Y,Z,Rx,Ry,Rz 或 X,Y,Z,SPD,ACC,DEC。
+         * 靠 keep 关键字区分：带 keep ⇒ 后三个是速度参数且姿态保持；
+         * 不带 keep ⇒ 后三个是姿态角（与旧版完全兼容，老命令不受影响）。
+         * 3 个数字段无歧义，直接判为"姿态保持"。 */
         char *rest = save;
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
         double v[9];
         int n = 0, i;
+        int has_keep = 0;
         while (tok != NULL && n < 9) {
             if (!parse_full_number(tok, &v[n])) {
-                /* 非数字段：只可能是第 10 段位置的 MODE 关键字（step/stream），
-                 * 交给下方模式判定；若出现在前 6 段则由下方段数校验拦下 */
+                /* 非数字段：只能是 keep 或 MODE 关键字，交给下方判定 */
                 break;
             }
             n++;
             tok = strtok_r(NULL, ",", &ctx);
         }
-        if (n != 6 && n != 9) {
-            printf("[警告] 用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,sync|step|stream]\n");
+        if (tok != NULL && strcmp(tok, "keep") == 0) has_keep = 1;
+
+        if (n != 3 && n != 6 && n != 9) {
+            printf("[警告] 用法: MoveL:X,Y,Z[,Rx,Ry,Rz][,SPD,ACC,DEC][,keep][,sync|step|stream|smooth]\n");
             return CMD_UNKNOWN;
         }
         out->type = CMD_MOVEL;
         /* 默认 sync（单发同步）：逐段到位会在每段做一次完整的加减速并等待，
          * 段数一多就明显一卡一卡（实测 94mm@60rpm 分 95 段） */
         out->movl_mode = MOVL_MODE_SYNC;
-        for (i = 0; i < 6; i++) out->cartesian[i] = v[i];
-        if (n == 9) {
+        out->keep_pose = 0;
+        for (i = 0; i < 3; i++) out->cartesian[i] = v[i];   /* X,Y,Z 恒为前三个 */
+
+        if (n == 3) {
+            /* 只给位置 ⇒ 姿态保持当前不变（不要求用户抄 Rx,Ry,Rz） */
+            out->keep_pose = 1;
+            out->speeds[0]   =  60;  /* 默认速度 rpm */
+            out->accel_ms[0] =  80;  /* 默认加速度 ms */
+            out->decel_ms[0] =  90;  /* 默认减速度 ms */
+        } else if (n == 6 && has_keep) {
+            out->keep_pose = 1;
+            if (v[3] <= 0.0) {
+                printf("[警告] MoveL 速度须大于 0 rpm\n");
+                return CMD_UNKNOWN;
+            }
+            if (v[4] <= 0.0 || v[5] <= 0.0) {
+                printf("[警告] MoveL 加减速时间须大于 0 ms\n");
+                return CMD_UNKNOWN;
+            }
+            out->speeds[0]   = v[3];
+            out->accel_ms[0] = (int)v[4];
+            out->decel_ms[0] = (int)v[5];
+        } else if (n == 6) {
+            /* X,Y,Z,Rx,Ry,Rz —— 旧行为，向后兼容 */
+            for (i = 0; i < 3; i++) out->cartesian[3 + i] = v[3 + i];
+            out->speeds[0]   =  60;
+            out->accel_ms[0] =  80;
+            out->decel_ms[0] =  90;
+        } else {                                    /* n == 9 */
+            if (has_keep)
+                printf("[提示] 已给出 Rx,Ry,Rz，keep 被忽略（姿态以你给的值为准）\n");
+            for (i = 0; i < 3; i++) out->cartesian[3 + i] = v[3 + i];
             if (v[6] <= 0.0) {
                 printf("[警告] MoveL 速度须大于 0 rpm\n");
                 return CMD_UNKNOWN;
@@ -279,15 +327,12 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 printf("[警告] MoveL 加减速时间须大于 0 ms\n");
                 return CMD_UNKNOWN;
             }
-            out->speeds[0] = v[6];
+            out->speeds[0]   = v[6];
             out->accel_ms[0] = (int)v[7];
             out->decel_ms[0] = (int)v[8];
-        } else {
-            out->speeds[0] =   60;  /* 默认速度 rpm */
-            out->accel_ms[0] = 80;  /* 默认加速度 ms */
-            out->decel_ms[0] = 90;  /* 默认减速度 ms */
         }
-        if (tok != NULL) {                     /* 第 10 段：下发模式关键字 */
+        if (has_keep) tok = strtok_r(NULL, ",", &ctx);   /* 消费 keep */
+        if (tok != NULL) {                               /* 模式关键字 */
             if (strcmp(tok, "sync") == 0) {
                 out->movl_mode = MOVL_MODE_SYNC;
             } else if (strcmp(tok, "step") == 0) {
@@ -303,7 +348,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
             }
             tok = strtok_r(NULL, ",", &ctx);
             if (tok != NULL) {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,sync|step|stream]\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,Rx,Ry,Rz][,SPD,ACC,DEC][,keep][,MODE]\n");
                 return CMD_UNKNOWN;
             }
         }
@@ -523,7 +568,12 @@ static const char HELP_TEXT[] =
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节关节空间运动：轴N 至角度ANGLE(度)，\n"
     "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
     "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
-    "  MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]   笛卡尔直线运动；\n"
+    "  MoveL:X,Y,Z[,MODE]    笛卡尔直线运动，【姿态保持当前不变】（推荐）；\n"
+    "                          Rx,Ry,Rz 抄错会让笔尖画斜线(实测偏 7.71mm 而法兰\n"
+    "                          0.0000mm)，所以能不抄就不抄\n"
+    "  MoveL:X,Y,Z,SPD,ACC,DEC,keep[,MODE]   姿态保持 + 自定义速度\n"
+    "  MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]   完整写法：姿态角须抄 getpos\n"
+    "                          打印的原值(含负号、含 -0.00)\n"
     "                          MODE=sync 按弓高预算分段(默认) / step 逐段到位 /\n"
     "                          stream 周期刷新 / smooth 流畅优先(不分段)\n"
     "  disable               全部失能所有关节\n"

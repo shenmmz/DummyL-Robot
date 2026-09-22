@@ -16,6 +16,7 @@
 #include "api/motor_reg.h"
 #include "utils/err.h"
 #include "utils/ini_rw.h"
+#include "utils/telemetry.h"
 #include "kinematics/joint_zero.h"
 #include "comm/modbus_rtu.h"
 #include "kinematics/dh.h"
@@ -102,6 +103,31 @@
  *   ⇒ 当前结论：画线直接用 smooth（单段），既不卡也不弯。 */
 #define MOVL_SYNC_BOW_MM   2.0     /* 仅 ini 读不到时的兜底，与 [movel] bow_mm=2.0 保持一致 */
 #define MOVL_MIN_STEP_MM   2.0    /* 弦长下限(mm)，防止反推出过密弦把段数撑爆 */
+
+/* MOVL_TIP_WARN_DEG：MoveL 目标姿态与【当前】姿态相差多少度就告警。
+ *
+ * 【为什么必须有这道告警 —— 2026-09-19 真机事故】
+ * 用户报"画的是斜线、落点不对"，但离线复算【法兰】轨迹是完美的直线
+ * （80mm 线直线度 0.0000mm）。真因是 moveL 的 Rx,Ry,Rz 抄错了：
+ * 抄成了别的姿态下的值（home 姿态 getpos 打印 Ry=89.99，绘图位姿实际是 0）。
+ * moveL 用 SLERP 把姿态从起点【一路拧到】目标 ⇒ 中途姿态一直在变 ⇒
+ * 装在法兰下方 L mm 处的笔尖绕法兰摆 **L×2sin(θ/2)**（θ = 法兰倾角变化）。
+ * 【⚠️ 公式别写成 L×sin(θ)】θ→180° 时 sin(θ)→0，会算出"几乎不动"的荒谬结论
+ * （90° 时前者给 41.17、后者给 58.2；179° 时前者给 0.72、后者给 82.3，完全反过来）。
+ * 正确式子的几何意义就是两个笔尖位置的距离 |n1−n0|×L。
+ *
+ * 【离线实测（80mm Y 向线，起点 J=0,0,110,0,70,0，笔长 41.17）】
+ *   姿态填 -180,0,-180（= 起点）⇒ 倾角变化 0.000°  笔尖纸面偏离 0.0000 mm
+ *   姿态填 115,90,115（home 抄的）⇒ 倾角变化 88.9°  笔尖纸面偏离 7.71 mm
+ *   姿态填 0,90,0 / 180,90,180   ⇒ 倾角变化 88.9°  笔尖纸面偏离 7.71 mm
+ * ⇒ 法兰 0mm、笔尖 7.7mm：只看法兰坐标【永远发现不了】这个问题。
+ * ⇒ 注意 88.9° 的空间摆幅是 41.17×2sin(44.45°)=57.6mm，但【纸面上只表现为 7.71mm】：
+ *    那一摆主要是把笔"从朝下抬到朝水平"，竖直分量占大头，水平投影才 7.71mm。
+ *    所以告警里的毫米数是空间摆幅上界，别当成纸上偏差。
+ *
+ * 默认 5° 的依据：41.17mm 的笔在 5° 下摆 41.17×2sin(2.5°)=3.6mm，
+ * 在 100mm 的线上已经肉眼可见地斜了。装短工具时可以调大。 */
+#define MOVL_TIP_WARN_DEG  5.0
 /* 实际发生的总线【写】事务计数（movej_issue 里累加），stream 用它折算单事务耗时。
  * 常量估算在"跳过重复速度写"之后会虚报，改为实点。 */
 static int    g_tx_written = 0;
@@ -902,6 +928,12 @@ void cmd_zero_save(Robot *robot, const double vals[6])
  *
  * g_tx_written 累计"实际发生的总线写事务数"，供 stream 诊断折算单事务耗时。
  * 此前用常量估算（首段 18 / 其余 12），跳过速度写后会虚报，改为实点。 */
+/* 遥测用的"最近一次完整六轴角"。movej_issue 存目标角当基准，movej_wait 每轮把
+ * 读回的轴更新进去、没读到的沿用上次 —— 保证发出去的永远是六个完整值，
+ * 不会因为某一轴没参与运动就摆出不存在的姿态（详见 movej_wait 里的注释）。 */
+static double g_tlm_mech[6] = {0};
+static int    g_tlm_mech_ok = 0;
+
 static int movej_issue(Robot *robot, int num_joints, const int joints[6],
                        const double angles[6], const double *ref_angles,
                        double speed, int accel_ms, int decel_ms, int set_profile,
@@ -1085,6 +1117,18 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
         pend[j] = 1;
         remain++;
     }
+
+    /* UDP 遥测：把本次下发的目标角发给本机 3D 镜像，同时作为"实际角"的基准。
+     * 【只在六轴齐全时发】num_joints<6 时 angles 里没被指定的轴是上一次的残值，
+     * 发出去会让镜像摆出一个根本不存在的姿态。六轴下发（movel 各段、多轴 movej）
+     * 才是完整位姿，其余情况宁可不发。
+     * 这一句在最热的路径上，但 sendto 回环是微秒级且失败静默，不影响控制。 */
+    if (num_joints == 6) {
+        for (i = 0; i < 6; i++) g_tlm_mech[i] = angles[i];
+        g_tlm_mech_ok = 1;
+        telemetry_send(angles, "cmd");
+    }
+
     return remain;
 }
 
@@ -1180,6 +1224,23 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
         for (j = 0; j < 6; j++)
             motor[j] = ok[j + 1] ? STEPS2DEG(pos[j + 1], red[j]) : 0.0;
         joint_zero_motor_to_mech(motor, mech);
+
+        /* UDP 遥测：发【实际读回】的六轴角，3D 镜像据此连续刷新。
+         * 与 movej_issue 里那包的区别：那里发的是【目标角】，一段只有一包，
+         * 镜像会一跳一跳；这里跟着轮询走（一轮约 90ms，轴陆续到位后更快），
+         * 动作是连续的，而且看到的是真机【真实走到哪了】，包含滞后/跟不上。
+         *
+         * 【别要求"六轴都在动"】第一版写成 pend[1..6] 全为真才发，结果只要有一
+         * 轴已到位/被 mask 就一包都不发（实测整条 movej 只收到 2 包，全是 cmd）。
+         * 现在改成：以 movej_issue 存下的目标角为基准，本轮【读到】的轴就更新成
+         * 实际值，没读到的沿用上次 —— 这样六角永远是完整的，姿态不会凭空乱摆，
+         * 而且部分轴不动时也能连续发。ok[j]==0 的轴不能用（motor=0 ⇒ mech 是
+         * 0 机械角，是假值），所以必须逐个判断 ok。 */
+        if (g_tlm_mech_ok) {
+            for (j = 0; j < 6; j++)
+                if (ok[j + 1]) g_tlm_mech[j] = mech[j];
+            telemetry_send(g_tlm_mech, "act");
+        }
 
         /* 【读回体检：读回不可能是真的 ⇒ 立刻停，别干等 60s】
          *
@@ -1718,6 +1779,114 @@ static double ang_delta_deg(double a, double b)
     return d;
 }
 
+/* movl_tip_warn_deg：姿态偏差告警阈值(度)，ini [movel] tip_warn_deg 可覆盖。
+ * 默认 MOVL_TIP_WARN_DEG = 5.0，依据见该宏注释（41.17mm 笔在 5° 下横移 3.6mm）。 */
+static double movl_tip_warn_deg(void)
+{
+    FILE *f;
+    char line[256];
+    int in_movel = 0;
+
+    f = fopen(INI_PATH, "r");
+    if (f == NULL) return MOVL_TIP_WARN_DEG;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = line;
+        char *eq;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == ';' || *p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+        if (*p == '[') {
+            in_movel = (strncmp(p, "[movel]", 7) == 0) ? 1 : 0;
+            continue;
+        }
+        if (!in_movel) continue;
+        if (strncmp(p, "tip_warn_deg", 12) != 0) continue;
+        eq = strchr(p, '=');
+        if (eq == NULL) continue;
+        fclose(f);
+        {
+            double v = atof(eq + 1);
+            return (v > 0.0) ? v : MOVL_TIP_WARN_DEG;
+        }
+    }
+    fclose(f);
+    return MOVL_TIP_WARN_DEG;
+}
+
+/* movl_pose_warn：目标姿态与【当前】姿态不一致时，下发前告警。
+ *
+ * 【为什么必须在下发前拦这一下 —— 2026-09-19 真机事故】
+ * 用户报"画的是斜线、落点不对"。离线复算【法兰】轨迹却是完美直线
+ * （80mm 线直线度 0.0000mm）—— 只看法兰坐标永远发现不了问题。
+ * 真因：moveL 的第 4~6 个数（Rx,Ry,Rz）抄成了【别的姿态】下的值
+ * （home 姿态 getpos 打印 Ry=89.99，绘图位姿实际是 0）。
+ * line_plan 用 SLERP 把姿态从起点一路拧到目标，中途姿态持续变化，
+ * 装在法兰下方 L mm 处的笔尖就绕法兰摆 L×2sin(θ/2)（θ = 法兰倾角变化）。
+ *
+ * 【离线实测：80mm Y 向线，起点 J=0,0,110,0,70,0，笔长 41.17】
+ *   填 -180,0,-180（=起点）⇒ 倾角变化 0.000°  笔尖纸面偏离 0.0000 mm
+ *   填 115,90,115（home 抄的）⇒ 倾角变化 88.9° 笔尖纸面偏离 7.71 mm
+ * ⇒ 差 7.7mm，肉眼一眼就看出线是斜的，而法兰坐标完全正常。
+ *
+ * 【为什么只告警不拒绝】姿态变化本身不撞机（撞机由 max_jump_deg 管），
+ * 它只毁【画出来的线的质量】。确有正当用途（比如边走边转姿态），
+ * 所以这里给足信息让用户自己判断，不替他做决定。 */
+static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
+{
+    const double RAD2DEG = 180.0 / 3.14159265358979323846;
+    double pen_mm = 0.0;
+    double drx, dry, drz, worst, warn;
+    double m0[4][4], m1[4][4];
+    double n0[3], n1[3], dot, tilt, swing;
+
+    /* 笔长：优先 [tool] pen_length（只用于告警，不改坐标）；
+     * 没配就回退 tool_length（那时 TCP 真在笔尖，用它也对）；都没有按 0：只给角度。 */
+    if (!ini_read_pen_length(INI_PATH, &pen_mm) || pen_mm <= 0.0) {
+        pen_mm = 0.0;
+        if (ini_read_tool_length(INI_PATH, &pen_mm) && pen_mm <= 0.0) pen_mm = 0.0;
+    }
+
+    drx = fabs(ang_delta_deg(end_pose[3], start_pose[3]));
+    dry = fabs(ang_delta_deg(end_pose[4], start_pose[4]));
+    drz = fabs(ang_delta_deg(end_pose[5], start_pose[5]));
+    worst = drx;
+    if (dry > worst) worst = dry;
+    if (drz > worst) worst = drz;
+    warn = movl_tip_warn_deg();
+
+    /* 真实倾角 = 两个法兰法线的夹角（Z 轴列），比"欧拉角分量最大差"准。
+     * 门限仍用欧拉角分量 worst（用户看得懂、和 getpos 对得上），
+     * 但毫米数用真实倾角算，不准的度不该乘出准的毫米。 */
+    line_pose_to_matrix(start_pose, m0);
+    line_pose_to_matrix(end_pose, m1);
+    n0[0] = m0[0][2]; n0[1] = m0[1][2]; n0[2] = m0[2][2];
+    n1[0] = m1[0][2]; n1[1] = m1[1][2]; n1[2] = m1[2][2];
+    dot = n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2];
+    if (dot > 1.0) dot = 1.0;
+    if (dot < -1.0) dot = -1.0;
+    tilt = acos(dot) * RAD2DEG;
+    swing = pen_mm * 2.0 * sin(tilt / 2.0 / RAD2DEG);
+
+    if (worst <= warn) return;
+
+    printf("[警告] 目标姿态与【当前】姿态不一致：ΔRx=%.2f° ΔRy=%.2f° ΔRz=%.2f°"
+           "（法兰倾角变化 %.2f°）\n", drx, dry, drz, tilt);
+    printf("       MoveL 会用 SLERP 把姿态【从起点一路拧到目标】，中途姿态一直在变。\n");
+    printf("       当前姿态是 Rx=%.2f Ry=%.2f Rz=%.2f —— 就抄 getpos 打印的这三个。\n",
+           start_pose[3], start_pose[4], start_pose[5]);
+    if (pen_mm > 0.0) {
+        printf("       笔长 %.2fmm ⇒ 笔尖绕法兰摆 %.2f×2sin(%.2f°/2) = %.2f mm（空间摆幅）。\n",
+               pen_mm, pen_mm, tilt, swing);
+        printf("       注意：摆幅大多花在【把笔从朝下抬起来】上，落到纸面的横向偏离"
+               "通常远小于它\n       （88.9° 那次空间摆 57.6mm，纸上只有 7.71mm）。\n");
+    } else {
+        printf("       笔长未配置 ⇒ 算不出毫米数。ini [tool] pen_length 填上法兰面到笔尖的"
+               "mm 就能换算。\n");
+    }
+    printf("       ⇒ 法兰仍走直线，但【笔尖画的是弧/斜线，落点也会偏】。\n");
+    printf("       要笔尖走直线：把 Rx,Ry,Rz 抄成 getpos 打印的原值（含负号、含 -0.00）。\n");
+    printf("       （告警阈值 %.1f°，ini [movel] tip_warn_deg 可调）\n", warn);
+}
+
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
     const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1755,6 +1924,14 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         start_pose[5] = rpy[2] * RAD2DEG;
     }
     for (j = 0; j < 6; j++) end_pose[j] = cmd->cartesian[j];
+    if (cmd->keep_pose) {
+        /* 姿态保持当前不变：直接用 FK 出来的【起点姿态】，不要求用户抄 Rx,Ry,Rz。
+         * 抄错姿态角是"画斜线"的头号根因（实测笔尖偏离 7.71mm 而法兰 0.0000mm），
+         * 大多数人要的就是"平移过去、姿态别动"，那就别让他抄。 */
+        for (j = 0; j < 3; j++) end_pose[3 + j] = start_pose[3 + j];
+        printf("MoveL: 姿态保持当前不变（Rx=%.2f Ry=%.2f Rz=%.2f，取自当前位姿）\n",
+               end_pose[3], end_pose[4], end_pose[5]);
+    }
 
     /* 2) 按位移定插补点数 → 直线离散 + 逐点 IK + 分段时间表 */
     double dx = end_pose[0] - start_pose[0];
@@ -1774,6 +1951,10 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         printf("MoveL: 已在目标位姿（位移 %.2f mm），无需运动\n", dist);
         return;
     }
+
+    /* 姿态偏差告警：姿态抄错会让笔尖画斜线，而法兰坐标完全正常（看不出来）。
+     * 放在"已在目标位姿"早退之后 —— 不动就没必要吵。 */
+    movl_pose_warn(start_pose, end_pose);
 
     {
         const double lmin[6] = ROBOT_JOINT_LIMIT_MIN_DEG;

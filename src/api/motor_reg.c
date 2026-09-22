@@ -402,6 +402,34 @@ static int abs_move_steps_ok(int joint, int32_t steps)
     return 1;
 }
 
+/* 细分确认闸门：与 abs_move_steps_ok 并列，装在同一个出口。
+ *
+ * 【为什么必须有这一道】0x0024（每转脉冲数）出厂是 4000，程序上电才把它写成
+ * ENCODER_STEPS_PER_REV(=10000)，且【RAM 生效、断电即回 4000】。换算用的是 10000：
+ *   · 已对齐：250000 步 = 25 圈电机轴 ÷ 减速比 100 = 90°
+ *   · 未对齐：250000 步 = 62.5 圈 ÷ 100 = 225°   （2026-09-19 实测推导）
+ * 同一个"90°"差 2.5 倍，而编码器在电机侧、下发与读回共用同一常量 ⇒
+ * 程序永远自洽、getpos 永远显示"正确"，只有真机转过头才暴露。
+ *
+ * 【什么时候会走到这里】启动对齐时该轴离线/写失败/读回不符；或运行中驱动器
+ * 掉电重启使 0x0024 退回 4000（此时零点也一起丢了，#10 位姿闸门会同时报警）。
+ *
+ * 【为什么不放在更上层】见 abs_move_steps_ok 的注释：靠"每一层都小心"防不住，
+ * 必须在唯一出口兜底 —— MoveJ 单轴/多轴、MoveL、回零、摆动测量全都从这里过。 */
+static int abs_move_subdiv_ok(Robot *robot, int joint)
+{
+    if (robot_subdivision_ok(robot, joint)) {
+        return 1;
+    }
+    printf("[错误] 关节%d 的每转脉冲数(0x0024)未确认对齐到 %d，已拒绝下发运动。\n"
+           "       该寄存器出厂为 4000、断电即回 4000，只有上电写入才是 %d；\n"
+           "       未对齐时同样的角度会被放大 2.5 倍（实测 90° 会转成 225°）。\n"
+           "       编码器在电机侧，程序读回永远自洽，看不出来 —— 只能靠写后读回比对。\n"
+           "       处理：检查该轴供电/接线，重启本程序（启动时会重新对齐）。\n",
+           joint, (int)ENCODER_STEPS_PER_REV, (int)ENCODER_STEPS_PER_REV);
+    return 0;
+}
+
 /* motor_move_steps_ok：目标步数的量级体检（纯函数，可离线单测）。
  * 抽出来就是为了能测 —— 这道闸门平时一次都不会触发，
  * 唯一能证明它没写反的办法就是拿真事故里的那些数去喂它。 */
@@ -418,6 +446,7 @@ int motor_move_steps_ok(int32_t steps)
 ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
 {
     if (!abs_move_steps_ok(joint, steps)) return ERR_ARG;
+    if (!abs_move_subdiv_ok(robot, joint)) return ERR_SUBDIV;
     return motor_write_i32(robot, joint, LEESN_REG_ABS_MOVE, steps);
 }
 
@@ -425,6 +454,7 @@ ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
 ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps)
 {
     if (!abs_move_steps_ok(joint, steps)) return ERR_ARG;
+    if (!abs_move_subdiv_ok(robot, joint)) return ERR_SUBDIV;
     return motor_write_i32_noread(robot, joint, LEESN_REG_ABS_MOVE, steps);
 }
 

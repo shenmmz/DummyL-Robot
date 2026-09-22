@@ -266,32 +266,10 @@ int monitor_poll(Monitor *m)
     return cnt;
 }
 
-/* monitor_check_alarm：读 0x00A3 报警状态，有报警时打印代码并返回报警代码（0=正常） */
-int monitor_check_alarm(Monitor *m, int joint)
-{
-    int code;
-
-    if (m == NULL || m->robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return 0;
-    }
-    code = motor_read_alarm(m->robot, joint);
-    if (code < 0) {
-        return 0;
-    }
-    if (code != 0) {
-        printf("[错误] 关节%d 驱动器报警：%s（代码 %d）\n", joint, leesn_alarm_text(code), code);
-    }
-    return code;
-}
-
-/* monitor_clear_alarm：写 0x00A4 = 0 清除报警，返回 ERR_NONE 成功 */
-ErrCode monitor_clear_alarm(Monitor *m, int joint)
-{
-    if (m == NULL || m->robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return ERR_ARG;
-    }
-    return motor_clear_alarm(m->robot, joint);
-}
+/* 注：此处原有两个零调用的函数 monitor_check_alarm / monitor_clear_alarm，
+ * 2026-09-21 清理时删除（monitor.h 从未声明，全项目零引用）。
+ * 报警读取已由 monitor_poll 内联、清除已由 home.c 直接调 motor_clear_alarm 承担。
+ * 需要时 git show HEAD:src/control/monitor.c 可取回。 */
 
 /* monitor_check_stall：单关节电流超阈值检测（立三无堵转寄存器，碰撞/堵转
  * 判定唯一依据为 0x001A 实时电流），超阈值报警返回 1 */

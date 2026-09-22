@@ -5,6 +5,7 @@
 #include "config/robot_config.h"
 #include "utils/cmd_parser.h"
 #include "utils/ini_rw.h"
+#include "utils/telemetry.h"
 #include "kinematics/joint_zero.h"
 #include "kinematics/dh.h"   /* dh_set_tool_length：运行时叠加末端工具长到 d6 */
 #include "cli/commands.h"
@@ -194,6 +195,12 @@ int main(int argc, char **argv)
             printf("工具长度来源：默认 0mm（无工具）→ d6=%.2fmm\n", DH_D6_FLANGE_MM);
         }
     }
+
+    /* UDP 遥测：把关节角发给本机 3D 镜像（sim/live_mirror.py）。
+     * 默认【关闭】—— ini [telemetry] enabled = 1 才启用。
+     * 这里只是初始化 socket，真正的发送在 movej_issue 的下发点，
+     * 且全部失败路径静默，绝不影响控制。 */
+    telemetry_init(INI_PATH);
 
     /* 注入串口 CommOps（control 层通过接口操作总线） */
     modbus_comm_set(&serial_comm_ops);

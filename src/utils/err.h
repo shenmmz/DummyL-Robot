@@ -19,6 +19,7 @@ typedef enum {
     ERR_OVERFLOW  = 7,  /* 数据越界/缓冲不足 */
     ERR_MASKED    = 8,  /* 关节被屏蔽，操作跳过（非失败） */
     ERR_ALARM     = 9,  /* 驱动器报警（位置超差等），运动被中断 */
+    ERR_SUBDIV    = 10, /* 每转脉冲数(0x0024)未确认对齐，禁止下发运动（见 robot_subdivision_ok） */
 } ErrCode;
 
 /* 错误码 -> 中文描述；未知码返回"未知错误" */
