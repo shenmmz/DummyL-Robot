@@ -1,5 +1,17 @@
 # DummyL-Robot 项目记忆（2026-09-23 精简）
 
+> ⚠️ **2026-09-23：`src/cli/commands.c` 的全部注释已被删除**（4008 行 → 3042 行，删掉 966 行 / 41% 字节）。
+> ⇒ **本文件与 `docs/` 里所有形如 `commands.c:1234` 的行号引用，指的是删注释【之前】的行号，现在全部失效。**
+> ⇒ 要找回来（含全部注释）：
+> ```bash
+> git show 097b082:src/cli/commands.c > commands_with_comments.c
+> ```
+> （备份副本也在 `%TEMP%\rs485probe\archive\commands.c.before-strip`，但临时目录会被清，**以 git 那条为准**）
+> ⇒ 删掉的东西里有些是**别处没有的**：movel 弓高公式、noread A/B 原始四趟数据、六轴启动差 92→10.3ms 原始记录、
+> `0x00DC=1` 连带固化 ACC/DEC 的坑、一批"为什么不能用 XX 寄存器"的排除记录。
+> 以后**新结论一律写进 `docs/`**（`docs/` 在 .gitignore 里，不进库，只在本机）。
+> ⇒ 等价性已证明：剥离前后 `commands.c.obj` 的 `.text` 反汇编 **12922 行逐行完全相同**（只有 COFF 时间戳与 `.debug_*` 行号变）。
+
 > 详细推导与测试卡见 `docs/测试方法与验收标准.md`（测试 1~22）、`docs/运动流畅性提速路线.md`。本文件只留结论、坑与指针。
 
 ## 约定
