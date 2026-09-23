@@ -161,6 +161,7 @@ uint8_t joint_slave(int joint);
  * 可重入，不会死锁，但语义上等于把批处理切碎，失去意义。
  * 持锁期间不得调用任何会阻塞很久的操作（会卡住监控线程）。 */
 void robot_bus_lock(Robot *r);
+/* 释放总线锁。必须与 robot_bus_lock 在同一线程内配对（CRITICAL_SECTION 可重入）。 */
 void robot_bus_unlock(Robot *r);
 
 #endif /* ROBOT_INTERNAL_H */

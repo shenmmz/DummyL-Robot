@@ -16,6 +16,7 @@ typedef enum {
     ERR_SUBDIV    = 10,
 } ErrCode;
 
+/* 错误码转中文串。ERR_NONE → "OK"。 */
 const char *err_str(ErrCode e);
 
 #endif
