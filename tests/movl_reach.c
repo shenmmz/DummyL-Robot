@@ -184,7 +184,7 @@ int main(int argc, char **argv)
     if (ok) {
         printf("PASS —— 这条 movel 路径全程可达、无跳变、IK/FK 自洽，可以下发。\n");
         printf("（注意：本工具只保证【规划层】没问题；实际是否走直线还取决于\n");
-        printf("  下发模式：smooth 单段会弯 ~9mm/100mm，sync 分 3 段约 1mm。）\n");
+        printf("  下发模式：smooth 单段会弯 ~9mm/100mm，step 分 3 段约 1mm。）\n");
         free(q_seq);
         return 0;
     }

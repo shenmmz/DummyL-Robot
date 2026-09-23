@@ -246,7 +246,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
         if (tok != NULL && strcmp(tok, "keep") == 0) has_keep = 1;
 
         if (n != 3 && n != 6 && n != 9) {
-            printf("[警告] 用法: MoveL:X,Y,Z[,Rx,Ry,Rz][,SPD,ACC,DEC][,keep][,sync|step|stream|smooth]\n");
+            printf("[警告] 用法: MoveL:X,Y,Z[,Rx,Ry,Rz][,SPD,ACC,DEC][,keep][,step|stream|smooth]\n");
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         out->type = CMD_MOVEL;
@@ -296,7 +296,10 @@ int cmd_parse(const char *line, ParsedCmd *out)
         if (has_keep) tok = strtok_r(NULL, ",", &ctx);
         if (tok != NULL) {
             if (strcmp(tok, "sync") == 0) {
-                out->movl_mode = MOVL_MODE_SYNC;
+                printf("[警告] sync 模式已移除（分段必然段末归零 ⇒ 会停顿，实际用不到）。\n"
+                       "       要逐段过流保护请改用 ,step；要不停顿就用默认 smooth。\n");
+                out->type = CMD_UNKNOWN;
+                return CMD_UNKNOWN;
             } else if (strcmp(tok, "step") == 0) {
                 out->movl_mode = MOVL_MODE_STEP;
             } else if (strcmp(tok, "stream") == 0) {
@@ -304,7 +307,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
             } else if (strcmp(tok, "smooth") == 0) {
                 out->movl_mode = MOVL_MODE_SMOOTH;
             } else {
-                printf("[警告] MoveL 模式须为 sync(按弓高预算分段)、step(逐段到位)、"
+                printf("[警告] MoveL 模式须为 step(逐段到位+过流保护)、"
                        "stream(周期刷新) 或 smooth(流畅优先，不分段)：%s\n", tok);
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
@@ -719,9 +722,10 @@ static const char HELP_TEXT[] =
     "  MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]   完整写法：姿态角须抄 getpos\n"
     "                          打印的原值(含负号、含 -0.00)\n"
     "                          MODE 缺省=【不分段】(流畅优先，零段间停顿，2026-09-23 改)\n"
-    "                          sync 按弓高预算分段(直但有停顿) / step 逐段到位 /\n"
+    "                          step 逐段到位(有逐段过流保护，但段末会停) /\n"
     "                          stream 周期刷新 / smooth 同缺省\n"
-    "                          ⚠️ 不分段时运动全程【不查过流(碰撞)】；要保护显式加 ,sync\n"
+    "                          ⚠️ 缺省(不分段)时全程【不查过流(碰撞)】；要保护显式加 ,step\n"
+    "                          ⚠️ sync 模式已于 2026-09-23 移除（分段必然停顿）\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"

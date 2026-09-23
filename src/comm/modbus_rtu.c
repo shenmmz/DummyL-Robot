@@ -336,7 +336,7 @@ ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out)
 
 /* 只写请求、不等响应（noread）。
  * ⚠️ 实测【零收益】：从站照样要花 1.47ms 周转、还要占线把响应发出来，
- * 所以它和等响应一样慢，却少了确认。ini [movel] noread_gap_ms 保持 0 是对的。
+ * 所以它和等响应一样慢，却少了确认 ⇒ 现在只剩 nrtest / busrate 探针在用。
  * ⚠️ 它会留下没人读走的回帧，被下一个读当成应答 ⇒ CRC 失败。
  * 症状：同一条命令行 diag 后紧跟 busrate，busrate 第一笔读报"关节1 不在线"。
  * ⇒ 所以 diag / busrate / nrtest 首尾都要调 bus_drain()。 */

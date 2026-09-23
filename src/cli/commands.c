@@ -25,39 +25,123 @@
 #include <windows.h>
 
 
-#define MOVEJ_POLL_MS      10
-#define MOVEJ_INPOS_TOL   100
-#define MOVEJ_TIMEOUT_MS  60000
-#define MOVEJ_STATUS_MS   200
-#define MOVEJ_STATUS_W    78
-#define MOVEJ_MIN_RPM       1.0
-#define MOVL_ACC_FLOOR_MS   60
-#define MOVL_SYNC_BOW_MM   2.0
-#define MOVL_MIN_STEP_MM   2.0
+/* ================= 运动/轮询调参常量 =================
+ * 这一块是「运动行为」的全部可调旋钮，分四组（末尾另有一个运行期计数器）：
+ *   ① 轮询与到位判据  ② 速度/加减速下限  ③ 几何与安全闸门  ④ 读回异常与免读路径
+ * 每条的实测依据写在下面。改之前先看注释里的基线，别拿旧数值推理。
+ * ⚠️ 与 ini 重名的项（bow_mm / acc_floor_ms / seg_ramp_ratio / stream_beat_s /
+ *    max_step_deg / max_jump_deg）都以 ini 为准，这里的值只是
+ *    「ini 缺键时的兜底」。改 ini 不用动这里，但两边口径必须一致。
+ */
 
+/* ---- ① 轮询与到位判据 ---- */
+
+/* 等位置时的轮询间隔(ms)。
+ * ⚠️ 偏大，是当前最划算的一处提速点：读一轮六轴实测 10.2ms，加上这 10ms
+ *    ⇒ 实际周期 ≈20.3ms。降到 1~2ms ⇒ 周期 ≈11.3ms，【1.8 倍】。
+ *    属运动行为变更，改前须先 home + 用 50mm 线验收「段间停顿」。 */
+#define MOVEJ_POLL_MS      10
+
+/* 到位容差（脉冲）。换算角度（1 步 = 360/(red×10000)°）：
+ *   J2(red=100) 100 步 = 0.036°；其余五轴 100 步 = 0.072°。末端 ≈0.17mm。
+ * 判据 = 位置落在 target±此值 + 无报警 + 已退出 RUN。偏紧但实测能通过 ⇒ 保持。 */
+#define MOVEJ_INPOS_TOL   100
+
+/* 等到位的总超时(ms)。对 1~2s 的线很宽松 ⇒ 不会误杀，代价是真卡住要等 60s。 */
+#define MOVEJ_TIMEOUT_MS  60000
+
+/* 状态行（\r 原地刷新那一行）的刷新间隔(ms)。200ms = 5Hz，够看又不刷屏。 */
+#define MOVEJ_STATUS_MS   200
+
+/* 状态行的定宽列数。78 是给 80 列终端留 2 列，避免自动换行把上一行顶掉。 */
+#define MOVEJ_STATUS_W    78
+
+/* 单轴最低速度(rpm)。各轴速度按位移比例分配，小位移轴会趋近 0；卡在 0 会让
+ * 该轴永远不动、整条指令干等到超时 ⇒ 这个下限是必要保护。 */
+#define MOVEJ_MIN_RPM       1.0
+
+/* ---- ② 速度/加减速下限 ---- */
+
+/* 加/减速时间的安全下限(ms)（ini [movel] acc_floor_ms 的兜底）。用户敲的
+ * acc/dec 低于它会被抬到这里并打提示。依据：过短的减速会丢步（表现为
+ * 「走到一半卡住」）。实测驱动器当前 80/90ms ⇒ 60 这个下限不生效；
+ * 要试更小的值须从 40 起，注意丢步/过流。 */
+#define MOVL_ACC_FLOOR_MS   60
+
+/* ---- ③ 几何与安全闸门 ---- */
+
+/* 允许的几何弓高预算(mm)（ini [movel] bow_mm 的兜底）。step/stream 模式据此判
+ * 「弓高是否超预算」并告警。弓高 ≈ 0.001 × 段长²(mm)
+ * ⇒ 2.0mm 对应约 45mm 以内的段不分段。 */
+#define MOVL_BOW_BUDGET_MM   2.0
+
+/* 笔尖方向偏差告警阈值(度)。依据：J5 差 1° ⇒ 笔尖偏 0.72mm；5° ≈ 3.6mm。
+ * 超了就该怀疑 movel 的姿态参数抄错了（没抄当前 getpos 原值）。 */
 #define MOVL_TIP_WARN_DEG  5.0
-static int    g_tx_written = 0;
+
+/* 默认插补步长(mm)。80mm 线 ⇒ 81 个点，全部逆解 <3.3ms（IK 实测 <40µs/次）。 */
 #define MOVL_STEP_MM        1.0
+
+/* stream 模式的最小节拍(ms)。一轮总线实测 10.2ms ⇒ 20ms 时下发占 50%，
+ * 六轴起步严重不同步，末端偏差会远大于弓高。 */
 #define MOVL_STREAM_MIN_MS  20
+
+/* stream 模式的节拍(s)（ini [movel] stream_beat_s 的兜底）。 */
 #define MOVL_STREAM_BEAT_S  0.10
+
+/* 段时长至少要等于 (ACC+DEC) 的几倍，才算「爬得完坡」。
+ * 3.0 × (80+90)ms = 510ms ⇒ 短于 510ms 的段在 stream 下必然爬不完坡。 */
 #define MOVL_SEG_RAMP_RATIO 3.0
+
+/* 估算弓高时在段内采几个中间点（纯计算，不占总线；24 点足够）。 */
 #define MOVL_BOW_SAMPLES    24
+
+/* ⚠️ 【死宏】当前无任何引用：弓高告警现在直接拿 ini 的 bow_mm 比
+ *    （见 cmd_movel 里 bow > bow_budget*1.2+0.05 那段）。留档待接回或删除。 */
 #define MOVL_BOW_WARN_MM    1.0
+
+/* stream 模式「段内采一次样」要预留的时间(ms)。
+ * ⚠️ 与 MIN_MS(20)/BEAT_S(0.10) 口径不匹配：判据是 used + 本值 ≤ period_ms，
+ *    即节拍要 ≥180ms 才采得到 ⇒ 默认配置下永远采不到，只会打
+ *    「节拍太短，段内一次都没采到」的提示。这三个值要一起重定。 */
 #define MOVL_STREAM_PROBE_MS 150
+
+/* 腕部奇异判定阈值(度)：|J5| 小于它就算进入奇异区（θ4 与 θ6 同轴、分配不唯一）。
+ * 依据（实测）：home 位形沿 +Y 走 30mm，第 1 段就要 J4 转 89.98°。 */
 #define MOVL_WRIST_SINGULAR_DEG 5.0
+
+/* 单段关节跳变【告警】阈值(度)。介于它与 max_jump_deg 之间只警告、不拦。 */
 #define MOVL_JUMP_WARN_DEG     15.0
+
+/* 单次运动位移上限(度)（ini [safety] max_step_deg 的兜底）。超限通常意味着
+ * 单位/符号/坐标系搞错了，真发出去就是电机猛冲 + 超时急停。 */
 #define MOVEJ_MAX_STEP_DEG     720.0
+
+/* 单段单关节跳变【拒绝】上限(度)（ini [safety] max_jump_deg 的兜底）。
+ * 依据（实测）：超限时时间表会把这 1mm 段拉到十几秒，期间末端只挪 1mm 而
+ * J4 转过 90°，臂会大幅度慢慢扫过一大片空间。 */
 #define MOVL_JUMP_MAX_DEG      30.0
 
+/* ---- ④ 读回异常检测与免读路径 ---- */
+
+/* 读回异常判据：机械角超出软限位多少度才算「读数不可信」(度)。
+ * 依据（2026-09-19 实测）：总线被打断时六轴读回【同时】变成越限值、
+ * 末端偏差冻结在 258.92mm 不动。 */
 #define MOVEJ_ANOM_MARGIN_DEG  15.0
+
+/* 连续多少轮异常才判定为真异常（防单次误报）。3 轮 × 轮询周期 ≈30ms。 */
 #define MOVEJ_ANOM_MIN_POLLS   3
 
 static double movl_max_step_deg(void);
 static double movl_max_jump_deg(void);
+
+/* 浮点比较容差：位移(mm) / 角度(度)。用于判「起终点相同、无需运动」。 */
 #define MOVL_EPS_MM         0.05
 #define MOVL_EPS_DEG        0.05
 
-#define MOVEJ_NR_GAP_MS    4
+/* 本进程累计发出的 Modbus 写帧数（仅统计用，不参与控制逻辑）。
+ * 用途：stream 模式算「单事务下发耗时」= 下发总耗时 ÷ 本计数。 */
+static int g_tx_written = 0;
 
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
                           const double angles[6], double speed,
@@ -943,15 +1027,15 @@ static void dev_report(const char *tag)
            (tag != NULL) ? tag : "", g_dev_peak);
 }
 
-/* MoveL 收尾：打实际耗时 / 预计耗时，比值超出 1 的部分就是段间归零吃掉的
- * （每段末独立 ACC+DEC，实测 80+90 = 170ms）。 */
-static void sync_finish(uint32_t t0, double total_dt)
+/* MoveL 收尾：打实际耗时 / 预计耗时。
+ * 不分段时比值超出 1 的部分 = 加减速爬坡 + 六轴错开发下的开销（没有段间归零）。 */
+static void movl_finish(uint32_t t0, double total_dt)
 {
     double actual = (double)(GetTickCount() - t0) / 1000.0;
-    dev_report("sync ");
+    dev_report(NULL);
     if (total_dt > 1e-6)
-        printf("  实际耗时 %.2f s（预计 %.2f s）比值 %.2f "
-               "—— 超出 1 的部分就是段间归零吃掉的\n",
+        printf("  实际耗时 %.2f s（预计 %.2f s）比值 %.2f"
+               "（超出 1 的部分 = 加减速爬坡 + 六轴错开发下）\n",
                actual, total_dt, actual / total_dt);
 }
 
@@ -1132,46 +1216,6 @@ static void movej_joints(Robot *robot, int num_joints, const int joints[6],
     movej_wait(robot, joints, tgt, pend, remain, line_a, line_b);
 }
 
-/* 只写不等响应的下发（帧间留 gap_ms）。
- * ⚠️ 会留下没人读走的回帧，必须在合适的地方 bus_drain() 冲掉。 */
-static void movej_issue_noread(Robot *robot, const int joints[6], int32_t tgt[7],
-                               int gap_ms)
-{
-    int j;
-    for (j = 0; j < 6; j++) {
-        if (robot_is_masked(robot, joints[j])) continue;
-        if (gap_ms > 0) {
-            motor_move_abs_noread(robot, joints[j], tgt[joints[j]]);
-            Sleep((DWORD)gap_ms);
-        } else {
-            motor_move_abs(robot, joints[j], tgt[joints[j]]);
-        }
-    }
-}
-
-/* 按本段各轴位移比例分配速度：位移最大的轴 = seg_rpm，其余按比例（下限 1rpm）。
- * 每段下发前都要调一次 —— 否则某轴会提前停住不动（旧 bug 的典型症状）。 */
-static void movl_set_seg_speed(Robot *robot, const int joints[6],
-                               const double qa[6], const double qb[6],
-                               const uint16_t red[6], double seg_rpm)
-{
-    double seg[7] = {0}, smax = 0.0, spd;
-    int j;
-
-    for (j = 0; j < 6; j++) {
-        if (robot_is_masked(robot, joints[j])) continue;
-        seg[joints[j]] = fabs(qb[j] - qa[j]) * (double)red[j];
-        if (seg[joints[j]] > smax) smax = seg[joints[j]];
-    }
-    if (smax <= 0.0) return;
-    for (j = 0; j < 6; j++) {
-        if (robot_is_masked(robot, joints[j])) continue;
-        spd = seg[joints[j]] / smax * seg_rpm;
-        if (spd < MOVEJ_MIN_RPM) spd = MOVEJ_MIN_RPM;
-        motor_set_speed(robot, joints[j], spd);
-    }
-}
-
 /* 取 ini [movel] acc_floor_ms，缺键兜底 MOVL_ACC_FLOOR_MS(60ms)。
  * 作用：过短的减速会丢步（表现为走到一半卡住），所以 ACC/DEC 有下限。 */
 static int movl_acc_floor_ms(void)
@@ -1225,40 +1269,6 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
                  cmd->speeds[0], acc, dec, NULL, NULL);
 }
 
-/* 取 ini [movel] noread_gap_ms，兜底 MOVEJ_NR_GAP_MS(4)。
- * ⚠️ 现状：noread 已无优势（6x(0.15+2)≈13ms 反而比等响应 10.2ms 慢且没有确认），
- *   ini 里保持 0 是对的；实测安全帧间隔是 2ms（0ms 撞车）。 */
-static int movl_noread_gap_ms(void)
-{
-    FILE *f;
-    char line[256];
-    int in_movel = 0;
-
-    f = fopen(INI_PATH, "r");
-    if (f == NULL) return MOVEJ_NR_GAP_MS;
-    while (fgets(line, sizeof(line), f) != NULL) {
-        char *p = line;
-        char *eq;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == ';' || *p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
-        if (*p == '[') {
-            in_movel = (strncmp(p, "[movel]", 7) == 0) ? 1 : 0;
-            continue;
-        }
-        if (!in_movel) continue;
-        if (strncmp(p, "noread_gap_ms", 13) != 0) continue;
-        eq = strchr(p, '=');
-        if (eq == NULL) continue;
-        fclose(f);
-        {
-            int v = atoi(eq + 1);
-            return (v >= 0) ? v : MOVEJ_NR_GAP_MS;
-        }
-    }
-    fclose(f);
-    return MOVEJ_NR_GAP_MS;
-}
-
 /* 取六轴堵转阈值：优先监控器（含 stall: 临时改过的）→ ini → 编译期默认表。 */
 static void movl_stall_thresholds(int th[6])
 {
@@ -1286,8 +1296,8 @@ static int movl_stall_on(const int th[6])
 
 /* MoveL 分段过流保护：任一轴实时电流 >= 自身阈值（100%）就急停【全部】关节，
  * 返回 1；否则返回 0。
- * ⚠️ 只在 sync 模式的分段点被调用；默认的 smooth 模式【全程不查】⇒
- *   想要碰撞保护必须显式写 `movel ...,sync`。 */
+ * ⚠️ 只在 step/stream 模式的分段点被调用；默认的 smooth 模式【全程不查】⇒
+ *   想要碰撞保护必须显式写 `movel ...,step`。 */
 static int movl_stall_guard(Robot *robot, const int th[6])
 {
     double worst = 0.0;
@@ -1387,7 +1397,7 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
 }
 
 /* 采样 24 个中间点，估算"整段走关节空间直线"偏离笛卡尔直线的最大弓高(mm)。
- * 用途：sync 模式据此决定要分几段（弓高 ≈ 0.001 x 段长²）。 */
+ * 用途：step/stream 模式据此判「弓高是否超预算」并告警（弓高 ≈ 0.001 x 段长²）。 */
 static double movl_bow_mm(const double q0[6], const double q1[6],
                           const double a[3], const double b[3])
 {
@@ -1435,8 +1445,8 @@ static double movl_max_jump_deg(void)
     return MOVL_JUMP_MAX_DEG;
 }
 
-/* 取 ini [movel] bow_mm（允许的几何弓高预算），兜底 MOVL_SYNC_BOW_MM(2.0mm)。
- * sync 模式：整段弓高 <= 预算就不分段（1 段），否则按 sqrt 缩到 L 再算段数。 */
+/* 取 ini [movel] bow_mm（允许的几何弓高预算），兜底 MOVL_BOW_BUDGET_MM(2.0mm)。
+ * step/stream 模式：实测弓高超预算就告警（说明段数被节拍压得太少）。 */
 static double movl_bow_budget(void)
 {
     FILE *f;
@@ -1445,7 +1455,7 @@ static double movl_bow_budget(void)
 
     f = fopen(INI_PATH, "r");
     if (f == NULL) {
-        return MOVL_SYNC_BOW_MM;
+        return MOVL_BOW_BUDGET_MM;
     }
     while (fgets(line, sizeof(line), f) != NULL) {
         char *p = line;
@@ -1463,11 +1473,11 @@ static double movl_bow_budget(void)
         fclose(f);
         {
             double v = atof(eq + 1);
-            return (v > 0.0) ? v : MOVL_SYNC_BOW_MM;
+            return (v > 0.0) ? v : MOVL_BOW_BUDGET_MM;
         }
     }
     fclose(f);
-    return MOVL_SYNC_BOW_MM;
+    return MOVL_BOW_BUDGET_MM;
 }
 
 /* 两个角度之差，归一到 (-180, 180]。用于姿态比较，避免 359°/-1° 被判成差 360°。 */
@@ -1571,10 +1581,12 @@ static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
 }
 
 /* `movel X,Y,Z[,Rx,Ry,Rz] [SPD,ACC,DEC] [keep][,模式]` 主流程。
- * 模式：smooth(默认，整段一次下发) / sync(按弓高分段+逐航点等到位)
- *       / step(1mm 弦) / stream(不等+每节拍重设速度)。
+ * 模式：smooth(默认，整段一次下发) / step(1mm 弦，逐段等响应)
+ *       / stream(不等+每节拍重设速度)。
+ * ⚠️ sync 模式已于 2026-09-23 移除（分段必然段末归零 ⇒ 会停顿，实际用不到）；
+ *   现在写 `,sync` 会被直接拒绝。
  * smooth 的代价：① 走关节空间直线（弓高=整段）② 全程不查过流
- *   ⇒ 想要碰撞保护必须显式写 `,sync`。
+ *   ⇒ 想要碰撞保护必须显式写 `,step`。
  * 姿态：不给 Rx,Ry,Rz 或写 keep ⇒ 沿用当前姿态（避免 SLERP 拧姿态）。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
@@ -1686,142 +1698,32 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 
     dev_reset();
 
-    if (cmd->movl_mode == MOVL_MODE_SYNC ||
-        cmd->movl_mode == MOVL_MODE_SMOOTH) {
+    if (cmd->movl_mode == MOVL_MODE_SMOOTH) {
         const double *q_end = q_seq[count - 1];
         const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-        const double *zero = joint_zero_get();
-        const double bow_budget = movl_bow_budget();
-        double dmax = 0.0, sync_rpm, sync_bow = 0.0, bow_full = 0.0, dist_axis[7] = {0};
-        int32_t tgt[7] = {0};
-        uint8_t pend[7] = {0};
-        int nr_gap = MOVEJ_NR_GAP_MS;
+        double dmax = 0.0, sync_rpm, bow_full = 0.0;
         uint32_t sync_t0 = GetTickCount();
-        int remain = 0, stride, n_pts, last_i = 0, n_inj = 0;
 
         for (j = 0; j < 6; j++) {
-            dist_axis[joints[j]] = fabs(q_end[j] - q_start[j]) * (double)red[j];
-            if (dist_axis[joints[j]] > dmax) dmax = dist_axis[joints[j]];
+            double d = fabs(q_end[j] - q_start[j]) * (double)red[j];
+            if (d > dmax) dmax = d;
         }
         sync_rpm = (total_dt > 1e-6) ? (dmax / total_dt / 6.0) : base_rpm;
         if (sync_rpm > base_rpm) sync_rpm = base_rpm;
         if (sync_rpm < 1.0) sync_rpm = 1.0;
 
-        n_pts = count - 1;
         bow_full = movl_bow_mm(q_seq[0], q_seq[count - 1], start_pose, end_pose);
-        {
-            int target_n;
-            if (cmd->movl_mode == MOVL_MODE_SMOOTH) {
-                target_n = 1;
-            } else if (bow_full <= bow_budget || dist < 1e-9) {
-                target_n = 1;
-            } else {
-                double L = dist * sqrt(bow_budget / bow_full);
-                if (L < MOVL_MIN_STEP_MM) L = MOVL_MIN_STEP_MM;
-                target_n = (int)ceil(dist / L);
-            }
-            if (target_n < 1) target_n = 1;
-            if (target_n > n_pts) target_n = n_pts;
-            stride = (n_pts + target_n - 1) / target_n;
-        }
-        n_inj = (n_pts + stride - 1) / stride;
 
-        for (i = 0; i < count - 1; i += stride) {
-            int k = i + stride;
-            double d;
-            if (k > count - 1) k = count - 1;
-            d = movl_bow_mm(q_seq[i], q_seq[k], start_pose, end_pose);
-            if (d > sync_bow) sync_bow = d;
-        }
+        printf("MoveL: 流畅(不分段), 位移 %.1f mm, 速度 %.1f rpm, 预计 %.2f s, "
+               "整段一次下发由驱动器自己规划 ⇒ 段间零停顿\n"
+               "        代价：走关节空间直线，会偏离笛卡尔直线 %.2f mm"
+               "（弓高 ∝ 长度²，线段越短越看不出来）\n"
+               "        ⚠️ 全程【不查过流】⇒ 无碰撞保护；要保护请改用 ,step\n",
+               dist, sync_rpm, total_dt, bow_full);
 
-        if (cmd->movl_mode == MOVL_MODE_SMOOTH) {
-            printf("MoveL: 流畅(不分段), 位移 %.1f mm, 速度 %.1f rpm, 预计 %.2f s, "
-                   "整段一次下发由驱动器自己规划 ⇒ 段间零停顿\n"
-                   "        代价：走关节空间直线，会偏离笛卡尔直线 %.2f mm"
-                   "（弓高 ∝ 长度²，线段越短越看不出来）\n",
-                   dist, sync_rpm, total_dt, bow_full);
-        } else {
-            printf("MoveL: 同步, %d 航点(步长 %.1fmm), 位移 %.1f mm, 速度 %.1f rpm, "
-                   "预计 %.2f s, 逐航点等到位, 几何弓高 ≤ %.2f mm"
-                   "（整段不分段弯 %.2f mm > 预算 %.2f mm 才分段；过流保护 %s）\n",
-                   n_inj, dist / (double)n_inj, dist, sync_rpm, total_dt,
-                   sync_bow, bow_full, bow_budget,
-                   !movl_stall_on(stall_th) ? "关闭（六轴阈值均为 0）"
-                       : (n_inj > 1) ? "开启（每段下发前检查）"
-                       : "本段不检查（整段一次下发，无分段点）");
-        }
-
-        if (count <= 2 || n_inj <= 1) {
-            movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec,
-                         start_pose, end_pose);
-            sync_finish(sync_t0, total_dt);
-            return;
-        }
-
-        nr_gap = movl_noread_gap_ms();
-
-        for (j = 0; j < 6; j++) {
-            if (robot_is_masked(robot, joints[j])) continue;
-            motor_set_profile(robot, joints[j], acc, dec);
-        }
-        (void)dist_axis;
-
-        for (i = 1; i < count; i += stride) {
-            if (movl_stall_guard(robot, stall_th)) {
-                sync_finish(sync_t0, total_dt);
-                return;
-            }
-            for (j = 0; j < 6; j++) {
-                if (robot_is_masked(robot, joints[j])) continue;
-                tgt[joints[j]] = DEG2STEPS(q_seq[i][j] + zero[joints[j] - 1],
-                                           red[joints[j] - 1]);
-            }
-            movl_set_seg_speed(robot, joints, q_seq[last_i], q_seq[i], red, sync_rpm);
-            movej_issue_noread(robot, joints, tgt, nr_gap);
-            last_i = i;
-            remain = 0;
-            for (j = 0; j < 6; j++) {
-                if (robot_is_masked(robot, joints[j])) continue;
-                pend[joints[j]] = 1;
-                remain++;
-            }
-            if (remain > 0)
-                movej_wait(robot, joints, tgt, pend, remain, start_pose, end_pose);
-        }
-        if (last_i != count - 1) {
-            for (j = 0; j < 6; j++) {
-                if (robot_is_masked(robot, joints[j])) continue;
-                tgt[joints[j]] = DEG2STEPS(q_end[j] + zero[joints[j] - 1],
-                                           red[joints[j] - 1]);
-            }
-            movl_set_seg_speed(robot, joints, q_seq[last_i], q_end, red, sync_rpm);
-            movej_issue_noread(robot, joints, tgt, nr_gap);
-        }
-
-        remain = 0;
-        for (j = 0; j < 6; j++) {
-            if (robot_is_masked(robot, joints[j])) continue;
-            pend[joints[j]] = 1;
-            remain++;
-        }
-        if (remain > 0)
-            movej_wait(robot, joints, tgt, pend, remain, start_pose, end_pose);
-        sync_finish(sync_t0, total_dt);
-
-        if (sync_bow > 0.0 && g_dev_peak > 3.0 * sync_bow) {
-            printf("        [注意] 实测偏差是几何弓高的 %.1f 倍 ⇒ 不是「分段不够密」。\n"
-                   "               按段速度归一化修好之后（2026-09-18），这条线在本机上\n"
-                   "               实测已经≈几何弓高（4 段：0.26mm vs 预测 0.14mm）。\n"
-                   "               现在还这么大，先怀疑这三条：\n"
-                   "               ① 某轴没同时到位 —— 看上面逐行采样里有没有某个 J 提前\n"
-                   "                  停住不动了（旧 bug 的典型症状，若复现请查\n"
-                   "                  movl_set_seg_speed 是否真的在每段都被调用到）；\n"
-                   "               ② 回差/齿隙 —— 正反向各跑一次，差值若稳定在 0.1mm 量级\n"
-                   "                  且方向相关，就是它，调分段无效；\n"
-                   "               ③ 负载/皮带打滑 —— 换低速（第 7 参数调小）复测。\n",
-                   g_dev_peak / sync_bow);
-        }
-
+        movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec,
+                     start_pose, end_pose);
+        movl_finish(sync_t0, total_dt);
         return;
     }
 
@@ -1834,9 +1736,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         printf("MoveL: %d 段, 步长 %.1f mm, 位移 %.1f mm, 节拍 %.3f s, 预计 %.2f s, "
                "模式 %s, 几何弓高 ≤ %.2f mm（过流保护 %s）",
                count - 1, step_mm, dist, (count > 1) ? seg_dt[0] : 0.0, total_dt,
-               (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream"
-                   : (cmd->movl_mode == MOVL_MODE_SMOOTH) ? "smooth"
-                   : (cmd->movl_mode == MOVL_MODE_SYNC) ? "sync" : "step", bow,
+               (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream" : "step", bow,
                movl_stall_on(stall_th) ? "开启" : "关闭（六轴阈值均为 0）");
         {
             const double bow_budget = movl_bow_budget();
@@ -1948,7 +1848,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
             printf("    （偏差为全程峰值：段内采样 %d 次 + 收尾等待）\n", probe_n);
         else
             printf("    [注意] 节拍太短，段内一次都没采到 ⇒ 下面的偏差只覆盖最后\n"
-                   "           一段的收尾，不代表全程，不要拿它和 sync 比。\n"
+                   "           一段的收尾，不代表全程，不要拿它和 step 比。\n"
                    "           想采到就放慢速度或调大 ACC/DEC，把节拍拉长到 %d ms 以上。\n",
                    MOVL_STREAM_PROBE_MS);
         dev_report("stream ");

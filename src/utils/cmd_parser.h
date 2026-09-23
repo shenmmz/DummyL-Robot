@@ -30,11 +30,12 @@
 #define CMD_DRVBAUD   26
 #define CMD_PIPE      27
 
-/* movel 的四种模式。
- * sync=分段并逐航点等到位（有碰撞保护，段末速度归零）
- * step=分段不等 / stream=流式 / smooth=一段走完（关节空间直线、【不查过流】）。 */
+/* movel 的三种模式。
+ * ⚠️ sync（按弓高预算分段 + 逐航点等到位）已于 2026-09-23 移除：分段必然段末
+ *    速度归零（ACC+DEC=170ms），实际场景用不到。写 ,sync 会被直接拒绝。
+ * step=分段+每段等响应（有逐段过流保护，但段末同样归零 ⇒ 会停）
+ * stream=按节拍连发（段末同样归零）/ smooth=一段走完（关节空间直线、【不查过流】）。 */
 typedef enum {
-    MOVL_MODE_SYNC = 0,
     MOVL_MODE_STEP = 1,
     MOVL_MODE_STREAM = 2,
     MOVL_MODE_SMOOTH = 3

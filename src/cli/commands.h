@@ -41,7 +41,7 @@ void cmd_diag(Robot *robot, const ParsedCmd *cmd);
 void cmd_bcast(Robot *robot);
 
 /* `nrtest`：扫帧间延迟找安全间隔。实测结论：2ms 安全（0ms 撞车），
- * 且 noread 已无优势 ⇒ ini [movel] noread_gap_ms 保持 0 是对的。 */
+ * 且 noread 已无优势（那个 ini 键已随 sync 模式于 2026-09-23 一并移除）。 */
 void cmd_nrtest(Robot *robot);
 
 /* `pipe`：流水线批量读探针（只读、不动臂）。先连发 6 请求再收 6 响应。
