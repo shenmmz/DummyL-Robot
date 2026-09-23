@@ -7,20 +7,16 @@
 #include "utils/ini_rw.h"
 #include "utils/telemetry.h"
 #include "kinematics/joint_zero.h"
-#include "kinematics/dh.h"   /* dh_set_tool_length：运行时叠加末端工具长到 d6 */
+#include "kinematics/dh.h"
 #include "cli/commands.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
-#include <mmsystem.h>   /* timeBeginPeriod/timeEndPeriod：抬高系统定时器精度 */
+#include <mmsystem.h>
 
-/* INI_PATH 由 utils/ini_rw.h 统一提供，保持 main 与 cli 一致 */
 
-/* 极简 ini 读取：取 [serial] 段下 key 的 value（去除空白），找不到返回默认。
- * 返回 1 = ini 文件存在并已装载（生效来源：ini）；
- * 返回 0 = ini 缺失/无法打开，回退默认值宏（生效来源：默认）。 */
 static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigned long *baud)
 {
     FILE *f;
@@ -71,21 +67,17 @@ static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigne
     return 1;
 }
 
-/* main：程序入口，初始化机器人并进入交互命令循环 */
 int main(int argc, char **argv)
 {
     char port[64];
-    unsigned long baud = MODBUS_BAUDRATE;   /* argc>1 分支未读 ini，须给默认值避免未初始化 */
+    unsigned long baud = MODBUS_BAUDRATE;
     Robot *robot;
-    Monitor *mon = NULL;   /* 后台监控线程对象（退出前停止） */
+    Monitor *mon = NULL;
     char line[256];
     int running = 1;
 
 #ifdef _WIN32
-    SetConsoleOutputCP(65001); /* 控制台 UTF-8，保证中文正常显示 */
-    /* 抬高系统定时器精度到 1ms：Windows 默认 15.6ms，Sleep(n) 中 n<16 一律睡满约 15.6ms。
-     * 堵转轮询每轮含多次 Sleep(2)（Modbus 帧间隔）与 Sleep(1)（轮询节拍），
-     * 默认精度下每轮白耗数十 ms，直接抬高轮询周期、拖慢堵转判定。 */
+    SetConsoleOutputCP(65001);
     timeBeginPeriod(1);
 #endif
 
@@ -144,8 +136,6 @@ int main(int argc, char **argv)
         }
 
         if (port_count == 0) {
-            /* 换转换器时最容易撞上这一档。原来的单行提示太简略，用户无从下手，
-             * 所以把"怎么查"直接印出来 —— 这条路径只会在启动时走一次，多几行不碍事。 */
             printf("[错误] 未发现可用串口\n");
             printf("       程序会枚举系统串口（注册表 HARDWARE\\DEVICEMAP\\SERIALCOMM），当前一个都没有。\n");
             printf("       排查：\n");
@@ -183,7 +173,6 @@ int main(int argc, char **argv)
         printf("\n使用串口: %s @ %lu 8N1\n", port, baud);
     }
 
-    /* 读取 ini 的 [joint_zero] 段（若已保存标定），运行时覆盖头文件默认零点 */
     {
         double loaded[6];
         if (ini_read_joint_zero(INI_PATH, loaded)) {
@@ -194,7 +183,6 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 读取 ini 的 [tool] 段，将末端工具长叠加到 d6（法兰偏距 91.5 + tool_length） */
     {
         double tool_mm = 0.0;
         if (ini_read_tool_length(INI_PATH, &tool_mm)) {
@@ -206,13 +194,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* UDP 遥测：把关节角发给本机 3D 镜像（sim/live_mirror.py）。
-     * 默认【关闭】—— ini [telemetry] enabled = 1 才启用。
-     * 这里只是初始化 socket，真正的发送在 movej_issue 的下发点，
-     * 且全部失败路径静默，绝不影响控制。 */
     telemetry_init(INI_PATH);
 
-    /* 注入串口 CommOps（control 层通过接口操作总线） */
     modbus_comm_set(&serial_comm_ops);
 
     robot = robot_init(port, (uint32_t)baud);
@@ -221,9 +204,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* 逐轴堵转阈值：优先 ini [stall] j1..j6，读不到用编译期默认表（全 0 = 全关）。
-     * 【旧行为是 monitor_create(robot, 0)】——传 0 等于堵转检测从来没开过，
-     * 机械臂撞上东西不会有任何反应。现在改成从配置读，填了值就真的生效。 */
     {
         int th[ROBOT_JOINT_COUNT];
         const int def[ROBOT_JOINT_COUNT] = ROBOT_STALL_CURRENT_MA_TABLE;
@@ -243,7 +223,6 @@ int main(int argc, char **argv)
                    "       先跑 curtest 量出各轴正常电流，再在 ini [stall] 填 j1..j6 并重启。\n");
         }
 
-        /* 后台定时监控：程序启动即创建线程，按周期巡检六轴状态/电流/报警 */
         mon = monitor_create(robot, th);
     }
     if (mon == NULL) {
@@ -254,15 +233,10 @@ int main(int argc, char **argv)
         mon = NULL;
     }
 
-    /* 启动位姿体检：驱动器掉电会清空 0x00D2（RAM 无记忆零点），位置计数归零
-     * 而 ini 标定还在 ⇒ 机械角全是假值（2026-09-18 实测读出 6 轴全越软限位）。
-     * 越限时 cmd_dispatch 会锁住 MoveL/MoveJ/curtest，逼着先回零。 */
     cmd_pose_check(robot);
 
-    /* 命令循环：读取一行 → 解析 → 分发（具体命令实现见 cli/commands.c） */
     while (running) {
         ParsedCmd cmd;
-        /* 当电机监控线程运行时，不打印提示符，避免与线程输出交错 */
         if (cmd_motor_running()) {
             HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
             if (WaitForSingleObject(hStdin, 100) == WAIT_OBJECT_0) {
@@ -295,7 +269,6 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 先停后台监控线程，再关总线 */
     if (mon != NULL) {
         monitor_stop(mon);
         monitor_destroy(mon);
@@ -303,7 +276,7 @@ int main(int argc, char **argv)
     }
     robot_close(robot);
 #ifdef _WIN32
-    timeEndPeriod(1);   /* 与 main 开头的 timeBeginPeriod(1) 配对 */
+    timeEndPeriod(1);
 #endif
     printf("已退出。\n");
     return 0;

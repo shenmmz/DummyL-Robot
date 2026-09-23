@@ -3,57 +3,25 @@
 
 #include <stddef.h>
 
-/* 配置 ini 默认路径（CWD 相对，须在项目根目录运行）。
- * 同时被 main.c 与 cli/commands.c 引用，集中定义避免重复。 */
 #ifndef INI_PATH
 #define INI_PATH "src/config/robot_config.ini"
 #endif
 
-/* 读取 ini 的 [joint_zero] 段，填充 zero[6]（key 为 q0..q5）。
- * 找到且 6 个全部解析成功返回 1，否则返回 0（不修改 zero）。 */
 int ini_read_joint_zero(const char *path, double zero[6]);
 
-/* 写回 ini 的 [joint_zero] 段（q0..q5），保留 [serial] 等其它内容与注释。
- * 成功返回 1，失败（无法打开写）返回 0。 */
 int ini_write_joint_zero(const char *path, const double zero[6]);
 
-/* 读取 ini 的 [tool] 段，填充 *tool_mm（key 为 tool_length，单位 mm）。
- * 找到且解析成功返回 1，否则返回 0（调用方按默认 0 处理）。 */
 int ini_read_tool_length(const char *path, double *tool_mm);
 
-/* 读取 ini 的 [tool] 段的 pen_length（笔长 mm）。
- * 【与 tool_length 的区别 —— 别混】
- *   tool_length 会真的改坐标语义：d6 = 91.5 + tool_length，TCP 从法兰面移到笔尖，
- *   于是 getpos/movel 的 Z 全部偏移。用户 2026-09-19 已决定保持 0（笔在法兰中心，
- *   X/Y 与法兰逐位相同，只有 Z 差一个常量，形状/直线度零差异）。
- *   pen_length **不改任何坐标**，只供 movl_pose_warn 把"姿态偏差多少度"换算成
- *   "笔尖会摆多少 mm"这一句人话。两者可以并存，互不干扰。
- * 找到且解析成功返回 1，否则返回 0（调用方按默认 0 处理）。 */
 int ini_read_pen_length(const char *path, double *pen_mm);
 
-/* 读取 ini 的 [stall] 段，填充 th[6]（key 为 j1..j6，单位 mA，0=该轴不检测）。
- * 6 个全部找到且解析成功返回 1，否则返回 0（不修改 th）。
- * 允许缺段/缺项：调用方拿到 0 就按编译期默认值处理，不要当成致命错误。 */
 int ini_read_stall_current(const char *path, int th[6]);
 
-/* 读取 ini 的 [safety] 段的 max_step_deg（单次下发位移上限，机械角度）。
- * 找到且解析成功（>0）返回 1，否则返回 0（调用方按编译期默认值处理）。
- *
- * 这是"目标离当前位置太远 ⇒ 拒绝下发"闸门的阈值。允许缺段/缺项 ——
- * 拿不到就回退默认值，不要因为少配一行就让运动指令全废。 */
 int ini_read_max_step_deg(const char *path, double *deg);
 
-/* 通用读取：指定段 + 键，值必须 > 0（安全阈值配成 0/负数一律视为无效，
- * 回退默认，绝不解释为"关闭闸门"）。section 不带方括号，如 "safety"。
- * 返回 1 = 读到；0 = 打不开 / 段或键不存在 / 值 <= 0。 */
 int ini_read_positive_double(const char *path, const char *section,
                              const char *key, double *out);
 
-/* 读取 ini 的 [safety] 段的 max_jump_deg（MoveL 规划层相邻插补点之间的
- * 单关节跳变上限，机械角度）。找到且 >0 返回 1，否则返回 0（回退默认）。
- *
- * 这是"一段笛卡尔位移需要某个关节转一大圈 ⇒ 拒绝整条 MoveL"闸门的阈值。
- * 判据本体是 trajectory/line.c 的 line_max_joint_jump()（纯函数，已单测）。 */
 int ini_read_max_jump_deg(const char *path, double *deg);
 
-#endif /* INI_RW_H */
+#endif

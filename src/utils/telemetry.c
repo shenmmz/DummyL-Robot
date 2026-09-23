@@ -1,21 +1,3 @@
-/*
- * telemetry.c —— UDP 遥测：把关节角发给本机上的 3D 镜像（sim/live_mirror.py）
- * ---------------------------------------------------------------------------
- * 为什么用 UDP 回环而不是写文件：
- *   控制循环一轮六轴 92.8ms（10.8Hz），本来就被总线延迟占满（等响应占 98.6%）。
- *   在循环里碰磁盘 = 引入不可预测的 I/O 抖动，代价是实打实的运动质量。
- *   sendto 到 127.0.0.1 是微秒级、非阻塞的，而且【没人监听时内核直接丢包】，
- *   不连 Python 也不会有任何副作用。
- *
- * 为什么失败必须静默：
- *   遥测是"看着舒服"的功能，不是"必须成功"的功能。WSAStartup 失败、端口被占、
- *   网络栈异常 —— 任何一种都不许影响机械臂控制。所以所有错误路径只设
- *   g_disabled=1，然后永远闭嘴，不打印、不报错、不重试。
- *
- * 包格式（一行 CSV，UTF-8，无中文）：
- *   <tag>,<t_ms>,<q1>,<q2>,<q3>,<q4>,<q5>,<q6>\n
- *   tag = cmd（本次下发的目标角）/ act（读回的实际角）
- */
 #include "utils/telemetry.h"
 
 #ifdef _WIN32
@@ -36,8 +18,8 @@
 
 #define TLM_DEFAULT_PORT 9900
 
-static int g_ready = 0;      /* 1 = 已初始化且可用 */
-static int g_disabled = 0;   /* 1 = 明确不可用，不再尝试（静默） */
+static int g_ready = 0;
+static int g_disabled = 0;
 static int g_port = TLM_DEFAULT_PORT;
 
 #ifdef _WIN32
@@ -47,7 +29,6 @@ static int g_sock = -1;
 #endif
 static struct sockaddr_in g_dst;
 
-/* ini 里 [telemetry] 段的一个数值项。读不到就返回 def。 */
 static double tlm_ini_double(const char *path, const char *key, double def)
 {
     FILE *f;
@@ -83,7 +64,7 @@ void telemetry_init(const char *ini_path)
     if (g_ready || g_disabled) return;
 
     enabled = tlm_ini_double(ini_path, "enabled", 0.0);
-    if (enabled <= 0.0) {          /* 默认关：不显式打开就不碰网络栈 */
+    if (enabled <= 0.0) {
         g_disabled = 1;
         return;
     }
@@ -99,7 +80,6 @@ void telemetry_init(const char *ini_path)
     g_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (g_sock == INVALID_SOCKET) { g_disabled = 1; WSACleanup(); return; }
     {
-        /* 发送超时 1ms：宁可丢这一包，也不许卡住控制循环 */
         int timeout_ms = 1;
         setsockopt(g_sock, SOL_SOCKET, SO_SNDTIMEO,
                    (const char *)&timeout_ms, sizeof(timeout_ms));
@@ -134,7 +114,6 @@ void telemetry_send(const double deg[6], const char *tag)
                  deg[0], deg[1], deg[2], deg[3], deg[4], deg[5]);
     if (n <= 0 || n >= (int)sizeof(buf)) return;
 
-    /* 返回值一律不看：丢包/失败都无所谓，遥测不是关键路径 */
     (void)sendto(g_sock, buf, n, 0,
                  (const struct sockaddr *)&g_dst, sizeof(g_dst));
 }

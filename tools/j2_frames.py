@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成 J2（从站 2）原始 Modbus RTU 帧 —— 绕过程序、手工验证 J2 减速比/脉冲比。
 
-帧可以直接用任意串口助手（COM4 / 115200 / 8N1 / Hex 发送）逐条下发，
-也可以用同目录的 raw_send.py 自动发。
+帧可以直接用任意串口助手（COM4 / 921600 / 8N1 / Hex 发送）逐条下发。
 
 用法：
     python tools/j2_frames.py
@@ -75,7 +74,7 @@ def show(tag, frame, note=''):
 
 
 print('=' * 100)
-print('J2（从站地址 = 2）原始 Modbus RTU 帧   @ COM4 / 115200 / 8N1，末两字节是 CRC（低字节在前）')
+print('J2（从站地址 = 2）原始 Modbus RTU 帧   @ COM4 / 921600 / 8N1，末两字节是 CRC（低字节在前）')
 print('=' * 100)
 
 print('\n【A】准备 —— 先发这 4 条，顺序不能换')

@@ -1,14 +1,3 @@
-/*
- * line.c —— 笛卡尔直线插补（moveL 轨迹层）
- * ------------------------------------------------------------
- * 所属模块：轨迹规划（trajectory）
- * 对外接口：line_pose_to_matrix、line_count_for_distance、line_plan、
- *           line_solve、line_time_table
- * 依赖模块：kinematics（dh_params / dh / ik）
- *
- * 姿态插值采用四元数 SLERP（球面线性插值），避免 RPY 线性插值在
- * ±180° 附近的跳变和万向节死锁问题，确保中间位姿姿态连续。
- */
 
 #include "trajectory/line.h"
 #include "kinematics/ik.h"
@@ -21,9 +10,7 @@
 #define LINE_DEG2RAD (LINE_PI / 180.0)
 #define LINE_EPS    1e-12
 
-/* ---------- 四元数工具 ---------- */
 
-/* q = (w, x, y, z)，Hamilton 乘积 */
 static void quat_mul(const double a[4], const double b[4], double out[4])
 {
     out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3];
@@ -32,7 +19,6 @@ static void quat_mul(const double a[4], const double b[4], double out[4])
     out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0];
 }
 
-/* 欧拉角(ZYX: roll=X, pitch=Y, yaw=Z) 度 -> 四元数 */
 static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, double q[4])
 {
     double roll = roll_deg * LINE_DEG2RAD;
@@ -42,7 +28,6 @@ static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, dou
     double cp = cos(pitch/2), sp = sin(pitch/2);
     double cy = cos(yaw/2), sy = sin(yaw/2);
 
-    /* q = q_yaw * q_pitch * q_roll */
     double q_roll[4] = {cr, sr, 0, 0};
     double q_pitch[4] = {cp, 0, sp, 0};
     double q_yaw[4]  = {cy, 0, 0, sy};
@@ -51,8 +36,6 @@ static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, dou
     quat_mul(q_yaw, tmp, q);
 }
 
-/* 夹到 [-1, 1]。asin/acos 的自变量一旦因浮点误差略微越界（1.0000000000000002），
- * 返回值立刻变 NaN —— 详见 quat_to_euler 里的注释，这条 clamp 是守着它的。 */
 static double clamp_pm1(double x)
 {
     if (x > 1.0) return 1.0;
@@ -60,22 +43,8 @@ static double clamp_pm1(double x)
     return x;
 }
 
-/* 四元数 -> 欧拉角(ZYX) 度 */
 static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg, double *yaw_deg)
 {
-    /* 【2026-09-18 事故根因】pitch = asin(2*(q0*q2 - q1*q3))。
-     * 当姿态正好落在万向锁（pitch = ±90°）时，asin 的自变量理论上是 ±1，
-     * 但四元数插值出来的值常带着浮点误差算成 1.0000000000000002，
-     * asin 越界直接返回 **NaN**。
-     *
-     * 后果链条（真机实测）：NaN 位姿 → IK 解出 NaN 关节角 → 转 int32 步数时
-     * 变成 ±2147483647 附近的垃圾 → 下发给驱动器一个天文数字目标 →
-     * 臂朝那个方向猛冲、永远到不了位 → 超时急停 → **末端偏差 34mm、臂乱甩**。
-     * home 姿态 Ry 恰好 = 90°（万向锁），所以从 home 出发的 MoveL 必中。
-     *
-     * 修法：asin 自变量先 clamp 到 [-1,1]。只 clamp 还不够 —— 下游另有两道
-     * 防线（line_plan 查位姿、movl 下发前查目标），防止别处再冒出 NaN 时
-     * 又把垃圾写给驱动器。 */
     double roll = atan2(2*(q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
     double pitch = asin(clamp_pm1(2*(q[0]*q[2] - q[1]*q[3])));
     double yaw = atan2(2*(q[0]*q[3] + q[1]*q[2]), 1 - 2*(q[2]*q[2] + q[3]*q[3]));
@@ -84,7 +53,6 @@ static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg
     *yaw_deg = yaw / LINE_DEG2RAD;
 }
 
-/* SLERP：四元数球面线性插值，t∈[0,1] */
 static void slerp(const double q1[4], const double q2[4], double t, double out[4])
 {
     double qq2[4] = {q2[0], q2[1], q2[2], q2[3]};
@@ -112,11 +80,7 @@ static void slerp(const double q1[4], const double q2[4], double t, double out[4
     out[3] = s1*q1[3] + s2*qq2[3];
 }
 
-/* ---------- 直线插补 ---------- */
 
-/* line_pose_to_matrix：位姿(deg) -> 4x4 齐次矩阵（行主序）。
- * 姿态按 ZYX 欧拉角(roll-pitch-yaw)解释：pose6[3]=Rx(绕X), [4]=Ry(绕Y), [5]=Rz(绕Z)，
- * 矩阵 R = Rz(Rz)·Ry(Ry)·Rx(Rx)，与 dh_pose_to_xyz_rpy 输出顺序 [roll,pitch,yaw] 一致。 */
 void line_pose_to_matrix(const double pose6[6], double m[4][4])
 {
     double rx = pose6[3] * LINE_DEG2RAD;
@@ -142,7 +106,6 @@ void line_pose_to_matrix(const double pose6[6], double m[4][4])
     m[3][3] = 1.0;
 }
 
-/* line_count_for_distance：按步长折算插补点数 */
 int line_count_for_distance(double dist_mm, double step_mm)
 {
     int count;
@@ -160,7 +123,6 @@ int line_count_for_distance(double dist_mm, double step_mm)
     return count;
 }
 
-/* line_plan：位置线性插值 + 姿态 SLERP 球面插值的直线段离散 */
 int line_plan(const double start_pose[6], const double end_pose[6],
                int count, LinePath *path)
 {
@@ -186,11 +148,6 @@ int line_plan(const double start_pose[6], const double end_pose[6],
         }
         slerp(q_start, q_end, t, q_interp);
         quat_to_euler(q_interp, &pose_interp[3], &pose_interp[4], &pose_interp[5]);
-        /* 【防线二】逐点查有限性。
-         * 上游 quat_to_euler 已 clamp 过 asin，但插值链路里还有别的可能产生
-         * NaN/Inf（四元数未归一化、起点终点姿态退化等）。这里不拦的话，
-         * NaN 会一路穿到驱动器、变成天文数字的目标位置（真机实测甩 34mm
-         * 并超时急停，见 quat_to_euler 注释）。宁可明确失败，也不下发垃圾。 */
         for (j = 0; j < 6; j++) {
             if (!isfinite(pose_interp[j])) {
                 return -1;
@@ -201,7 +158,6 @@ int line_plan(const double start_pose[6], const double end_pose[6],
     return 0;
 }
 
-/* line_solve：逐点 IK + 分支连续选解 */
 int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits,
                 const double *start_joints, double (*q_out)[6],
                 int *fail_idx, char *fail_reason)
@@ -226,13 +182,8 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
         double m[4][4];
 
         line_pose_to_matrix(path->pose[i], m);
-        /* 必须传上一点的关节角：腕奇异（θ5≈0）时 θ4 与 θ6 只有【之和】可定，
-         * 靠这个参考值把 θ4 锚住，路径才不会在奇异点附近甩出 180° 的 J4。
-         * 用 ik_solve_ex（无参考）会让 θ4 糙取 0 —— 实测 J4 跳变 89.8°、
-         * 末端偏离 1.8mm（详见 ik.c 的 IK_WRIST_SINGULAR_SIN 注释）。 */
         cnt = ik_solve_ref(dh, m, prev, sols, info);
         if (cnt <= 0) {
-            /* 扫描 info 找出失败原因：取第一个无效槽位的首个非有效段 */
             int s, found = 0;
             for (s = 0; s < IK_MAX_SOLUTIONS && !found; s++) {
                 if (info[s].shoulder != IK_SOL_VALID) {
@@ -279,7 +230,6 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
     return 0;
 }
 
-/* line_time_table：按关节限速生成等间隔分段时间表 */
 int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint[6],
                      double *seg_dt, double *dt_total)
 {
@@ -311,22 +261,6 @@ int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint
     return 0;
 }
 
-/* line_max_joint_jump：扫出相邻插补点之间【最大的单关节角度跳变】(度)。
- *
- * 【为什么单独抽成纯函数】"单段跳变太大"是甩臂最通用的前兆 —— 不管成因是
- * 腕部奇异、逆解分支翻转还是选解抖动，最终都表现为"一小段笛卡尔位移需要
- * 某个关节转一大圈"。这个判据要在规划层做拦截，逻辑必须能脱离 CLI 单测。
- *
- * 【实测基准 2026-09-18】
- *   正常：home 出发沿 -Z 走 50mm（1mm 弦 ⇒ 51 点），J3 全程 21° 分 50 段
- *         ⇒ 单段最大约 0.9°。
- *   病态：home 出发沿 +Y 走 30mm（起点 J5=0，正踩腕部奇异）
- *         ⇒ **第 1 段就要 J4 转 89.98°**（θ5 一离开 0，θ4 立刻被位姿唯一
- *         锁死 —— 奇异位形的物理本质，IK 层消不掉，只能绕开）。
- *   两者差两个数量级，所以用固定阈值（默认 30°）区分非常安全。
- *
- * out_joint/out_seg 可为 NULL；非 NULL 时写出"第几轴的哪一段"（均从 1 起算）。
- * count < 2 或 q_seq 为 NULL 时返回 0。 */
 double line_max_joint_jump(const double (*q_seq)[6], int count,
                            int *out_joint, int *out_seg)
 {

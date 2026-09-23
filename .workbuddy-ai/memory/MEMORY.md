@@ -11,6 +11,22 @@
 > `0x00DC=1` 连带固化 ACC/DEC 的坑、一批"为什么不能用 XX 寄存器"的排除记录。
 > 以后**新结论一律写进 `docs/`**（`docs/` 在 .gitignore 里，不进库，只在本机）。
 > ⇒ 等价性已证明：剥离前后 `commands.c.obj` 的 `.text` 反汇编 **12922 行逐行完全相同**（只有 COFF 时间戳与 `.debug_*` 行号变）。
+>
+> ⚠️ **2026-09-23 17:10 追加：`src/` 下【全部】`.c/.h` 的注释也已删除**（36 个文件，441,697 → 299,010 字节，删 32%）。
+> **唯一例外 `src/control/robot_internal.h`（按要求保留）。** 存档 `git 37539b8`，全量副本在 `%TEMP%\rs485probe\archive\src_before\`。
+> ⇒ **上面那条横幅现在覆盖整个 `src/`，不只是 commands.c：本项目所有行号引用（含 docs/ 与历史日志）全部失效。**
+> ⇒ 取回任意文件：`git show 37539b8:src/<路径>`
+> ⇒ 等价性：**35 个 .obj 的 `.text` 反汇编全部逐行相同（相同 35 / 不同 0）**，编译零警告，`ctest` 12/12 过。
+> ⇒ 剥离器 `%TEMP%\rs485probe\strip_src.py`（`--src <dir> --skip <name>`，自动保留 CRLF/LF 与末尾换行）。
+>
+> ⚠️ **2026-09-23 18:00 追加：`src/config/robot_config.ini` 的注释也删光了**（13,746 → 416 字节，删 97%，只剩 25 个键值对）。
+> ⇒ 解析安全：`ini_rw.c` 本来就跳过 `#`/`;` 行；`ini_write_joint_zero` 是纯逐行拷贝 + `fsize+16384` 动态缓冲。
+> ⇒ 等价性已验：25 个键值对逐项一致，diff 里非注释非空行的删除数为 **0**。
+> ⇒ **但丢失的知识 docs/ 里没有，只剩 git**：`pen_length=41.17` 推导、`[movel]` 实测偏差表、
+> `[stall]` 峰值表（阈值 ×2.0 依据）、**ini 被 8192 固定缓冲截断导致 `[stall]` 消失的事故**、
+> `noread_gap_ms` 的 A/B 原始数据、smooth 定为默认的安全代价。取回：`git show 37539b8:src/config/robot_config.ini`
+> ⇒ **`tools/` 已删 5 个（bus_probe/reg_probe/cur_trace/raw_send/table_probe，全是硬编码 115200 的硬件探针），
+> 保留 gen_shape / j2_lift_check / j2_frames 三个纯离线计算脚本。**
 
 > 详细推导与测试卡见 `docs/测试方法与验收标准.md`（测试 1~22）、`docs/运动流畅性提速路线.md`。本文件只留结论、坑与指针。
 

@@ -1,10 +1,3 @@
-/*
- * joint_zero.c —— 上位机电机角 ↔ 机械角 换算
- * ------------------------------------------------------------
- * 所属模块：运动学（kinematics）
- * 对外接口：joint_zero_motor_to_mech、joint_zero_mech_to_motor
- * 依赖模块：config/robot_config.h
- */
 
 #include "kinematics/joint_zero.h"
 #include "config/robot_config.h"
