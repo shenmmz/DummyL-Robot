@@ -4,7 +4,7 @@
 > 本文件只留"必须记住"的结论与指针。**别把细节塞回来** —— 超限会被注入截断。
 
 ## 0 注释与行号
-`src/` 注释曾全删（仅 `robot_internal.h` 例外；存档 `37539b8`，`commands.c`=`097b082`，`git show <rev>:src/<路径>` 取回）。**2026-09-23 已把 `src/` 注释全部补回：`.c` 函数 275/275 条 + `.h` 原型 173/173 条，每条带实测数据**；编译零警告、ctest 12/12。`tools/` 已删(`b406302`)，`tests/` 全留。**行号基线 = 剥离后**，旧 `xxx.c:1234` 形式引用全部作废。
+`src/` 注释曾全删（仅 `robot_internal.h` 例外；存档 `37539b8`，`git show <rev>:src/<路径>` 取回）。**2026-09-23 已全部补回：`.c` 函数 275/275 + `.h` 原型 173/173，每条带实测数据**。`tools/` 已删(`b406302`)，`tests/` 全留。**行号基线 = 剥离后**，旧 `xxx.c:1234` 形式引用全部作废。
 
 ## 1 铁律
 - 唯一标准是**读回来的实际值**。顺序 `enable`→`getpos`→`alarm`。失联时 getpos 打假数 `0,0,90,0,0,0`；报"部分关节无响应"⇒**禁止下发运动**。
@@ -33,4 +33,4 @@
 - ⚠️ **真机当前被 `poseok` 闸门锁住**（关节1 越软限位 ⇒ 零点很可能已丢）⇒ **必须先 `home`**，否则 MoveJ/MoveL/tabtest 全部锁死。
 
 ## 5 指针（细节全在 PROJECT-DETAIL.md）
-波特率 `0x0009`（档位 15=921600，已固化；改完立即生效，6 台必须广播一起写，且必须 `0x00DC=1` 固化）｜`drvbaud`｜ACC/DEC `0x0098/99`（实测加速 80 / 减速 90ms，只写 RAM）｜`alarm` `0x00A3/A4`｜`cmd_parse` "先设 type 后校验"的坑（已修，新增命令必守）｜构建 MinGW/Ninja（ARM `ar` 缓存坑，须 `rm -rf build` 重来）｜`looptest`/`nrtest`/`bcast`/`tabtest` 的坑（回环 RTT 不能从单事务里减；`tabtest` 会动臂）｜second/ 与 Hg_Robot_Arm（**Hg 运动学不能控制本机**，FK/IK 必须一起重推）。
+波特率 `0x0009`（档位15=921600已固化；6台须广播一起写 + `0x00DC=1`）｜ACC/DEC `0x0098/99`（实测 80/90ms，只写 RAM）｜`alarm` `0x00A3/A4`｜`cmd_parse` "先设 type 后校验"的坑（已修，新增命令必守）｜构建 MinGW/Ninja（ARM `ar` 缓存坑，须 `rm -rf build` 重来）｜`looptest`/`nrtest`/`bcast`/`tabtest` 的坑（回环 RTT 不能从单事务里减；`tabtest` 会动臂）｜second/ 与 Hg_Robot_Arm（**Hg 运动学不能控制本机**）。
