@@ -130,7 +130,8 @@ int main(void)
         snprintf(buf, sizeof buf, "accum(T1..T6) 与 dh_forward 最大差 %.2e", worst);
         check("辅助函数 accum() 与 dh_forward 同口径", worst < 1e-9, buf);
     }
-    /* home 位姿【回归】锚点：真机回零后 getpos 打印 X=241.55 Y=51.85 Z=286.05
+    /* home 位姿【回归】锚点：真机回零后 getpos 打印 X=333.00 Y=52.00 Z=286.00
+ *   （d6=183 口径；d6 还是 91.5 时同一姿态读作 241.55/51.85/286.05 —— 见 dh_params.h）
      * （回零把编码器带到 ROBOT_HOME_MECH_DEG={0,0,90,0,0,0}）。
      *
      * ⚠️ 这不是"物理验证"，别被它骗了：getpos 打印的就是 FK(编码器读数)，
@@ -141,7 +142,7 @@ int main(void)
      * 把这段想清楚很值钱：我第一版把它当成了"物理锚点"，等于自己骗自己 ——
      * 这正是不做外部参照就永远发现不了符号/零点错误的根本原因。 */
     {
-        double home[3] = {241.55, 51.85, 286.05};
+        double home[3] = {333.00, 52.00, 286.00};
         tcp(q, p);
         snprintf(buf, sizeof buf,
                  "FK=(%.2f,%.2f,%.2f) getpos=(%.2f,%.2f,%.2f) 差 %.3f mm",
@@ -175,8 +176,8 @@ int main(void)
 
     /* ④ TCP 在 J6 轴上，距腕心 d6 */
     tcp(q, p);
-    snprintf(buf, sizeof buf, "|TCP-腕心| = %.3f mm（d6 应为 91.50）", dist3(p, wc));
-    check("TCP 在 J6 轴上、距腕心 = d6", fabs(dist3(p, wc) - 91.5) < 1e-6, buf);
+    snprintf(buf, sizeof buf, "|TCP-腕心| = %.3f mm（d6 应为 183.00）", dist3(p, wc));
+    check("TCP 在 J6 轴上、距腕心 = d6", fabs(dist3(p, wc) - 183.0) < 1e-6, buf);
 
     printf("\n=== 2. 转动效应对 TCP 位置的影响 ===\n");
 

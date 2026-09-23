@@ -213,7 +213,7 @@ int ini_read_max_jump_deg(const char *path, double *deg)
     return ini_read_positive_double(path, "safety", "max_jump_deg", deg);
 }
 
-/* 读 ini [tool] tool_length：法兰面→工具末端（mm）。 */
+/* 读 ini [tool] tool_length：d6=183（装夹爪末端）之外再追加的工具长度（mm）。 */
 int ini_read_tool_length(const char *path, double *tool_mm)
 {
     FILE *f = fopen(path, "r");

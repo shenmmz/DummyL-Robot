@@ -192,10 +192,11 @@ int main(int argc, char **argv)
         double tool_mm = 0.0;
         if (ini_read_tool_length(INI_PATH, &tool_mm)) {
             dh_set_tool_length(tool_mm);
-            printf("工具长度来源：ini [tool]，tool_length=%.2fmm → d6=%.2fmm\n", tool_mm, DH_D6_FLANGE_MM + tool_mm);
+            printf("工具长度来源：ini [tool]，tool_length=%.2fmm → d6=%.2fmm\n",
+                   tool_mm, DH_TABLE[5].d);
         } else {
             dh_set_tool_length(0.0);
-            printf("工具长度来源：默认 0mm（无工具）→ d6=%.2fmm\n", DH_D6_FLANGE_MM);
+            printf("工具长度来源：默认 0mm（无工具）→ d6=%.2fmm\n", DH_TABLE[5].d);
         }
     }
 

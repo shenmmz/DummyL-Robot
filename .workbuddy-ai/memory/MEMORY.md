@@ -33,4 +33,4 @@
 - ⚠️ **真机当前被 `poseok` 闸门锁住**（关节1 越软限位 ⇒ 零点很可能已丢）⇒ **必须先 `home`**，否则 MoveJ/MoveL/tabtest 全部锁死。
 
 ## 5 指针（细节全在 PROJECT-DETAIL.md）
-波特率 `0x0009`（档位15=921600已固化；6台须广播一起写 + `0x00DC=1`）｜ACC/DEC `0x0098/99`（实测 80/90ms，只写 RAM）｜`alarm` `0x00A3/A4`｜`cmd_parse` "先设 type 后校验"的坑（已修，新增命令必守）｜构建 MinGW/Ninja（ARM `ar` 缓存坑，须 `rm -rf build` 重来）｜`looptest`/`nrtest`/`bcast`/`tabtest` 的坑（回环 RTT 不能从单事务里减；`tabtest` 会动臂）｜second/ 与 Hg_Robot_Arm（**Hg 运动学不能控制本机**）。
+波特率 `0x0009`（档位15=921600已固化；6台须广播一起写 + `0x00DC=1`）｜ACC/DEC `0x0098/99`（实测 80/90ms，只写 RAM）｜`alarm` `0x00A3/A4`｜`cmd_parse` "先设 type 后校验"的坑（已修，新增命令必守）｜构建 MinGW/Ninja（ARM `ar` 缓存坑，须 `rm -rf build` 重来）｜`looptest`/`nrtest`/`bcast`/`tabtest` 的坑（回环 RTT 不能从单事务里减；`tabtest` 会动臂）｜**d6=183**（基数已进 `dh.c` 表，须重编+重启）｜second/(Hg 运动学不能控制本机)。

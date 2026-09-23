@@ -65,7 +65,7 @@ int main(void)
     int worst_pos = -1, worst_ang = -1;
     int i, k;
 
-    dh_set_tool_length(0.0);   /* 无工具，d6 = 91.5 */
+    dh_set_tool_length(0.0);   /* 无工具，d6 = 183 */
 
     printf("=== 1. FK→IK 闭环（%d 组随机关节角）===\n", N);
     for (i = 0; i < N; i++) {

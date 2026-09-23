@@ -7,7 +7,7 @@
  *      - 装工具长度 L，TCP 必须沿法兰 z 轴精确平移 L（不多不少、不偏方向）
  *   B. 【实机交叉验证】用真机回零后的实测位姿反查 DH 模型对不对
  *      - 这是唯一能把"模型算的"和"机器真的到的"对起来的测试，
- *        DH 表被改错（典型：d6 曾误写 183 = 2×91.5）时它会立刻炸。
+ *        DH 表被改错（典型：d6 曾误写成 91.5 = 183/2）时它会立刻炸。
  *
  * 运行：cmake --build build --target test_dh_verify && build/bin/test_dh_verify.exe
  */
@@ -32,7 +32,7 @@ static void check(const char *tag, int ok, const char *detail)
 
 /* 期待的 DH 设计值（来自 dh_params.h 头的参数来源说明，单位 mm / 度） */
 static const double kA[6]     = { 35.0, 146.0,   0.0,   0.0,  0.0,   0.0 };
-static const double kD[6]     = {140.0,   0.0,  52.0, 115.0,  0.0,  91.5 };
+static const double kD[6]     = {140.0,   0.0,  52.0, 115.0,  0.0, 183.0 };
 static const double kAlpha[6] = {-90.0,   0.0,  90.0, -90.0, 90.0,   0.0 };
 static const double kOffset[6]= {  0.0, -90.0,  90.0,   0.0,  0.0,   0.0 };
 
@@ -116,11 +116,13 @@ int main(void)
     printf("\n=== B. 实机交叉验证：回零位姿 ===\n");
     printf("  基准：2026-09-18 真机 `home` 后 getpos 实测\n");
     printf("        关节 {-0.04, 0.01, 89.96, 0.01, 0.03, 0.00}\n");
-    printf("        位姿 X=241.56  Y=51.84  Z=286.04\n");
+    printf("        ⚠️ 下面这组位姿是【按当前 d6=183 重算】的 getpos 读数；\n");
+    printf("           d6=91.5 时同一组关节角读作 X=241.56 Y=51.84 Z=286.04。\n");
+    printf("        位姿 X=333.06  Y=51.77  Z=286.06\n");
     {
         double qh[6] = {0.0, 0.0, 90.0, 0.0, 0.0, 0.0};
         double xyz[3], rpy[3];
-        const double want[3] = {241.56, 51.84, 286.04};
+        const double want[3] = {333.06, 51.77, 286.06};
         int ok;
         dh_forward(DH_TABLE, qh, T);
         dh_pose_to_xyz_rpy(T, xyz, rpy);
