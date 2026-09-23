@@ -46,7 +46,8 @@ int main(void)
                             && c.cartesian[2] == 155.16);
         check("速度默认 60 rpm", c.speeds[0] == 60.0);
         check("加减速默认 80/90", c.accel_ms[0] == 80 && c.decel_ms[0] == 90);
-        check("模式默认 sync", c.movl_mode == MOVL_MODE_SYNC);
+        check("模式默认 smooth（不分段，零段间停顿；2026-09-23 用户拍板改）",
+              c.movl_mode == MOVL_MODE_SMOOTH);
     }
 
     printf("=== ② MoveL:X,Y,Z,SPD,ACC,DEC,keep ⇒ 姿态保持 + 自定义速度 ===\n");

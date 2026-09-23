@@ -260,6 +260,61 @@ void modbus_stats_get(uint32_t *n, double *flush_ms, double *write_ms,
     if (noread_ms) *noread_ms = (g_bus_stat.n_noread > 0) ? g_bus_stat.noread_ms / g_bus_stat.n_noread : 0.0;
 }
 
+/* modbus_read_reply：按应答的【实际长度】分段读，避免"读不满 cap 就干等超时"。
+ *
+ * 【为什么必须这么读 —— 2026-09-23 实测，这是整条链路最大的瓶颈】
+ * 环境：Windows + CH340 USB-RS485 + 921600 8N1。同一笔读事务
+ * （请求 01 03 00D8 0001，应答 7 字节），只改 ReadFile 请求的字节数：
+ *      cap=300（旧代码 sizeof(rx)） ⇒ 15.37 ms
+ *      cap=7  （正好一帧）          ⇒  1.70 ms   ← 快 9 倍
+ *      cap=8  （多 1 字节）         ⇒ 15.17 ms
+ *      cap=64                       ⇒ 15.44 ms
+ * 机理：请求字节数一旦大于实际会到的字节数，ReadFile 就【不会因"读满"而完成】，
+ * 只能等 ReadIntervalTimeout 到期；而 CH341SER 驱动把这个到期挂在 ~15.6 ms 的
+ * 节拍上（= Windows 默认 64 Hz 系统定时器）⇒ 每笔事务白等一个节拍。
+ * 与波特率、与 USB 延迟、与驱动器全都无关 —— 这正是"波特率提到 921600 没效果"、
+ * "换转换器没效果"的真正原因：那 15 ms 根本不在那些环节上。
+ *
+ * 分三段读，每段都是精确长度 ⇒ 每段都因"读满"立刻返回：
+ *   读类(01/02/03/04)：[站号+功能码] → [字节数] → [数据+CRC]
+ *   写类(05/06/0F/10)：[站号+功能码] → 固定再读 6 字节（应答共 8 字节）
+ *   异常应答(功能码 bit7=1)：共 5 字节 = 2 + 1(异常码) + 2(CRC)
+ * 从站不在线时第一段即超时返回 <=0，行为与旧代码一致（仍是 ERR_TIMEOUT）。 */
+static int modbus_read_reply(const CommOps *ops, uint8_t *rx, int cap, int timeout_ms)
+{
+    int got, total = 0, want;
+
+    if (ops == NULL || ops->read_frame == NULL || rx == NULL || cap < 5) {
+        return -1;
+    }
+    /* 1) 站号 + 功能码 */
+    got = ops->read_frame(rx, 2, timeout_ms);
+    if (got <= 0) return got;
+    total = got;
+    if (total < 2) return total;        /* 半帧：交给上层按长度/CRC 判失败 */
+
+    if (rx[1] & 0x80) {                 /* 异常应答 */
+        want = 3;
+    } else {
+        switch (rx[1]) {
+        case 0x01: case 0x02: case 0x03: case 0x04:
+            /* 2) 字节数 */
+            got = ops->read_frame(rx + total, 1, timeout_ms);
+            if (got <= 0) return got;
+            total += got;
+            want = (int)rx[2] + 2;      /* 数据 + CRC */
+            break;
+        default:
+            want = 6;                   /* 写类应答固定 8 字节 */
+            break;
+        }
+    }
+    if (total + want > cap) return total;
+    got = ops->read_frame(rx + total, want, timeout_ms);
+    if (got > 0) total += got;
+    return total;
+}
+
 /* modbus_transact：flush -> write -> read响应 -> parse */
 ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out)
 {
@@ -291,7 +346,7 @@ ErrCode modbus_transact(const uint8_t *tx, size_t len, ModbusFrame *out)
     if (ops->read_frame == NULL) {
         return ERR_PORT;
     }
-    got = ops->read_frame(rx, (int)sizeof(rx), 50);
+    got = modbus_read_reply(ops, rx, (int)sizeof(rx), 50);
     t2 = bus_ms_now();
 
     g_bus_stat.n++;

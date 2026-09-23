@@ -144,7 +144,17 @@ int main(int argc, char **argv)
         }
 
         if (port_count == 0) {
+            /* 换转换器时最容易撞上这一档。原来的单行提示太简略，用户无从下手，
+             * 所以把"怎么查"直接印出来 —— 这条路径只会在启动时走一次，多几行不碍事。 */
             printf("[错误] 未发现可用串口\n");
+            printf("       程序会枚举系统串口（注册表 HARDWARE\\DEVICEMAP\\SERIALCOMM），当前一个都没有。\n");
+            printf("       排查：\n");
+            printf("         1) 转换器是否插紧、指示灯是否亮（换 USB 口试一次）\n");
+            printf("         2) 设备管理器 → 端口(COM 和 LPT) 里有没有新出现的 COM 口\n");
+            printf("         3) 驱动是否装好（CH340 需 WCH 驱动，FTDI / CP210x 各有各的）\n");
+            printf("         4) 也可以跳过枚举、直接指定：dummyrobot.exe COM5\n");
+            printf("       注意：ini 的 [serial] port 只是参考值，枚举结果会覆盖它 ——\n");
+            printf("             所以【换转换器不需要改 ini】，插好重启程序即可。\n");
             return 1;
         }
 

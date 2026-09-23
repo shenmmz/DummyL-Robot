@@ -240,6 +240,98 @@ static void ops_flush(void)
     }
 }
 
+/* ==================== 回环测试专用 ====================
+ * 放在 g_ops_port 定义之后：这两个函数直接操作上层正在用的那一个串口句柄，
+ * 不去重新 CreateFile —— Windows 串口独占，重复打开同一端口只会 Access denied。 */
+
+/* serial_set_baud：运行中改 PC 侧波特率（只改 DCB.BaudRate，8N1 等格式不动）。
+ * 【只给 looptest 用】改的是 PC 侧，驱动器侧不会跟着变 ⇒ 接电机时调用会立刻失联。
+ * 切完顺手 PurgeComm：换速率瞬间的残帧若不清掉，会被当成"回环收到的数据"，
+ * 让第一次测量凭空多出几个字节。 */
+int serial_set_baud(uint32_t baudrate)
+{
+    DCB dcb;
+
+    if (g_ops_port == NULL || g_ops_port->h == INVALID_HANDLE_VALUE || g_ops_port->h == NULL) {
+        return -1;
+    }
+    memset(&dcb, 0, sizeof(dcb));
+    dcb.DCBlength = sizeof(dcb);
+    if (!GetCommState(g_ops_port->h, &dcb)) {
+        return -1;
+    }
+    dcb.BaudRate = baudrate;
+    if (!SetCommState(g_ops_port->h, &dcb)) {
+        return -1;
+    }
+    PurgeComm(g_ops_port->h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    return 0;
+}
+
+/* serial_get_baud：读回当前 PC 侧波特率，供 looptest 测完恢复 */
+uint32_t serial_get_baud(void)
+{
+    DCB dcb;
+
+    if (g_ops_port == NULL || g_ops_port->h == INVALID_HANDLE_VALUE || g_ops_port->h == NULL) {
+        return 0;
+    }
+    memset(&dcb, 0, sizeof(dcb));
+    dcb.DCBlength = sizeof(dcb);
+    if (!GetCommState(g_ops_port->h, &dcb)) {
+        return 0;
+    }
+    return (uint32_t)dcb.BaudRate;
+}
+
+/* serial_set_rts：回环测试专用 —— 改 DCB.fRtsControl（其余格式不动）。
+ * 只动 RTS 的电平控制方式，不改波特率，所以接电机时调用也不会立刻失联
+ * （但把 DE 常拉高会挡住从站回帧，表现成"六轴全离线"，测完必须改回来）。 */
+int serial_set_rts(int mode)
+{
+    DCB dcb;
+
+    if (g_ops_port == NULL || g_ops_port->h == INVALID_HANDLE_VALUE || g_ops_port->h == NULL) {
+        return -1;
+    }
+    memset(&dcb, 0, sizeof(dcb));
+    dcb.DCBlength = sizeof(dcb);
+    if (!GetCommState(g_ops_port->h, &dcb)) {
+        return -1;
+    }
+    switch (mode) {
+    case 0:  dcb.fRtsControl = RTS_CONTROL_DISABLE; break;
+    case 1:  dcb.fRtsControl = RTS_CONTROL_ENABLE;  break;
+    default: dcb.fRtsControl = RTS_CONTROL_TOGGLE;  break;
+    }
+    if (!SetCommState(g_ops_port->h, &dcb)) {
+        return -1;
+    }
+    PurgeComm(g_ops_port->h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    return 0;
+}
+
+/* serial_get_rts：读回当前 RTS 控制方式，供 looptest 测完恢复 */
+int serial_get_rts(void)
+{
+    DCB dcb;
+
+    if (g_ops_port == NULL || g_ops_port->h == INVALID_HANDLE_VALUE || g_ops_port->h == NULL) {
+        return -1;
+    }
+    memset(&dcb, 0, sizeof(dcb));
+    dcb.DCBlength = sizeof(dcb);
+    if (!GetCommState(g_ops_port->h, &dcb)) {
+        return -1;
+    }
+    switch (dcb.fRtsControl) {
+    case RTS_CONTROL_DISABLE: return 0;
+    case RTS_CONTROL_ENABLE:  return 1;
+    case RTS_CONTROL_TOGGLE:  return 2;
+    default:                  return -1;   /* HANDSHAKE：程序不用，不归零 */
+    }
+}
+
 /* 全局 CommOps 实例：上层通过它操作串口总线 */
 const CommOps serial_comm_ops = {
     ops_open,

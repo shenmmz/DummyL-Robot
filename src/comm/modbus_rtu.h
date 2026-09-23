@@ -13,13 +13,13 @@
 #include "utils/err.h"
 #include "comm/comm_if.h"
 
-#define MODBUS_FUNC_READ_HOLDING 0x03
-#define MODBUS_FUNC_READ_INPUT   0x04
-#define MODBUS_FUNC_WRITE_SINGLE 0x06
-#define MODBUS_FUNC_WRITE_MULTI  0x10
+#define MODBUS_FUNC_READ_HOLDING 0x03 // 读保持寄存器
+#define MODBUS_FUNC_READ_INPUT   0x04 // 读单个寄存器
+#define MODBUS_FUNC_WRITE_SINGLE 0x06 // 写单寄存器
+#define MODBUS_FUNC_WRITE_MULTI  0x10 // 写多寄存器
 
 /* 功能码错误位（从站异常响应：功能码 | 0x80） */
-#define MODBUS_FUNC_ERR_BIT      0x80
+#define MODBUS_FUNC_ERR_BIT      0x80 // 功能码错误位，异常响应时为 1
 
 /* 错误码统一走 ErrCode（utils/err.h）；以下为兼容旧名的别名 */
 #define MODBUS_ERR_NONE      ERR_NONE
