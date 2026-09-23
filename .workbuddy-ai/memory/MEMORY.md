@@ -25,8 +25,12 @@
 > ⇒ **但丢失的知识 docs/ 里没有，只剩 git**：`pen_length=41.17` 推导、`[movel]` 实测偏差表、
 > `[stall]` 峰值表（阈值 ×2.0 依据）、**ini 被 8192 固定缓冲截断导致 `[stall]` 消失的事故**、
 > `noread_gap_ms` 的 A/B 原始数据、smooth 定为默认的安全代价。取回：`git show 37539b8:src/config/robot_config.ini`
-> ⇒ **`tools/` 已删 5 个（bus_probe/reg_probe/cur_trace/raw_send/table_probe，全是硬编码 115200 的硬件探针），
-> 保留 gen_shape / j2_lift_check / j2_frames 三个纯离线计算脚本。**
+> ⇒ **`tools/` 整个目录已删除**（`af958bb`）。分两步：先删 5 个硬编码 115200 的硬件探针
+> （bus_probe/reg_probe/cur_trace/raw_send/table_probe），再删剩下 3 个
+> （gen_shape/j2_lift_check/j2_frames）。**取回：`git show b406302:tools/gen_shape.py`。**
+> ⇒ **`tests/` 一个没动** —— 12 个注册进 ctest（12/12 过），另 4 个是离线工具
+> （`movl_tip_trace` / `movl_reach` / `ik_pose_check` / `udp_telemetry_test`），
+> 每个都守着一次真实事故，**别删**。
 
 > 详细推导与测试卡见 `docs/测试方法与验收标准.md`（测试 1~22）、`docs/运动流畅性提速路线.md`。本文件只留结论、坑与指针。
 
