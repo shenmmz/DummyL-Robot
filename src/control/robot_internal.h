@@ -152,4 +152,15 @@ ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len);
 /* 关节号 -> Modbus 从站地址查表 */
 uint8_t joint_slave(int joint);
 
+/* ================= 总线锁（批量/流水线路径专用） =================
+ * robot_request / robot_request_noread 各自只锁一帧。要把【多帧】当成一个
+ * 不可分割的批处理（例如"先连发 6 个请求、再收 6 个响应"的流水线读），
+ * 必须在批处理前后手工持锁，否则监控线程会插进两帧之间。
+ *
+ * 持锁期间【不要】再调 robot_request / robot_request_noread —— CRITICAL_SECTION
+ * 可重入，不会死锁，但语义上等于把批处理切碎，失去意义。
+ * 持锁期间不得调用任何会阻塞很久的操作（会卡住监控线程）。 */
+void robot_bus_lock(Robot *r);
+void robot_bus_unlock(Robot *r);
+
 #endif /* ROBOT_INTERNAL_H */

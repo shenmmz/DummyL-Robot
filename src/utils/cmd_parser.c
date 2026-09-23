@@ -496,6 +496,34 @@ int cmd_parse(const char *line, ParsedCmd *out)
             }
         }
         out->type = CMD_DRVBAUD;
+    } else if (strcmp(cmd, "pipe") == 0) {
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: pipe  或  pipe:每档轮数[:单档间隔us]\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->joint = 20;
+        out->param = -1.0;
+        if (a != NULL) {
+            double r;
+            if (!parse_full_number(a, &r) || r < 1.0 || r > 200.0 ||
+                r != (double)(int)r) {
+                printf("[警告] pipe 每档轮数须为 1~200 的整数：%s\n", a);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->joint = (int)r;
+        }
+        if (b != NULL) {
+            double g;
+            if (!parse_full_number(b, &g) || g < 0.0 || g > 5000.0) {
+                printf("[警告] pipe 间隔须为 0~5000 us：%s\n", b);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->param = g;
+        }
+        out->type = CMD_PIPE;
     } else if (strcmp(cmd, "alarm") == 0) {
         char *a = strtok_r(NULL, ":", &save);
         char *extra = strtok_r(NULL, ":", &save);
@@ -721,6 +749,11 @@ static const char HELP_TEXT[] =
     "                        判读：接电机单事务 15.4ms − 回环RTT = 驱动器侧耗时\n"
     "                        ⚠️ 必须脱离电机；接电机时切BAUD会立刻失联\n"
     "  bcast                 广播帧验证：地址0写速度再逐轴读回，看几轴响应广播\n"
+    "  pipe[:轮数[:间隔us]]   流水线批量读探针（只读位置，不动臂）：\n"
+    "                        基线＝现状一问一答；然后先连发 6 个请求、再收 6 个响应，\n"
+    "                        扫 0/50/100/200/300/500/1000/2000 us 八档间隔，报丢帧数。\n"
+    "                        目的：把\"等响应那 1.6ms 里总线其实是空的\"这块钱榨出来。\n"
+    "                        轮数默认 20；给第三个参数只测那一档（如 pipe:30:200）\n"
     "  curtest               电流实测（标定堵转阈值用）：静止采样六轴保持电流，不动臂\n"
     "  curtest:N[:DEG[:RPM]] 关节N 走 +DEG 度再走回原位，全程高速采样该轴电流，\n"
     "                        输出 保持/运动 的最小·均值·最大(mA) 与建议阈值区间\n"

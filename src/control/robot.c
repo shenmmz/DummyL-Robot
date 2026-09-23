@@ -58,6 +58,18 @@ ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len)
     return rc;
 }
 
+void robot_bus_lock(Robot *r)
+{
+    if (r == NULL) return;
+    EnterCriticalSection(&r->lock);
+}
+
+void robot_bus_unlock(Robot *r)
+{
+    if (r == NULL) return;
+    LeaveCriticalSection(&r->lock);
+}
+
 void robot_apply_subdivision(Robot *robot)
 {
     int i, ok_cnt = 0, fail_cnt = 0;

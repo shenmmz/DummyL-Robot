@@ -26,6 +26,8 @@ void cmd_bcast(Robot *robot);
 
 void cmd_nrtest(Robot *robot);
 
+void cmd_pipe(Robot *robot, const ParsedCmd *cmd);
+
 void cmd_movel(Robot *robot, const ParsedCmd *cmd);
 
 #endif

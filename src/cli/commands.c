@@ -666,6 +666,9 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     case CMD_DRVBAUD:
         cmd_drvbaud(robot, cmd);
         break;
+    case CMD_PIPE:
+        cmd_pipe(robot, cmd);
+        break;
     case CMD_HELP:
         cmd_print_help();
         break;
@@ -2036,6 +2039,158 @@ void cmd_diag(Robot *robot, const ParsedCmd *cmd)
     printf("\n");
 
 done:
+    Sleep(20);
+    bus_drain();
+    monitor_pause_active(0);
+}
+
+#define PIPE_RESP_LEN   9
+#define PIPE_READ_MS    10
+
+static void pipe_spin_us(double us)
+{
+    LARGE_INTEGER f, a, b;
+    double target;
+
+    if (us <= 0.0) return;
+    QueryPerformanceFrequency(&f);
+    if (f.QuadPart <= 0) return;
+    target = us * (double)f.QuadPart / 1e6;
+    QueryPerformanceCounter(&a);
+    for (;;) {
+        QueryPerformanceCounter(&b);
+        if ((double)(b.QuadPart - a.QuadPart) >= target) break;
+    }
+}
+
+void cmd_pipe(Robot *robot, const ParsedCmd *cmd)
+{
+    static const int gaps_us[] = { 0, 50, 100, 200, 300, 500, 1000, 2000 };
+    const int NG = (int)(sizeof(gaps_us) / sizeof(gaps_us[0]));
+    const CommOps *ops = modbus_comm_get();
+    int rounds = (cmd->joint > 0) ? cmd->joint : 20;
+    int only_gap = (cmd->param >= 0.0) ? (int)cmd->param : -1;
+    LARGE_INTEGER freq, ta, tb;
+    int i, g, j, ok;
+    double base_ms = 0.0;
+    int any_gap_tested = 0;
+
+    if (robot == NULL || ops == NULL ||
+        ops->write_frame == NULL || ops->read_frame == NULL) {
+        printf("[错误] pipe：通信层未就绪\n");
+        return;
+    }
+
+    monitor_pause_active(1);
+    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    bus_drain();
+
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart <= 0) {
+        printf("[错误] pipe：高精度计时器不可用\n");
+        monitor_pause_active(0);
+        return;
+    }
+
+    printf("流水线批量读探针（只读 0x%04X 位置，不动臂；每档 %d 轮）\n",
+           LEESN_REG_POS, rounds);
+    printf("【基线】现状一问一答：顺序读 J1..J6\n");
+    {
+        double sum = 0.0;
+        for (i = 0; i < rounds; i++) {
+            QueryPerformanceCounter(&ta);
+            for (j = 1; j <= 6; j++) {
+                int32_t p = motor_read_position(robot, j, &ok);
+                (void)p;
+            }
+            QueryPerformanceCounter(&tb);
+            sum += (double)(tb.QuadPart - ta.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        }
+        base_ms = sum / (double)rounds;
+        printf("  一轮 %7.2f ms  ⇒  %6.1f Hz   （每轴 %.2f ms）\n\n",
+               base_ms, 1000.0 / base_ms, base_ms / 6.0);
+    }
+
+    printf("【流水线】先连发 6 个请求，再收 6 个响应\n");
+    printf("   间隔      一轮耗时     刷新率     收到响应    残帧    备注\n");
+    printf("   ------   ----------   --------   ---------   ------   --------\n");
+
+    for (g = 0; g < NG; g++) {
+        int gap = gaps_us[g];
+        double sum = 0.0;
+        int got_ok = 0, got_bad = 0;
+        int missed_any = 0;
+
+        if (only_gap >= 0 && gap != only_gap) continue;
+        any_gap_tested = 1;
+
+        Sleep(20);
+        bus_drain();
+        robot_bus_lock(robot);
+        for (i = 0; i < rounds; i++) {
+            uint8_t tx[16];
+            uint8_t rx[32];
+            int seen[7];
+            int round_miss = 0;
+
+            if (missed_any) {
+                Sleep(5);
+                bus_drain();
+            }
+
+            for (j = 0; j <= 6; j++) seen[j] = 0;
+            QueryPerformanceCounter(&ta);
+
+            for (j = 1; j <= 6; j++) {
+                size_t len = modbus_build_read(joint_slave(j), LEESN_REG_POS, 2, tx);
+                (void)ops->write_frame(tx, (int)len);
+                if (gap > 0) pipe_spin_us((double)gap);
+            }
+
+            for (j = 0; j < 6; j++) {
+                int got = ops->read_frame(rx, PIPE_RESP_LEN, PIPE_READ_MS);
+                if (got == PIPE_RESP_LEN && rx[0] >= 1 && rx[0] <= 6 &&
+                    rx[1] == MODBUS_FUNC_READ_HOLDING && seen[rx[0]] == 0) {
+                    seen[rx[0]] = 1;
+                    got_ok++;
+                } else if (got > 0) {
+                    got_bad++;
+                    round_miss = 1;
+                } else {
+                    round_miss = 1;
+                    break;
+                }
+            }
+            QueryPerformanceCounter(&tb);
+            sum += (double)(tb.QuadPart - ta.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            if (round_miss) missed_any = 1;
+        }
+        robot_bus_unlock(robot);
+
+        {
+            double avg = sum / (double)rounds;
+            int miss = rounds * 6 - got_ok;
+            const char *verdict;
+            if (miss == 0)            verdict = "干净";
+            else if (miss <= rounds)  verdict = "偶发丢帧";
+            else                      verdict = "大面积丢帧";
+            printf("   %4d us   %7.2f ms   %6.1f Hz   %5d/%-5d   %5d   %s\n",
+                   gap, avg, 1000.0 / avg, got_ok, rounds * 6, got_bad, verdict);
+        }
+    }
+
+    if (!any_gap_tested) {
+        printf("  （指定的间隔不在扫描表里：可选 0/50/100/200/300/500/1000/2000 us）\n");
+    }
+
+    printf("\n判读：\n");
+    printf("  · 只要某一档【丢帧=0 且一轮耗时 < 基线】，流水线就是可行的\n");
+    printf("  · 间隔取到最干净的最小值即可，再大只是白等\n");
+    printf("  · 所有档都丢帧 ⇒ 驱动器在处理响应期间不收新帧，这条路作废\n");
+    printf("  · gap=0 时请求仍被写调用的线上时间隔开（%u bps 下 8 字节 ≈ %.2f ms）\n",
+           (unsigned)serial_get_baud(),
+           8.0 * 10.0 / (double)(serial_get_baud() ? serial_get_baud() : MODBUS_BAUDRATE) * 1000.0);
+
     Sleep(20);
     bus_drain();
     monitor_pause_active(0);

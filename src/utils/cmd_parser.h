@@ -28,6 +28,7 @@
 #define CMD_ALARM     24
 #define CMD_LOOPTEST  25
 #define CMD_DRVBAUD   26
+#define CMD_PIPE      27
 
 typedef enum {
     MOVL_MODE_SYNC = 0,
