@@ -35,7 +35,7 @@
 > 📋 **CLI 完整命令清单（2026-09-23 从 `cmd_parser.c` 逐条抄出，别再凭记忆写）**：
 > `home`｜`MoveJ`｜`MoveL`｜`disable`｜`enable`｜`motor`｜`getpos`｜`fk`｜`diag`｜`bcast`｜
 > `nrtest`｜`curtest`｜`busrate`｜`accel`｜`drvbaud`｜`alarm`（含 `alarm:clear`）｜`looptest`｜
-> `tabtest`｜`stall`｜`poseok`｜`zero`（含 `zero_save`）｜`help`/`?`｜`exit`/`quit`。
+> `tabtest`｜`stall`｜`poseok`｜`zero`（含 `zero_save`）｜`pipe`｜`help`/`?`｜`exit`/`quit`。
 > **⚠️ 没有 `reg` 命令**（我曾误记）。**也没有** `status`/`mask`/`unmask`/`scan`/`calib`（早已删除）。
 > 查串口用 Python `winreg`（`reg.exe` 被安全策略拦）。
 
