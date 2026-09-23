@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+/* 忽略大小写的字符串比较（命令名不区分大小写，仅本文件用）。 */
 static int ci_strcmp(const char *a, const char *b)
 {
     int ca, cb;
@@ -19,6 +20,7 @@ static int ci_strcmp(const char *a, const char *b)
     }
 }
 
+/* 解析一个"完整"数字：整串都必须合法，不接受 "12abc" 这种（仅本文件用）。 */
 static int parse_full_number(const char *s, double *out)
 {
     char *end = NULL;
@@ -35,6 +37,12 @@ static int parse_full_number(const char *s, double *out)
     return 1;
 }
 
+/* 把一行文本解析成 ParsedCmd。
+ * ⚠️ 项目铁律（踩过坑）：新增命令时 out->type 要么放在【全部校验之后】设置，
+ * 要么保证失败时复位。历史事故：分支先设 out->type 再校验，失败 return CMD_UNKNOWN，
+ * 但 main.c【只看 cmd->type 不看返回值】⇒ 非法参数（如 busrate:7）打完警告命令照样执行。
+ * 修法：入口 memset(out,0,...) + 46 处先复位 type 再返回。
+ * ⚠️ line==NULL || out==NULL 那处【不能】写 out->type。 */
 int cmd_parse(const char *line, ParsedCmd *out)
 {
     char buf[128];
@@ -746,7 +754,9 @@ static const char HELP_TEXT[] =
     "                        ② 双模块：再插一个转换器，A-A/B-B 对接，主口发、辅口收\n"
     "                           looptest:30:0:COM5   ← AUX 写辅口名即启用②\n"
     "                        N=重复次数(默认30)，BAUD=临时切PC侧波特率(省略=不改，测完自动改回)\n"
-    "                        判读：接电机单事务 15.4ms − 回环RTT = 驱动器侧耗时\n"
+    "                        判读：单事务耗时看 diag（921600 下 ≈1.7ms），\n"
+    "                              它 = 线上 0.23 + 驱动器周转 ≈1.47 + USB栈 ≤0.08 ms\n"
+    "                              ⚠️ 回环RTT只代表本工具的往返能力，【不能】从单事务里减\n"
     "                        ⚠️ 必须脱离电机；接电机时切BAUD会立刻失联\n"
     "  bcast                 广播帧验证：地址0写速度再逐轴读回，看几轴响应广播\n"
     "  pipe[:轮数[:间隔us]]   流水线批量读探针（只读位置，不动臂）：\n"
@@ -771,6 +781,8 @@ static const char HELP_TEXT[] =
     "  help                  帮助\n"
     "  exit                  退出\n";
 
+/* 打印帮助文本（help / ?）。注意：这里的 looptest 判读文案必须与 commands.c 的实际
+ * 测量口径一致，否则会把人引向错误的优化方向（曾写着已作废的 15.4ms 公式）。 */
 void cmd_print_help(void)
 {
     fputs(HELP_TEXT, stdout);

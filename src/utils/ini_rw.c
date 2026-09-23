@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* 读 ini [joint_zero] 的 q0[6]（机械角零点）。缺键时用内置默认值。 */
 int ini_read_joint_zero(const char *path, double zero[6])
 {
     FILE *f = fopen(path, "r");
@@ -41,6 +42,8 @@ int ini_read_joint_zero(const char *path, double zero[6])
     return (got == 6) ? 1 : 0;
 }
 
+/* 写回 ini [joint_zero]。纯逐行拷贝 + fsize+16384 动态缓冲，不动其他段。
+ * ⚠️ 历史事故：早期用 8192 固定缓冲，ini 一超长就被截断，[stall] 整段凭空消失。 */
 int ini_write_joint_zero(const char *path, const double zero[6])
 {
     char  *buf = NULL;
@@ -115,6 +118,9 @@ int ini_write_joint_zero(const char *path, const double zero[6])
     return 1;
 }
 
+/* 读 ini [stall] 六轴堵转电流阈值（mA）。
+ * ⚠️ 阈值疑似偏低：实测静止电流 ~500/499/495/385/371/254 vs 阈值 480/490/480/400/390
+ * ⇒ J1/J2/J3 一上电就报"已堵转"。未证实，改前先测。 */
 int ini_read_stall_current(const char *path, int th[6])
 {
     FILE *f = fopen(path, "r");
@@ -152,6 +158,9 @@ int ini_read_stall_current(const char *path, int th[6])
     return (got == 6) ? 1 : 0;
 }
 
+/* 从 ini 读一个 >0 的 double。读不到、非正数、缺键、缺段一律返回 0，
+ * 由调用方兜底默认值。
+ * ⚠️ 只认段头精确匹配 [section]；'#' 与 ';' 开头的行都跳过。 */
 int ini_read_positive_double(const char *path, const char *section,
                              const char *key, double *out)
 {
@@ -192,16 +201,19 @@ int ini_read_positive_double(const char *path, const char *section,
     return 0;
 }
 
+/* 读 ini [safety] max_step_deg：单次下发允许的最大步长（度）。 */
 int ini_read_max_step_deg(const char *path, double *deg)
 {
     return ini_read_positive_double(path, "safety", "max_step_deg", deg);
 }
 
+/* 读 ini [safety] max_jump_deg：单次允许的最大跳变（度），超了就拒绝下发。 */
 int ini_read_max_jump_deg(const char *path, double *deg)
 {
     return ini_read_positive_double(path, "safety", "max_jump_deg", deg);
 }
 
+/* 读 ini [tool] tool_length：法兰面→工具末端（mm）。 */
 int ini_read_tool_length(const char *path, double *tool_mm)
 {
     FILE *f = fopen(path, "r");
@@ -230,6 +242,7 @@ int ini_read_tool_length(const char *path, double *tool_mm)
     return 0;
 }
 
+/* 读 ini [tool] pen_length：笔尖长度（mm）。实测标定为 41.17。 */
 int ini_read_pen_length(const char *path, double *pen_mm)
 {
     FILE *f = fopen(path, "r");

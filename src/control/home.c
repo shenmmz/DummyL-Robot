@@ -43,12 +43,16 @@ static struct {
 
 #define HOME_J6_ZERO_RPM         100
 
+/* 关节 j 回零后应处的【电机侧机械角】= 机械角表 + 零点偏置。
+ * 全轴对齐凹槽时应得到 0,0,90,0,0,0。 */
 static double home_forward_deg(int j)
 {
     static const double mech[ROBOT_JOINT_COUNT] = ROBOT_HOME_MECH_DEG;
     const double *zero = joint_zero_get();
     return mech[j - 1] + zero[j - 1];
 }
+/* 回零后退让时的速度：关节 6 单列 100rpm。
+ * 原因：stall[6] 从未配置（speed_rpm=0），直接用会变成"干等 20s"。 */
 static int home_forward_rpm(int j)
 {
     return (j == 6) ? HOME_J6_ZERO_RPM : stall[j].speed_rpm;
@@ -74,6 +78,8 @@ typedef enum {
 } SensorPhase;
 
 
+/* 回零前的武装：使能 + 等 50ms + 关软限位。
+ * 必须关软限位，否则退让动作会被限位挡住。 */
 static ErrCode home_arm(Robot *robot, int joint)
 {
     ErrCode rc = motor_enable(robot, joint);
@@ -82,6 +88,7 @@ static ErrCode home_arm(Robot *robot, int joint)
     return motor_set_limit(robot, joint, 0);
 }
 
+/* 回零收尾：恢复使能、恢复位置超差报警、把位置偏差预警放宽回 20 步。 */
 static void home_restore(Robot *robot, int joint)
 {
     if (motor_enable(robot, joint) != ERR_NONE) {
@@ -104,6 +111,9 @@ static uint32_t s_stall_t0_ms[7];
 
 static uint32_t s_stall_mask_end_ms[7];
 
+/* 启动堵转回零：记录 t0 与 150ms 掩码窗口，关超差报警、放宽偏差预警到 10000 步，
+ * 设 ACC/DEC 与速度，最后进力矩模式 TORQUE_MODE_HOME 并起转。
+ * torque_level<=0 直接报错返回（纯电流回零的老路径已移除）。 */
 static ErrCode home_stall_start(Robot *robot, int joint)
 {
     StallHome *p = &stall[joint];
@@ -136,6 +146,11 @@ static ErrCode home_stall_start(Robot *robot, int joint)
     return ERR_NONE;
 }
 
+/* 判堵转，返回 1=已堵转 / 0=继续跑。判据按顺序：
+ *   ① 状态字 ALARM  ② 状态字 OVERRUN  ③ 150ms 掩码期内一律不算
+ *   ④ 电流 > stall[joint].stall_current(mA)。
+ * 电流 >3000mA 视为读失败，不参与判断。
+ * ⚠️ 阈值偏低：静止电流 500/499/495/385/371mA vs 阈值 480/490/480/400/390 ⇒ J1/J2/J3 上电即"已堵转"（未证实）。 */
 static int home_check_stall(Robot *robot, int joint, int *cur_out)
 {
     uint32_t st;
@@ -171,6 +186,9 @@ static int home_check_stall(Robot *robot, int joint, int *cur_out)
     return 0;
 }
 
+/* 堵转后的收尾：停力矩 → 临时压短减速时间到 50ms → 减速停 → 等 150ms → 恢复减速时间
+ * → 读报警并最多清 3 次 → 清位置（写 0x00D2 把当前点定为原点）。
+ * 清位置失败要报错：后续退让是相对位移，但绝对定位仍会带这个偏置。 */
 static void home_stall_done(Robot *robot, int joint)
 {
     int clear_ok;
@@ -219,6 +237,9 @@ static void home_stall_done(Robot *robot, int joint)
 
 #define HOME_INPOS_TOL_STEPS   100
 
+/* 到位查询，返回 1=到位 / 0=还没到 / -1=报警或超差 / -2=读失败。
+ * ★ 到位 = 无报警 + 已退出 RUN_ACTIVE + 位置在 target±100 步内。
+ * 绝不能用 STAT_INPOS(bit12) 单独判断 —— 那是粘滞位，实测差 28.5° 也报"到位"。 */
 static int home_inpos_query(Robot *robot, int joint, int32_t target_steps)
 {
     uint32_t st;
@@ -238,6 +259,9 @@ static int home_inpos_query(Robot *robot, int joint, int32_t target_steps)
     return 0;
 }
 
+/* 等到位，轮询 200ms（报警时立刻返回 -1）。
+ * ★ 必须先"见过 RUN_ACTIVE"再判到位，否则会在指令还没下发出去时误判成功。
+ * 注意轮询 200ms 远大于一轮总线 10.2ms，这里不是瓶颈、也不需要更快。 */
 static int home_wait_inpos(Robot *robot, int joint, int32_t target_steps, int timeout_ms)
 {
     uint32_t start_ms = GetTickCount();
@@ -264,6 +288,7 @@ static int home_wait_inpos(Robot *robot, int joint, int32_t target_steps, int ti
     return 0;
 }
 
+/* 等堵转，1ms 轮询（HOME_STALL_POLL_MS）。 */
 static int home_wait_stall(Robot *robot, int joint, int timeout_ms)
 {
     uint32_t start_ms = GetTickCount();
@@ -275,6 +300,10 @@ static int home_wait_stall(Robot *robot, int joint, int timeout_ms)
     return 0;
 }
 
+/* 堵转清零后，把轴退让到 home_forward_deg() 指定的机械角。
+ * 用【相对位移】(当前位置 + delta) 而不是绝对目标：
+ * 若 0x00D2 零点没生效（清零后位置非 0），绝对目标会带着旧偏置走错。
+ * 超时/报警只打警告，不中断其他轴。 */
 static void home_stall_forward(Robot *robot, int joint)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
@@ -317,6 +346,10 @@ static void home_stall_forward(Robot *robot, int joint)
     }
 }
 
+/* 力矩碰撞回零【诊断】：给定力矩等级跑一次，每 200ms 打一行
+ * `T+ms 状态字 电流mA 位置 备注`，最多 15s。
+ * 见到 bit15 HOMED 或退出 RUN_ACTIVE 就停并退出。
+ * 用途：判断"碰撞回零为什么不停"到底是没进力矩模式、还是驱动器不认位。 */
 ErrCode robot_torque_probe(Robot *robot, int joint, int level)
 {
     uint32_t st;
@@ -403,6 +436,8 @@ typedef struct {
 
 #define SEN_POS_FAIL_MAX   10
 
+/* 设关节 6 速度：同时写 0x009A（连续运行速度源）与记忆速度。
+ * 只写记忆速度的话，连续运行(motor_run)会按驱动器里的旧值跑。 */
 static void sensor6_set_rpm(Robot *robot, int rpm)
 {
     if (motor_set_speed16(robot, 6, rpm) != ERR_NONE) {
@@ -411,6 +446,7 @@ static void sensor6_set_rpm(Robot *robot, int rpm)
     motor_set_speed(robot, 6, rpm);
 }
 
+/* 关节 6 传感器回零的初始化：清上下文 → arm → 设 ACC/DEC → 提速到 300rpm。 */
 static ErrCode sensor6_start(Robot *robot, SensorCtx *c)
 {
     ErrCode rc;
@@ -437,6 +473,13 @@ static ErrCode sensor6_start(Robot *robot, SensorCtx *c)
     return ERR_NONE;
 }
 
+/* 关节 6 传感器回零状态机（每次调用走一步）。
+ * 传感器接在状态字 bit0(IN0)/bit1(IN1) 上；流程：
+ *   若在 IN0 内 → 正向开 3° 离开 → 反向找 IN0 → 30rpm 慢速爬出 IN0 → 停 + 清零。
+ *   若在 IN1 内 → 直接正向找 IN0。
+ * 超时：整体 20s（home_timeout_ms），慢速离开 IN0 单独 10s。
+ * 位置连读失败 10 次 ⇒ 急停保护（SEN_POS_FAIL_MAX）。
+ * 返回 1=完成 / -1=失败 / 0=继续。 */
 static int sensor6_tick(Robot *robot, SensorCtx *c)
 {
     SensorPhase ph = c->ph;
@@ -559,6 +602,7 @@ static int sensor6_tick(Robot *robot, SensorCtx *c)
     return 0;
 }
 
+/* 关节 6 收尾：成功则清位置(0x00D2)，失败则急停，最后恢复使能与报警设置。 */
 static void sensor6_finish(Robot *robot, SensorCtx *c)
 {
     if (c->done) {
@@ -578,6 +622,7 @@ static void sensor6_finish(Robot *robot, SensorCtx *c)
 
 static void home_goto_pose(Robot *robot, int only_joint);
 
+/* 跑关节 6 传感器回零状态机直到完成或失败，完成后统一转角到 home 位姿。 */
 static ErrCode home_joint6(Robot *robot)
 {
     SensorCtx c;
@@ -594,6 +639,9 @@ static ErrCode home_joint6(Robot *robot)
 }
 
 
+/* 把关节统一转到 home 位姿（0,0,90,0,0,0），只等最慢的一根。
+ * 各轴用相对位移下发；轮询 1ms。only_joint=0 表示全部，1~6 表示只动某一轴。
+ * 用 home_forward_rpm() 取速度 ⇒ 关节 6 走 100rpm 而不是 0。 */
 static void home_goto_pose(Robot *robot, int only_joint)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
@@ -675,6 +723,11 @@ static void home_goto_pose(Robot *robot, int only_joint)
     }
 }
 
+/* 全机回零（CLI `home`）。
+ * 顺序有讲究：堵转轴 2,3,5,1 一起起转，关节 3 到位后才启动 4
+ *   （J4 与 J3 会互相顶，同时转会顶死）；关节 6 走传感器回零，与上面并行。
+ * 全部成功 → 统一转角到 home 位姿；只要有失败轴就跳过统一转角（只恢复使能）。
+ * 返回 ERR_TIMEOUT 表示有轴没归零。 */
 ErrCode robot_home(Robot *robot)
 {
     const int group_stall[] = {2, 3, 5, 1};
@@ -794,6 +847,7 @@ ErrCode robot_home(Robot *robot)
     return any_fail ? ERR_TIMEOUT : ERR_NONE;
 }
 
+/* 单轴回零（CLI `home N`）。关节 6 走传感器回零，其余走堵转回零 + 退让。 */
 ErrCode robot_home_single(Robot *robot, int joint)
 {
     ErrCode rc;
@@ -838,6 +892,9 @@ ErrCode robot_home_single(Robot *robot, int joint)
     return ERR_NONE;
 }
 
+/* ⚠️ 死代码：`src/` 内没有任何调用者（已在 memory 记录，未获放行前不改）。
+ * 另有一处真 bug：速度取 `stall[joint].speed_rpm`，关节 6 时为 0 ⇒ 会干等 20s。
+ * 正确写法见同文件 home_forward_rpm()。 */
 ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed_rpm)
 {
     int saved[6];

@@ -9,6 +9,8 @@ typedef struct Monitor Monitor;
 
 #define MONITOR_DEFAULT_INTERVAL_MS 300u
 
+#define MONITOR_PARK_TIMEOUT_MS 500u
+
 Monitor *monitor_create(Robot *robot, const int stall_threshold_ma[6]);
 
 int monitor_stall_hit(int cur_ma, int threshold_ma);
@@ -26,6 +28,11 @@ int monitor_is_running(const Monitor *m);
 
 void monitor_pause(Monitor *m, int on);
 void monitor_pause_active(int on);
+
+void monitor_park(void);
+int  monitor_park_wait(int timeout_ms);
+
+long monitor_poll_count(void);
 
 int monitor_poll(Monitor *m);
 

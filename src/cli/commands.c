@@ -68,6 +68,11 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd);
 static void cmd_tabtest(Robot *robot, const ParsedCmd *cmd);
 static void cmd_busrate(Robot *robot, const ParsedCmd *cmd);
 
+/* 冲掉串口的收发缓冲，把【没人读走的残帧】清掉。
+ * 为什么需要：noread 下发只写不等响应 ⇒ 从站的回帧还挂在输入缓冲里，
+ * 会被下一笔读当成应答 ⇒ CRC 失败（症状：同一条命令行 diag 后紧跟 busrate，
+ * busrate 第一笔读报"关节1 不在线"；分开两次启动进程反而正常）。
+ * ⚠️ 调用前必须先 Sleep 一会儿让残帧到齐，再 flush —— 顺序不能反。 */
 static void bus_drain(void)
 {
     const CommOps *ops = modbus_comm_get();
@@ -80,6 +85,9 @@ static void cmd_alarm(Robot *robot, const ParsedCmd *cmd);
 static void cmd_looptest(Robot *robot, const ParsedCmd *cmd);
 static void cmd_drvbaud(Robot *robot, const ParsedCmd *cmd);
 
+/* 点 x 到线段 ab 的距离（mm），用来算"实际轨迹偏离理想直线多少"。
+ * t 夹到 [0,1] ⇒ 量的是到【线段】而不是到无限长直线的距离。
+ * ab 退化成一点时返回 0。 */
 static double movl_point_dev_mm(const double x[3], const double a[3], const double b[3])
 {
     double ab[3], ab2 = 0.0, t = 0.0, d2 = 0.0;
@@ -107,6 +115,8 @@ static MotorMonitor *g_motor_mon = NULL;
 
 static Monitor *g_mon = NULL;
 
+/* `motor` 命令的实时打印线程：每约 1 秒打一轮六轴的
+ * 脉冲 / 机械角 / 速度 / 电流，按 q 停止（见 cmd_motor_running）。 */
 static DWORD WINAPI motor_monitor_thread(LPVOID arg)
 {
     MotorMonitor *mm = (MotorMonitor *)arg;
@@ -143,6 +153,7 @@ static DWORD WINAPI motor_monitor_thread(LPVOID arg)
     return 0;
 }
 
+/* 建电机监控对象（不启线程）。 */
 static MotorMonitor *motor_monitor_create(Robot *robot)
 {
     MotorMonitor *mm = (MotorMonitor *)calloc(1, sizeof(MotorMonitor));
@@ -153,6 +164,7 @@ static MotorMonitor *motor_monitor_create(Robot *robot)
     return mm;
 }
 
+/* 起监控线程。已在跑则返回 0。 */
 static int motor_monitor_start(MotorMonitor *mm)
 {
     if (mm == NULL || mm->thread != NULL) return 0;
@@ -161,6 +173,7 @@ static int motor_monitor_start(MotorMonitor *mm)
     return mm->thread != NULL;
 }
 
+/* 停监控线程（最多等 2 秒），关句柄。 */
 static void motor_monitor_stop(MotorMonitor *mm)
 {
     if (mm == NULL || mm->thread == NULL) return;
@@ -170,6 +183,7 @@ static void motor_monitor_stop(MotorMonitor *mm)
     mm->thread = NULL;
 }
 
+/* 停 + 释放对象。 */
 static void motor_monitor_destroy(MotorMonitor *mm)
 {
     if (mm == NULL) return;
@@ -177,11 +191,13 @@ static void motor_monitor_destroy(MotorMonitor *mm)
     free(mm);
 }
 
+/* 监控线程是否在跑。 */
 static int motor_monitor_is_running(MotorMonitor *mm)
 {
     return (mm != NULL && mm->thread != NULL) ? 1 : 0;
 }
 
+/* 给 main.c 查"电机监控是否在跑"（决定 q 键怎么处理）。 */
 int cmd_motor_running(void)
 {
     return motor_monitor_is_running(g_motor_mon);
@@ -195,11 +211,13 @@ typedef struct {
     double sum;
 } CurStat;
 
+/* 清空电流统计。 */
 static void curstat_reset(CurStat *s)
 {
     s->n = 0; s->min = 0; s->max = 0; s->sum = 0.0;
 }
 
+/* 累加一个电流样本；负值 = 读失败，直接丢弃（不污染 min/max/均值）。 */
 static void curstat_add(CurStat *s, int v)
 {
     if (v < 0) return;
@@ -213,6 +231,7 @@ static void curstat_add(CurStat *s, int v)
     s->n++;
 }
 
+/* 电流均值；无样本返回 0。 */
 static double curstat_mean(const CurStat *s)
 {
     return (s->n > 0) ? (s->sum / (double)s->n) : 0.0;
@@ -224,6 +243,9 @@ static double curstat_mean(const CurStat *s)
 #define CURTEST_MIN_SAMPLES   8
 #define CURTEST_MOVE_TIMEOUT  15000u
 
+/* 让轴走到 target_deg 并【全程采电流】，返回 0=到位 / 1=超时 / -1=下发失败。
+ * ⚠️ 到位判据用的是 STAT_INPOS(bit12)，那是【粘滞位】——所以额外要求
+ *   采样数 >=8 且已过 250ms 起始掩码，避免刚下发就被判"已到位"。 */
 static int curtest_sample_move(Robot *robot, int j, double target_deg,
                                double rpm, CurStat *mv)
 {
@@ -245,23 +267,40 @@ static int curtest_sample_move(Robot *robot, int j, double target_deg,
     return 1;
 }
 
+/* `curtest` 电流实测。
+ *   无参数：六轴【静止保持电流】采 20 轮（一动不动），末尾附各轴报警。
+ *   带轴号 `curtest:N:摆幅:转速`：来回摆一个角度，量【运动峰值电流】，
+ *     并给出建议堵转阈值区间（峰值 x1.5 ~ x2.0）——只是参考，最终由用户定。
+ * ⚠️ 会动臂。轴根本没动时本次测量标为【作废】（读到的只是切断输出后的残值）。
+ * 典型静止值 ~500/499/495/385/371/254 mA（J1..J6）。 */
 static void cmd_curtest(Robot *robot, const ParsedCmd *cmd)
 {
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
 
     if (cmd->joint == 0) {
         CurStat st[ROBOT_JOINT_COUNT];
         int j, r;
 
         for (j = 0; j < ROBOT_JOINT_COUNT; j++) curstat_reset(&st[j]);
-        printf("curtest 静止采样：六轴【使能保持电流】（%d 轮 ≈ %d ms，一动不动）\n",
-               CURTEST_IDLE_ROUNDS, CURTEST_IDLE_ROUNDS * 90);
-        for (r = 0; r < CURTEST_IDLE_ROUNDS; r++) {
-            for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
-                if (robot_is_masked(robot, j)) continue;
-                curstat_add(&st[j - 1], robot_read_current_ma(robot, j));
+        printf("curtest 静止采样：六轴【使能保持电流】（%d 轮，一动不动）\n",
+               CURTEST_IDLE_ROUNDS);
+        {
+            LARGE_INTEGER f, a, b;
+            double el_ms;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&a);
+            for (r = 0; r < CURTEST_IDLE_ROUNDS; r++) {
+                for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
+                    if (robot_is_masked(robot, j)) continue;
+                    curstat_add(&st[j - 1], robot_read_current_ma(robot, j));
+                }
             }
+            QueryPerformanceCounter(&b);
+            el_ms = (f.QuadPart > 0)
+                        ? (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart
+                        : 0.0;
+            printf("（实测 %.1f ms / %d 轮 ⇒ 每轮 %.2f ms）\n",
+                   el_ms, CURTEST_IDLE_ROUNDS, el_ms / (double)CURTEST_IDLE_ROUNDS);
         }
         printf("\n%-8s %10s %10s %10s %8s\n", "关节", "最小mA", "均值mA", "最大mA", "样本");
         for (j = 1; j <= ROBOT_JOINT_COUNT; j++) {
@@ -383,6 +422,9 @@ static void cmd_curtest(Robot *robot, const ParsedCmd *cmd)
     monitor_pause_active(0);
 }
 
+/* `stall` 查/设堵转阈值（mA）。`stall:N:MA` 设某轴，0 = 该轴不检测。
+ * 只改本次运行；要持久化写 ini [stall] 后重启。
+ * 六轴全为 0 时提示"碰撞保护未启用"。 */
 static void cmd_stall(Monitor *mon, const ParsedCmd *cmd)
 {
     int j;
@@ -440,6 +482,8 @@ static void cmd_stall(Monitor *mon, const ParsedCmd *cmd)
 
 static int g_pose_invalid = 0;
 
+/* 扫六轴机械角，返回第一个越软限位（容差 ±1°）的轴号，0 = 都在限位内。
+ * 读取失败的轴跳过。 */
 static int pose_scan_bad(Robot *robot)
 {
     const double lmin[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
@@ -460,6 +504,10 @@ static int pose_scan_bad(Robot *robot)
     return 0;
 }
 
+/* 位姿闸门检查：有轴越软限位 ⇒ 置 g_pose_invalid 并锁住
+ * MoveJ / MoveL / curtest(带轴) / tabtest。
+ * 依据：0x00D2 零点寄存器是 RAM、无记忆，驱动器掉电即清零 ⇒
+ * 越限位几乎一定是零点丢了，此时所有位姿读数都不可信。返回越限轴号。 */
 int cmd_pose_check(Robot *robot)
 {
     int bad = pose_scan_bad(robot);
@@ -474,6 +522,7 @@ int cmd_pose_check(Robot *robot)
     return bad;
 }
 
+/* `poseok`：强制解锁位姿闸门。若零点真的丢了，后续运动全是错的 —— 后果自负。 */
 void cmd_pose_unlock(Robot *robot)
 {
     int bad = pose_scan_bad(robot);
@@ -489,6 +538,10 @@ void cmd_pose_unlock(Robot *robot)
 }
 
 
+/* 命令总入口：先过位姿闸门，再按 cmd->type 分发到各 cmd_* 实现。
+ * 返回 1 = 请求退出程序（CMD_EXIT）。
+ * ⚠️ CLI 是【单线程】（main.c 一个 fgets → cmd_dispatch 循环）⇒ 命令天然串行，
+ *   不存在并发；唯一并发者是后台监控线程，每条命令开头会先把它挂起。 */
 int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
 {
     int j;
@@ -521,8 +574,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         break;
     }
     case CMD_MOVEJ: {
-        monitor_pause_active(1);
-        Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+        monitor_park();
         if (cmd->num_joints > 1) {
             movej_multi(robot, cmd);
         } else {
@@ -561,8 +613,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         break;
     }
     case CMD_MOVEL: {
-        monitor_pause_active(1);
-        Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+        monitor_park();
         cmd_movel(robot, cmd);
         monitor_pause_active(0);
         break;
@@ -686,6 +737,8 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     return 0;
 }
 
+/* `zero`：打印当前零点、当前六轴角度，以及"若把当前位姿当作 0,0,90,0,0,0，
+ * 新零点应该是多少"。只算不写，写要显式用 zero:save。 */
 void cmd_zero(Robot *robot)
 {
     const double *zero = joint_zero_get();
@@ -714,6 +767,7 @@ void cmd_zero(Robot *robot)
     if (!all_ok) printf("[警告] 部分关节读取失败，显示值仅供参考\n");
 }
 
+/* `zero:save:...`：把六个零点同时写进内存与 ini（ini 写失败只告警，内存仍生效）。 */
 void cmd_zero_save(Robot *robot, const double vals[6])
 {
     (void)robot;
@@ -731,6 +785,12 @@ void cmd_zero_save(Robot *robot, const double vals[6])
 static double g_tlm_mech[6] = {0};
 static int    g_tlm_mech_ok = 0;
 
+/* 多关节运动的下发（含全部安全校验）。返回需要等待的轴数。
+ * 校验顺序：① 目标角必须是有限数（NaN/Inf 会被转成 ±2147483647 步，
+ *   电机朝天文数字猛冲并超时急停 —— 曾实测甩出 34mm）；② 关节号合法；
+ *   ③ 目标在软限位内；④ 本次位移不超单步上限 max_step_deg。
+ * 配速：按位移比例分配 —— 位移最大的轴 = 设定速度，其余按比例，下限 1rpm，
+ * 这样各轴同时到达。set_profile=0 时还会跳过"速度几乎没变"的重复写入。 */
 static int movej_issue(Robot *robot, int num_joints, const int joints[6],
                        const double angles[6], const double *ref_angles,
                        double speed, int accel_ms, int decel_ms, int set_profile,
@@ -872,8 +932,10 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
 static double g_dev_peak = 0.0;
 static int    g_dev_seen = 0;
 
+/* 清掉末端偏差峰值记录。 */
 static void dev_reset(void) { g_dev_peak = 0.0; g_dev_seen = 0; }
 
+/* 打"实测最大偏差"（全程峰值）。没采过样就什么都不打。 */
 static void dev_report(const char *tag)
 {
     if (!g_dev_seen) return;
@@ -881,6 +943,8 @@ static void dev_report(const char *tag)
            (tag != NULL) ? tag : "", g_dev_peak);
 }
 
+/* MoveL 收尾：打实际耗时 / 预计耗时，比值超出 1 的部分就是段间归零吃掉的
+ * （每段末独立 ACC+DEC，实测 80+90 = 170ms）。 */
 static void sync_finish(uint32_t t0, double total_dt)
 {
     double actual = (double)(GetTickCount() - t0) / 1000.0;
@@ -891,6 +955,7 @@ static void sync_finish(uint32_t t0, double total_dt)
                actual, total_dt, actual / total_dt);
 }
 
+/* 原地刷新一行定宽状态（\r + 补齐到 MOVEJ_STATUS_W 列）。 */
 static void status_line(const char *fmt, ...)
 {
     char buf[256];
@@ -902,12 +967,21 @@ static void status_line(const char *fmt, ...)
     fflush(stdout);
 }
 
+/* 擦掉那行状态。 */
 static void status_clear(void)
 {
     printf("\r%*s\r", MOVEJ_STATUS_W, "");
     fflush(stdout);
 }
 
+/* 轮询等到位（MOVEJ_POLL_MS=10ms 一轮，超时 MOVEJ_TIMEOUT_MS=60s）。
+ * 三件事：
+ *   ① 到位 = 位置落在 target ± MOVEJ_INPOS_TOL(100 步) 内；
+ *   ② 【读回异常检测】连续 3 轮有轴读回越软限位 ⇒ 判定为总线/读回异常
+ *      （2026-09-19 实测：六轴读回同时变越限值、末端偏差冻结 258.92mm）
+ *      ⇒ 不等超时，立即急停并提示先查 USB-RS485 与驱动器供电；
+ *   ③ 有 line_a/line_b 时顺便算末端到理想直线的偏差峰值，并发 telemetry。
+ * 超时则逐轴急停并打印"还差多少度/多少步"。 */
 static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
                        uint8_t pend[7], int remain,
                        const double *line_a, const double *line_b)
@@ -1020,6 +1094,7 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
     status_clear();
 }
 
+/* 采一次末端实际位置并更新偏差峰值（只读，不动臂）。任一轴读失败直接返回。 */
 static void movl_dev_sample(Robot *robot, const double *line_a, const double *line_b)
 {
     const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
@@ -1043,6 +1118,7 @@ static void movl_dev_sample(Robot *robot, const double *line_a, const double *li
     }
 }
 
+/* 一次下发 + 等到位（movej_issue → movej_wait 的薄封装）。 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
                          const double angles[6], double speed,
                          int accel_ms, int decel_ms,
@@ -1056,6 +1132,8 @@ static void movej_joints(Robot *robot, int num_joints, const int joints[6],
     movej_wait(robot, joints, tgt, pend, remain, line_a, line_b);
 }
 
+/* 只写不等响应的下发（帧间留 gap_ms）。
+ * ⚠️ 会留下没人读走的回帧，必须在合适的地方 bus_drain() 冲掉。 */
 static void movej_issue_noread(Robot *robot, const int joints[6], int32_t tgt[7],
                                int gap_ms)
 {
@@ -1071,6 +1149,8 @@ static void movej_issue_noread(Robot *robot, const int joints[6], int32_t tgt[7]
     }
 }
 
+/* 按本段各轴位移比例分配速度：位移最大的轴 = seg_rpm，其余按比例（下限 1rpm）。
+ * 每段下发前都要调一次 —— 否则某轴会提前停住不动（旧 bug 的典型症状）。 */
 static void movl_set_seg_speed(Robot *robot, const int joints[6],
                                const double qa[6], const double qb[6],
                                const uint16_t red[6], double seg_rpm)
@@ -1092,6 +1172,8 @@ static void movl_set_seg_speed(Robot *robot, const int joints[6],
     }
 }
 
+/* 取 ini [movel] acc_floor_ms，缺键兜底 MOVL_ACC_FLOOR_MS(60ms)。
+ * 作用：过短的减速会丢步（表现为走到一半卡住），所以 ACC/DEC 有下限。 */
 static int movl_acc_floor_ms(void)
 {
     double v;
@@ -1100,6 +1182,8 @@ static int movl_acc_floor_ms(void)
     return MOVL_ACC_FLOOR_MS;
 }
 
+/* 取 ini [movel] seg_ramp_ratio，兜底 3.0。
+ * 含义：段节拍至少要有 (ACC+DEC) x 该倍率，否则每段爬不完坡就要刹车。 */
 static double movl_seg_ramp_ratio(void)
 {
     double v;
@@ -1108,6 +1192,7 @@ static double movl_seg_ramp_ratio(void)
     return MOVL_SEG_RAMP_RATIO;
 }
 
+/* 取 ini [movel] stream_beat_s，兜底 0.10s（stream 模式的节拍）。 */
 static double movl_stream_beat_s(void)
 {
     double v;
@@ -1116,6 +1201,7 @@ static double movl_stream_beat_s(void)
     return MOVL_STREAM_BEAT_S;
 }
 
+/* 多关节 MoveJ（`MoveJ:J1..J6:角度..:速度:ACC:DEC`）：把 ACC/DEC 抬到安全下限后下发。 */
 static void movej_multi(Robot *robot, const ParsedCmd *cmd)
 {
     int joints[6], idx = 0;
@@ -1139,6 +1225,9 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
                  cmd->speeds[0], acc, dec, NULL, NULL);
 }
 
+/* 取 ini [movel] noread_gap_ms，兜底 MOVEJ_NR_GAP_MS(4)。
+ * ⚠️ 现状：noread 已无优势（6x(0.15+2)≈13ms 反而比等响应 10.2ms 慢且没有确认），
+ *   ini 里保持 0 是对的；实测安全帧间隔是 2ms（0ms 撞车）。 */
 static int movl_noread_gap_ms(void)
 {
     FILE *f;
@@ -1170,6 +1259,7 @@ static int movl_noread_gap_ms(void)
     return MOVEJ_NR_GAP_MS;
 }
 
+/* 取六轴堵转阈值：优先监控器（含 stall: 临时改过的）→ ini → 编译期默认表。 */
 static void movl_stall_thresholds(int th[6])
 {
     const int def[ROBOT_JOINT_COUNT] = ROBOT_STALL_CURRENT_MA_TABLE;
@@ -1184,6 +1274,7 @@ static void movl_stall_thresholds(int th[6])
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) th[i] = def[i];
 }
 
+/* 是否至少有一个轴启用了过流保护。全 0 ⇒ 关闭。 */
 static int movl_stall_on(const int th[6])
 {
     int i;
@@ -1193,6 +1284,10 @@ static int movl_stall_on(const int th[6])
     return 0;
 }
 
+/* MoveL 分段过流保护：任一轴实时电流 >= 自身阈值（100%）就急停【全部】关节，
+ * 返回 1；否则返回 0。
+ * ⚠️ 只在 sync 模式的分段点被调用；默认的 smooth 模式【全程不查】⇒
+ *   想要碰撞保护必须显式写 `movel ...,sync`。 */
 static int movl_stall_guard(Robot *robot, const int th[6])
 {
     double worst = 0.0;
@@ -1221,6 +1316,14 @@ static int movl_stall_guard(Robot *robot, const int th[6])
     return 0;
 }
 
+/* 直线规划：笛卡尔插补 → 逐点 IK → 时间表；再做两道安全闸。
+ * 返回 0 成功 / -1 插补失败 / -2 IK 失败或越软限位 / -3 时间表失败 /
+ *      -4 单段跳变超上限（整条 MoveL 不下发）。
+ * ★ 跳变闸：> max_jump_deg(30°) 直接拒绝；> MOVL_JUMP_WARN_DEG(15°) 只警告。
+ *   为什么这么严：时间表会按关节限速把这一段拉长到十几秒，期间末端只挪 1mm
+ *   而 J4 转过 90° —— 臂会以完全没预料到的大幅度慢慢扫过去。
+ *   实测：home 位形沿 +Y 走 30mm，第 1 段就要 J4 转 89.98°。
+ *   成因通常是路径擦过腕部奇异（J5≈0）或逆解分支翻转。 */
 static int movl_plan(const double start_pose[6], const double end_pose[6],
                      const double q_start[6], const JointLimit *limits,
                      double dist_mm, double step_mm, const double vmax[6],
@@ -1283,6 +1386,8 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
     return 0;
 }
 
+/* 采样 24 个中间点，估算"整段走关节空间直线"偏离笛卡尔直线的最大弓高(mm)。
+ * 用途：sync 模式据此决定要分几段（弓高 ≈ 0.001 x 段长²）。 */
 static double movl_bow_mm(const double q0[6], const double q1[6],
                           const double a[3], const double b[3])
 {
@@ -1313,6 +1418,8 @@ static double movl_bow_mm(const double q0[6], const double q1[6],
 }
 
 
+/* 取 ini [safety] max_step_deg（单次运动位移上限），兜底 720°。
+ * 超限通常意味着单位/符号/坐标系搞错了，真发出去就是电机猛冲 + 超时急停。 */
 static double movl_max_step_deg(void)
 {
     double v;
@@ -1320,6 +1427,7 @@ static double movl_max_step_deg(void)
     return MOVEJ_MAX_STEP_DEG;
 }
 
+/* 取 ini [safety] max_jump_deg（单个插补段内单关节跳变上限），兜底 30°。 */
 static double movl_max_jump_deg(void)
 {
     double v;
@@ -1327,6 +1435,8 @@ static double movl_max_jump_deg(void)
     return MOVL_JUMP_MAX_DEG;
 }
 
+/* 取 ini [movel] bow_mm（允许的几何弓高预算），兜底 MOVL_SYNC_BOW_MM(2.0mm)。
+ * sync 模式：整段弓高 <= 预算就不分段（1 段），否则按 sqrt 缩到 L 再算段数。 */
 static double movl_bow_budget(void)
 {
     FILE *f;
@@ -1360,6 +1470,7 @@ static double movl_bow_budget(void)
     return MOVL_SYNC_BOW_MM;
 }
 
+/* 两个角度之差，归一到 (-180, 180]。用于姿态比较，避免 359°/-1° 被判成差 360°。 */
 static double ang_delta_deg(double a, double b)
 {
     double d = fmod(a - b, 360.0);
@@ -1368,6 +1479,7 @@ static double ang_delta_deg(double a, double b)
     return d;
 }
 
+/* 取 ini [movel] tip_warn_deg（姿态不一致告警阈值），兜底 5°。 */
 static double movl_tip_warn_deg(void)
 {
     FILE *f;
@@ -1399,6 +1511,13 @@ static double movl_tip_warn_deg(void)
     return MOVL_TIP_WARN_DEG;
 }
 
+/* 起点/终点姿态不一致时告警：算出法兰倾角变化与笔尖空间摆幅。
+ * 为什么必须有：起点姿态由 FK 得、终点姿态全取用户输入；两者不一致 ⇒
+ * SLERP 会一路拧姿态 ⇒ 笔尖绕法兰摆 tool_length x sin(θ)。
+ * ★ 80mm 线实测：姿态抄【当前 getpos 原值】⇒ 偏差 0.0000mm；
+ *   抄 home 的 115,90,115 ⇒ 7.71mm。而法兰坐标直线度恒 0.0000mm
+ *   ⇒ 只看法兰坐标永远发现不了这个问题。
+ * 提示用户：Rx,Ry,Rz 要抄 getpos 打印的原值，含负号、含 -0.00。 */
 static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
 {
     const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1451,6 +1570,12 @@ static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
     printf("       （告警阈值 %.1f°，ini [movel] tip_warn_deg 可调）\n", warn);
 }
 
+/* `movel X,Y,Z[,Rx,Ry,Rz] [SPD,ACC,DEC] [keep][,模式]` 主流程。
+ * 模式：smooth(默认，整段一次下发) / sync(按弓高分段+逐航点等到位)
+ *       / step(1mm 弦) / stream(不等+每节拍重设速度)。
+ * smooth 的代价：① 走关节空间直线（弓高=整段）② 全程不查过流
+ *   ⇒ 想要碰撞保护必须显式写 `,sync`。
+ * 姿态：不给 Rx,Ry,Rz 或写 keep ⇒ 沿用当前姿态（避免 SLERP 拧姿态）。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
     const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1865,6 +1990,9 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     }
 }
 
+/* 法兰法线（矩阵第三列 = 工具 Z 轴）与竖直方向的夹角（度）。0 = 垂直地面。
+ * ⚠️ home 位形是【水平】的（q2+q3+q5 = 90）⇒ 这里会算出 90°、显示"歪了"，
+ *   那是正常现象；绘图位姿 q2+q3+q5=180 才是竖直向下。 */
 static double flange_tilt_deg(const double pose[4][4])
 {
     static const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1874,6 +2002,9 @@ static double flange_tilt_deg(const double pose[4][4])
     return acos(c) * RAD2DEG;
 }
 
+/* `getpos`：读六轴机械角 + FK 出 X/Y/Z/Rx/Ry/Rz + 法兰倾角。
+ * ⚠️ 失联时会打出 0,0,90,0,0,0 这种【假数】⇒ 必须用 alarm 交叉验证；
+ *   报"部分关节无响应"时【禁止】下发运动。 */
 void cmd_getpos(Robot *robot)
 {
     static const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1907,6 +2038,7 @@ void cmd_getpos(Robot *robot)
     if (!all_ok) printf("[警告] 部分关节读取失败，坐标按读取值计算\n");
 }
 
+/* `fk:J1..J6`：正解，并逐关节打印其原点在基座系里的坐标（臂形）。 */
 void cmd_fk(const ParsedCmd *cmd)
 {
     static const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1952,18 +2084,34 @@ void cmd_fk(const ParsedCmd *cmd)
     printf("\n");
 }
 
+/* `diag`：总线体检（只读 J1 位置，不动臂）。
+ * 输出：后台巡检停住耗时、巡检累计轮数、flush/write/read/单事务耗时、
+ *   20 轮"连读 J1..J6"的逐轮数据、只写不读对照、以及线上/周转/流水线推算。
+ * ★ N=10（曾为 30）：噪声反推 sigma_单事务 ≈ 0.053ms ⇒ N=10 的 SEM 约 1.0%，
+ *   而"两种测法互相印证"的判据阈值是 5% ⇒ 有 5 倍余量。
+ * ★ 判据：`后台巡检停住` 预期 0.1~30ms（旧版是固定盲等 320ms）；
+ *   `后台巡检累计` 间隔 5 秒敲两次应涨约 15，不涨 ⇒ 监控被永久挂起。 */
 void cmd_diag(Robot *robot, const ParsedCmd *cmd)
 {
     (void)cmd;
-    const int N = 30;
+    const int N = 10;
     uint32_t n = 0, n_nr = 0;
     double fl = 0.0, wr = 0.0, rd = 0.0, tot = 0.0, nr = 0.0;
+    double park_ms = 0.0;
     int i, ok = 0;
 
     if (robot == NULL) return;
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    {
+        LARGE_INTEGER f, a, b;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&a);
+        monitor_park();
+        QueryPerformanceCounter(&b);
+        park_ms = (f.QuadPart > 0)
+                      ? (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart
+                      : 0.0;
+    }
     bus_drain();
 
     modbus_stats_reset();
@@ -1976,6 +2124,9 @@ void cmd_diag(Robot *robot, const ParsedCmd *cmd)
     const double tot_rd = tot;
 
     printf("总线体检：%u 次完整事务（读 J1 位置，只读不动臂）\n", n);
+    printf("    后台巡检停住       %7.2f ms   ← 旧版是固定盲等 320 ms\n", park_ms);
+    printf("    后台巡检累计       %7ld 轮   ← 连敲两次 diag 应看到它变大\n",
+           monitor_poll_count());
     printf("    flush (PurgeComm)  %7.2f ms\n", fl);
     printf("    write  (下发请求)  %7.2f ms\n", wr);
     printf("    read   (等响应)    %7.2f ms   ← 通常就是大头\n", rd);
@@ -1983,10 +2134,13 @@ void cmd_diag(Robot *robot, const ParsedCmd *cmd)
     printf("    一轮 6 轴 %7.1f ms  ⇒  理论刷新率 %6.1f Hz\n",
            tot * 6.0, 1000.0 / (tot * 6.0));
 
+    double round_ms = 0.0;
     {
-        const int R = 10;
+        const int R = 20;
+        double rt[20], srt[20];
+        double sum = 0.0, head = 0.0, tail = 0.0;
         LARGE_INTEGER freq, a, b;
-        double sum = 0.0;
+
         QueryPerformanceFrequency(&freq);
         for (i = 0; i < R; i++) {
             int j;
@@ -1996,12 +2150,35 @@ void cmd_diag(Robot *robot, const ParsedCmd *cmd)
                 (void)p;
             }
             QueryPerformanceCounter(&b);
-            sum += (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            rt[i] = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            sum += rt[i];
+            if (i < 5) head += rt[i];
+            if (i >= R - 5) tail += rt[i];
         }
+        round_ms = sum / R;
+        for (i = 0; i < R; i++) srt[i] = rt[i];
+        for (i = 1; i < R; i++) {
+            double v = srt[i];
+            int m = i - 1;
+            while (m >= 0 && srt[m] > v) { srt[m + 1] = srt[m]; m--; }
+            srt[m + 1] = v;
+        }
+
         printf("实测一轮：%d 次\"连读 J1..J6\"，平均 %7.2f ms  ⇒  刷新率 %6.1f Hz\n",
                R, sum / R, 1000.0 / (sum / R));
-        printf("          对比推算值 %.2f ms（单事务×6）——两者差得越多，"
-               "说明批处理/调度的影响越大\n", tot_rd * 6.0);
+        printf("          对比推算值 %.2f ms（单事务×6）：差 %+.2f ms (%+.1f%%) ⇒ %s\n",
+               tot_rd * 6.0, sum / R - tot_rd * 6.0,
+               100.0 * (sum / R - tot_rd * 6.0) / (tot_rd * 6.0),
+               (fabs(sum / R - tot_rd * 6.0) < 0.05 * tot_rd * 6.0)
+                   ? "两种测法互相印证，轮数没把数字撑大"
+                   : "两者不一致，需要查");
+        printf("          逐轮：首轮 %.2f ｜ 末轮 %.2f ｜ 最快 %.2f ｜ 最慢 %.2f ｜ 中位 %.2f ms\n",
+               rt[0], rt[R - 1], srt[0], srt[R - 1], (srt[R / 2 - 1] + srt[R / 2]) / 2.0);
+        printf("          前 5 轮均值 %.2f ms ｜ 后 5 轮均值 %.2f ms ｜ 差 %+.2f ms (%+.1f%%)\n",
+               head / 5.0, tail / 5.0, tail / 5.0 - head / 5.0,
+               100.0 * (tail - head) / head);
+        printf("          ⇒ 这个差值若在 ±2%% 内，说明【轮数多少不影响单轮耗时】；\n"
+               "            若后段明显变慢，才需要怀疑 USB 积压/驱动累积\n");
     }
     {
         int32_t pos0 = motor_read_position(robot, 1, &ok);
@@ -2022,19 +2199,27 @@ void cmd_diag(Robot *robot, const ParsedCmd *cmd)
     }
     {
         uint32_t baud_now = serial_get_baud();
-        double wire;
+        double wire, t_drv, pip, have;
         if (baud_now == 0) baud_now = MODBUS_BAUDRATE;
         wire = 21.0 * 10.0 / (double)baud_now * 1000.0;
+        t_drv = tot_rd - wire;
+        if (t_drv < 0.0) t_drv = 0.0;
+        pip = wire * 6.0 + t_drv;
+        have = (round_ms > 0.0) ? round_ms : tot_rd * 6.0;
         printf("参考：%u bps 下单事务纯线上时间 %.2f ms（21 字节 × 10 bit）\n",
                (unsigned)baud_now, wire);
         printf("      实测/线上 = %.1f 倍 ⇒ 其余全是等待与系统开销\n",
                (wire > 0.0) ? (tot_rd / wire) : 0.0);
+        printf("      反推从站周转 ≈ %.2f ms/笔（= 单事务 − 线上），占单事务 %.0f%%\n",
+               t_drv, 100.0 * t_drv / ((tot_rd > 0.0) ? tot_rd : 1.0));
         printf("      转换器吞吐上界约 %.0f 事务/秒，当前实跑约 %.0f 事务/秒\n",
                1000.0 / wire, 1000.0 / ((tot_rd > 0.0) ? tot_rd : 1.0));
-        printf("      单总线 %u bps 下【六轴刷新率天花板】约 %.0f Hz（读写事务，等响应）\n",
-               (unsigned)baud_now, 1000.0 / ((wire + 0.30) * 6.0));
-        printf("      改\"只写不等响应\"的上界约 %.0f Hz（未计从站响应占线时间）\n",
-               1000.0 / (nr * 6.0));
+        printf("      ⇒【等响应】下界 = 6×单事务 = %.2f ms ⇒ %.1f Hz，实测 %.2f ms（已用掉 %.0f%%）\n",
+               tot_rd * 6.0, 1000.0 / (tot_rd * 6.0), have, 100.0 * (tot_rd * 6.0) / have);
+        printf("      ⇒【流水线】周转由 6 次摊成 1 次：%.2f + %.2f = %.2f ms ⇒ %.1f Hz（%.1f 倍，未验证）\n",
+               wire * 6.0, t_drv, pip, 1000.0 / pip, (tot_rd * 6.0) / pip);
+        printf("      只写不读 %.2f ms/笔 ≠ 快 %.1f 倍：从站仍要 %.2f ms 周转并占线回帧\n",
+               nr, (nr > 0.0) ? tot_rd / nr : 0.0, t_drv);
     }
     printf("\n");
 
@@ -2047,6 +2232,7 @@ done:
 #define PIPE_RESP_LEN   9
 #define PIPE_READ_MS    10
 
+/* 用 QPC 忙等指定微秒数（比 Sleep 精确，Sleep 最小粒度是 1ms 量级）。 */
 static void pipe_spin_us(double us)
 {
     LARGE_INTEGER f, a, b;
@@ -2063,6 +2249,14 @@ static void pipe_spin_us(double us)
     }
 }
 
+/* `pipe[:轮数[:间隔us]]`：流水线批量读探针（只读位置，不动臂）。
+ * 做法：先连发 6 个读请求，再收 6 个响应，按从站地址解复用。
+ * 依据：请求只占 0.09ms、驱动器周转要 1.47ms ⇒ 中间约 1.3ms 总线空闲；
+ *   robot_internal.h 里"下一帧发出前上一帧响应必须已发完"这条约束从未被实测。
+ * 扫描表 {0,50,100,200,300,500,1000,2000}us。
+ * ★ 判据：只要某一档【丢帧=0 且一轮耗时 < 基线】⇒ 流水线可行；
+ *   所有档都丢帧 ⇒ 驱动器处理响应期间不收新帧，这条路作废。
+ * 基线（921600）一轮 10.2ms ⇒ 97.9Hz。 */
 void cmd_pipe(Robot *robot, const ParsedCmd *cmd)
 {
     static const int gaps_us[] = { 0, 50, 100, 200, 300, 500, 1000, 2000 };
@@ -2081,8 +2275,7 @@ void cmd_pipe(Robot *robot, const ParsedCmd *cmd)
         return;
     }
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
     bus_drain();
 
     QueryPerformanceFrequency(&freq);
@@ -2203,6 +2396,11 @@ void cmd_pipe(Robot *robot, const ParsedCmd *cmd)
 #define TAB_DATA_ADDR   500
 #define TAB_N_POINT     3
 
+/* ⚠️ `tabtest` 会【动臂】，不是只读命令！
+ * 做法：往驱动器编程区写 3 段相对位移表（TAB_N_POINT=3），再写 0x00DD=0x8001
+ *   让驱动器自己走，同时轮询实时速度看"段间速度是否回落"。
+ * 判读：一次 0x00DD 走了 >2.5 段 ⇒ 表格模式成立；只走 1 段 ⇒ 省不掉总线往返。
+ * 实测结论：手册 54 节"每次执行完指针减 1"⇒ 一次只执行一个数据点 ⇒ A 方案不成立。 */
 static void cmd_tabtest(Robot *robot, const ParsedCmd *cmd)
 {
     const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
@@ -2231,8 +2429,7 @@ static void cmd_tabtest(Robot *robot, const ParsedCmd *cmd)
     printf("  ⚠️ 轴会停在 +%.2f°（3×%.2f）处，确认行程内无障碍\n",
            3.0 * cmd->angle_deg, cmd->angle_deg);
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
 
     pos0 = motor_read_position(robot, j, &ok);
 
@@ -2299,9 +2496,15 @@ static void cmd_tabtest(Robot *robot, const ParsedCmd *cmd)
     monitor_pause_active(0);
 }
 
+/* `busrate[:N]`：RS485 总线极限速率实测（探针 = 把 0x00D8 写回原值，电机不动）。
+ * 五档：[1] 单轴读位置 [2] 单轴写+等响应 [3] 单轴只写不等 [4] 六轴一轮只写
+ *       [5] 六轴一轮读位置（= 整机真实更新率）。每档 N=10 次。
+ * N=10 的依据与 diag 同：σ_单事务≈0.053ms ⇒ SEM ±1.0%，判据阈值 5% ⇒ 5 倍余量。
+ * 实测（921600）：[1]/[2] 1.70ms(588Hz)｜[3] 0.15ms｜[5] 10.2ms ⇒ 97.9Hz。
+ * ⚠️ 提波特率只影响 [3]/[4]；[1]/[2]/[5] 的"等响应"不受它影响。 */
 static void cmd_busrate(Robot *robot, const ParsedCmd *cmd)
 {
-    const int N = 30;
+    const int N = 10;
     int j = (cmd != NULL && cmd->joint >= 1 && cmd->joint <= ROBOT_JOINT_COUNT)
                 ? cmd->joint : 1;
     int32_t v[ROBOT_JOINT_COUNT + 1] = {0};
@@ -2331,8 +2534,7 @@ static void cmd_busrate(Robot *robot, const ParsedCmd *cmd)
     printf("  探针 = 把 0x00D8(运行速度) 写回原值 ⇒ 电机不动、速度不变。在线 %d/6 轴\n",
            n_online);
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
     bus_drain();
     QueryPerformanceFrequency(&freq);
 
@@ -2436,6 +2638,7 @@ static const char *const kRtsNames[3] = {
     "TOGGLE(发送时高,默认)", "ENABLE(常高)", "DISABLE(常低)"
 };
 
+/* RTS 模式码 → 可读名字。 */
 static const char *rts_name(int mode)
 {
     int k;
@@ -2448,15 +2651,18 @@ static const char *rts_name(int mode)
 
 static SerialPort *g_loop_aux = NULL;
 
+/* looptest 辅口写（没开辅口返回 -1）。 */
 static int loop_aux_write(const uint8_t *buf, int len)
 {
     return (g_loop_aux != NULL) ? serial_write(g_loop_aux, buf, (size_t)len) : -1;
 }
+/* looptest 辅口读（没开辅口返回 -1）。 */
 static int loop_aux_read(uint8_t *buf, int cap, int timeout_ms)
 {
     return (g_loop_aux != NULL)
                ? serial_read(g_loop_aux, buf, (size_t)cap, (uint32_t)timeout_ms) : -1;
 }
+/* looptest 辅口冲缓冲。 */
 static void loop_aux_flush(void)
 {
     if (g_loop_aux != NULL) {
@@ -2473,6 +2679,8 @@ typedef struct {
     double tmin, tmax;
 } LoopStat;
 
+/* looptest 的单档测量：发一帧 13 字节、按需循环补齐读回（单次超时 50ms），
+ * 统计 一致/不一致/半帧/超时 与 平均、最小、最大往返耗时。 */
 static void loop_measure(int N, int (*wr)(const uint8_t *, int),
                          int (*rd)(uint8_t *, int, int), void (*fl)(void),
                          const uint8_t *tx, uint8_t *rx, LoopStat *st)
@@ -2515,6 +2723,7 @@ static void loop_measure(int N, int (*wr)(const uint8_t *, int),
     }
 }
 
+/* 打印 looptest 一档的结果，返回平均往返耗时（超时的样本不计入）。 */
 static double loop_report(const char *label, const LoopStat *st, int N)
 {
     int cnt = N - st->timeout;
@@ -2530,6 +2739,13 @@ static double loop_report(const char *label, const LoopStat *st, int N)
     return rtt;
 }
 
+/* `looptest[:N[:BAUD[:AUX]]]`：RS485 转换器纯工具测试（脱离电机）。
+ * 接线要求：A、B【悬空】—— 短接会让差分恒 0，一字节都收不到。
+ * 辅口模式（给 AUX 口名）：两个转换器 A-A / B-B 对接 + 共地，主口发辅口收。
+ * 无辅口时自动试 3 种 RTS 电平找能回环的那个。
+ * ⚠️ 会改波特率与 RTS ⇒ 跑它期间驱动器收到的全是垃圾帧，看起来"六轴全掉线"。
+ *   命令会自动恢复，但跑完必须敲一次 getpos 确认还在线，别直接接着运动。
+ * 实测 [2] 连发推帧 1.12ms/帧 ≈ 892Hz。 */
 static void cmd_looptest(Robot *robot, const ParsedCmd *cmd)
 {
     const CommOps *ops = modbus_comm_get();
@@ -2555,8 +2771,7 @@ static void cmd_looptest(Robot *robot, const ParsedCmd *cmd)
         tx[i] = (uint8_t)(0x11 + i * 7);
     }
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
 
     baud_orig = serial_get_baud();
     if (baud_orig == 0) {
@@ -2691,18 +2906,17 @@ static void cmd_looptest(Robot *robot, const ParsedCmd *cmd)
                t_burst, (t_burst > 1e-6) ? 1000.0 / t_burst : 0.0);
     } else {
         double rtt = (rtt_fwd > 1e-6) ? rtt_fwd : rtt_rev;
-        double drv = LOOP_REF_WITH_MOTOR_MS - rtt;
         if (aux_mode && rtt_fwd > 1e-6 && rtt_rev > 1e-6) {
             printf("  两个方向 %.2f / %.2f ms，接近 ⇒ 两个模块延迟相当\n", rtt_fwd, rtt_rev);
         }
         printf("  ★ 这个工具的最大往返频率 = %.1f Hz（一次完整往返 %.2f ms）\n",
                (rtt > 1e-6) ? 1000.0 / rtt : 0.0, rtt);
-        printf("  ⇒ 接电机单事务 %.1f ms − 回环 %.2f ms = 驱动器侧 %.2f ms（占 %.0f%%）\n",
-               LOOP_REF_WITH_MOTOR_MS, rtt, drv,
-               (LOOP_REF_WITH_MOTOR_MS > 1e-6) ? drv / LOOP_REF_WITH_MOTOR_MS * 100.0 : 0.0);
-        printf("     判据：\n");
-        printf("       回环 RTT ≪ 驱动器侧 ⇒ 瓶颈在驱动器，换转换器/提波特率收益有限\n");
-        printf("       回环 RTT ≈ 单事务   ⇒ 瓶颈真在工具，换转换器（判据=diag 的 read 段）才有用\n");
+        printf("  ⚠️ 不要拿「接电机单事务 %.1f ms − 回环 %.2f ms」算驱动器耗时：\n",
+               LOOP_REF_WITH_MOTOR_MS, rtt);
+        printf("     回环 RTT 含两次线上时间 + USB 往返，【不是】单事务的组成部分。\n");
+        printf("     单事务怎么拆（线上 / 从站周转 / USB栈），看 diag 末段那几行。\n");
+        printf("     这里只回答一件事：本工具往返能力 %.1f Hz，够不够用。\n",
+               (rtt > 1e-6) ? 1000.0 / rtt : 0.0);
         printf("     线上时间只占 %.3f ms（单向），其余是 USB 轮询粒度 + 转换器/驱动响应\n", wire);
         printf("     想再看「提波特率有没有用」：跑 looptest:%d:921600%s\n", N,
                aux_mode ? ":COM5（换成辅口名）" : "");
@@ -2745,6 +2959,9 @@ static const struct { int code; uint32_t baud; } kDrvBaudTab[] = {
     {11, 57600}, {12, 115200}, {13, 230400}, {14, 460800}, {15, 921600}
 };
 
+/* 驱动器 0x0009 档位码 → 波特率（手册 §6）。表外码返回 0。
+ * 1=300 … 11=57600 12=115200 13=230400 14=460800 15=921600。
+ * ⚠️ 没有 256000 这一档（值域 1~15 已排满）。 */
 static uint32_t drvbaud_lookup(int code)
 {
     size_t i;
@@ -2756,6 +2973,7 @@ static uint32_t drvbaud_lookup(int code)
     return 0;
 }
 
+/* 把 0x0009 原始值解码成可读串：低 8 位档位码 / bit9~8 校验 / bit11~10 停止位。 */
 static void drvbaud_decode(uint16_t v, char *out, size_t sz)
 {
     int code = v & 0xFF;
@@ -2777,6 +2995,14 @@ static void drvbaud_decode(uint16_t v, char *out, size_t sz)
     snprintf(out, sz, "码 %2d  %-14s %s  停止位 %s", code, baud_s, par_s, stp_s);
 }
 
+/* `drvbaud` 系列。
+ *   无参          ：只读六轴 0x0009 + 固件版本(0x0002~3)。
+ *   `:CODE`       ：广播写档位码（⚠️ 写完立即生效，PC 侧没跟着改就【当场失联】）。
+ *   `:CODE:BAUD`  ：广播写 + 切 PC 侧 + 回读验证（推荐用法）。
+ *   `:save`       ：广播写 0x00DC=1 固化。
+ * ⚠️ 六台必须【广播一起写】：逐台写第一台就断。
+ * ⚠️ `:save` 会把【所有】带记忆的 RAM 值一起写进 Flash（含 ACC/DEC）⇒ 先调好再固化；
+ *   写 0 更是恢复出厂。不固化则断电回 115200，而 ini 已是新速率 ⇒ 下次上电失联。 */
 static void cmd_drvbaud(Robot *robot, const ParsedCmd *cmd)
 {
     int code = (cmd != NULL) ? cmd->joint : 0;
@@ -2787,8 +3013,7 @@ static void cmd_drvbaud(Robot *robot, const ParsedCmd *cmd)
 
     if (robot == NULL) return;
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
 
     if (code == 0 && !do_save) {
         printf("驱动器波特率寄存器 0x0009（手册 §6：低8位档位码 / bit9~8 校验 / bit11~10 停止位）\n");
@@ -2904,6 +3129,11 @@ static void cmd_drvbaud(Robot *robot, const ParsedCmd *cmd)
     }
 }
 
+/* `accel[:ACC[,DEC]]`：驱动器加减速参数。无参只读。
+ * 寄存器：0x0096/97 启停速度（出厂 50rpm）、0x0098/99 加速/减速时间(ms)。
+ * 实测六轴：启 0 / 停 0 / 加速 80 / 减速 90 ms。
+ * ⚠️ 只写 RAM、不发 0x00DC ⇒ 驱动器断电即恢复。
+ * ⚠️ 调太小会丢步/过流，从 40 起试。写后逐轴读回比对。 */
 static void cmd_accel(Robot *robot, const ParsedCmd *cmd)
 {
     int set_acc = (cmd != NULL && cmd->angle_deg >= 0.0);
@@ -2968,6 +3198,11 @@ static void cmd_accel(Robot *robot, const ParsedCmd *cmd)
            "  若调小后仍有顿 ⇒ 顿的主因不在驱动器归零，而在 PC 侧总线开销。\n");
 }
 
+/* `alarm` / `alarm:clear`：读/清驱动器报警。
+ * 0x00A3 低 4 位 = 当前报警，高 12 位 = 最近三次历史。
+ * 清除 = 写 0x00A4=0。⚠️ 报警未清 ⇒ 状态字 bit21=1 ⇒ "已退出 RUN"永不成立
+ *   ⇒ 所有运动都会超时。清完必须再跑一次 alarm 确认归零。
+ * 现状：J5 当前 = 电机相位过流；J1/J2/J3/J5 历史 = 供电电压过低。 */
 static void cmd_alarm(Robot *robot, const ParsedCmd *cmd)
 {
     static const char *const names[11] = {
@@ -3018,6 +3253,12 @@ static void cmd_alarm(Robot *robot, const ParsedCmd *cmd)
     }
 }
 
+/* `bcast`：广播帧验证（向地址 0 写速度寄存器，再逐轴读回看是否执行）。
+ * 先试 10H 写 0x00D8(运行速度)，无响应再试 06H 写 0x009A(连续运行速度源)。
+ * 测完恢复原速度值。
+ * 实测：10H 广播写 0x00D8 六轴全执行 ⇒ 广播有效。
+ * 意义：每条总线只挂一个从站时可用广播下发位置（从站不回包 ⇒ 省掉等响应，
+ *   且不像 noread 那样会撞车）⇒ 6 路独立 USB-RS485 值得做。 */
 void cmd_bcast(Robot *robot)
 {
     int32_t b32[7] = {0}, a32[7] = {0};
@@ -3028,8 +3269,7 @@ void cmd_bcast(Robot *robot)
 
     if (robot == NULL) return;
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
 
     printf("广播帧验证：向地址 0 写速度寄存器，再逐轴读回看是否被执行\n");
     printf("  （广播会让总线上所有从站执行同一条指令，故选不动臂的速度源，测完恢复）\n\n");
@@ -3110,6 +3350,11 @@ void cmd_bcast(Robot *robot)
     monitor_pause_active(0);
 }
 
+/* `nrtest`：noread 连发帧完整性测试（反复下发【当前位置】⇒ 臂原地不动）。
+ * 扫 0/2/3/4/5/6 ms 帧间延迟，每档 20 轮 x 6 轴、重复 3 遍取最坏值，
+ * 连发后每轴连读 3 遍查"读失败"与"位置漂移"。
+ * 实测结论：安全帧间隔 2ms（0ms 撞车）；且 noread 已无优势
+ *   （6x(0.15+2)≈13ms 比等响应 10.2ms 更慢且没有确认）。 */
 void cmd_nrtest(Robot *robot)
 {
     static const int delays[] = {0, 2, 3, 4, 5, 6};
@@ -3121,8 +3366,7 @@ void cmd_nrtest(Robot *robot)
 
     if (robot == NULL) return;
 
-    monitor_pause_active(1);
-    Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);
+    monitor_park();
     bus_drain();
 
     printf("noread 连发帧完整性测试：反复下发【当前位置】⇒ 臂原地不动\n");

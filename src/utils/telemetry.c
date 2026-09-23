@@ -29,6 +29,7 @@ static int g_sock = -1;
 #endif
 static struct sockaddr_in g_dst;
 
+/* 从 ini 读一个 double 键值，缺键返回 def（仅本文件用）。 */
 static double tlm_ini_double(const char *path, const char *key, double def)
 {
     FILE *f;
@@ -57,6 +58,7 @@ static double tlm_ini_double(const char *path, const char *key, double def)
     return def;
 }
 
+/* 按 ini [telemetry] 段初始化 UDP 遥测（enabled / port，默认 9900）。 */
 void telemetry_init(const char *ini_path)
 {
     double enabled, port;
@@ -101,6 +103,7 @@ void telemetry_init(const char *ini_path)
     g_ready = 1;
 }
 
+/* 发送六轴角度 + 标签到遥测端口。 */
 void telemetry_send(const double deg[6], const char *tag)
 {
     char buf[256];
@@ -118,6 +121,7 @@ void telemetry_send(const double deg[6], const char *tag)
                  (const struct sockaddr *)&g_dst, sizeof(g_dst));
 }
 
+/* 关闭遥测。 */
 void telemetry_shutdown(void)
 {
     if (!g_ready) return;

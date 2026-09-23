@@ -1,6 +1,7 @@
 
 #include "utils/err.h"
 
+/* ErrCode → 中文说明文本。 */
 const char *err_str(ErrCode e)
 {
     switch (e) {

@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 
+/* 写单个寄存器（Modbus 06H），等响应。 */
 ErrCode motor_write_u16(Robot *robot, int joint, uint16_t reg, uint16_t val)
 {
     uint8_t frame[16];
@@ -15,6 +16,8 @@ ErrCode motor_write_u16(Robot *robot, int joint, uint16_t reg, uint16_t val)
     return robot_request(robot, frame, len, &resp);
 }
 
+/* 写 32 位量（Modbus 10H，连续 2 个寄存器）。
+ * 字节序约定：**低字在前**，字内大端（vals[0]=低 16 位，vals[1]=高 16 位）。 */
 ErrCode motor_write_i32(Robot *robot, int joint, uint16_t reg, int32_t val)
 {
     uint16_t vals[2];
@@ -26,6 +29,8 @@ ErrCode motor_write_i32(Robot *robot, int joint, uint16_t reg, int32_t val)
     return robot_request(robot, frame, len, &resp);
 }
 
+/* 同 motor_write_i32，但【不等响应】。
+ * ⚠️ 实测零收益（从站仍要 1.47ms 周转 + 占线回帧），且会留下残帧污染下一个读。 */
 ErrCode motor_write_i32_noread(Robot *robot, int joint, uint16_t reg, int32_t val)
 {
     uint16_t vals[2];
@@ -36,6 +41,9 @@ ErrCode motor_write_i32_noread(Robot *robot, int joint, uint16_t reg, int32_t va
     return robot_request_noread(robot, frame, len);
 }
 
+/* 广播写 32 位量（站号 0 = 六轴同时执行），不等响应。
+ * 用途：改波特率、改 ACC/DEC、急停这类必须六轴同时生效的操作。
+ * ⚠️ 逐台写会先改完第一台就失联，必须广播。 */
 ErrCode motor_write_i32_broadcast(Robot *robot, uint16_t reg, int32_t val)
 {
     uint16_t vals[2];
@@ -46,6 +54,7 @@ ErrCode motor_write_i32_broadcast(Robot *robot, uint16_t reg, int32_t val)
     return robot_request_noread(robot, frame, len);
 }
 
+/* 广播写单个寄存器（站号 0），不等响应。 */
 ErrCode motor_write_u16_broadcast(Robot *robot, uint16_t reg, uint16_t val)
 {
     uint8_t frame[16];
@@ -53,6 +62,7 @@ ErrCode motor_write_u16_broadcast(Robot *robot, uint16_t reg, uint16_t val)
     return robot_request_noread(robot, frame, len);
 }
 
+/* 读单个寄存器（Modbus 03H），字内大端。 */
 ErrCode motor_read_u16(Robot *robot, int joint, uint16_t reg, uint16_t *val)
 {
     uint8_t frame[16];
@@ -65,6 +75,7 @@ ErrCode motor_read_u16(Robot *robot, int joint, uint16_t reg, uint16_t *val)
     return ERR_NONE;
 }
 
+/* 读 32 位量（读连续 2 个寄存器）。字节序与 motor_write_i32 对应：低字在前、字内大端。 */
 ErrCode motor_read_i32(Robot *robot, int joint, uint16_t reg, int32_t *val)
 {
     uint8_t frame[16];
@@ -80,38 +91,48 @@ ErrCode motor_read_i32(Robot *robot, int joint, uint16_t reg, int32_t *val)
 }
 
 
+/* 使能该轴（写 LEESN_REG_ENABLE = 使能命令）。
+ * ⚠️ 不使能时读回的位置是假数，必须先 enable 再 getpos。 */
 ErrCode motor_enable(Robot *robot, int joint)
 {
     return motor_write_u16(robot, joint, LEESN_REG_ENABLE, LEESN_CMD_ENABLE);
 }
 
+/* 失能（释放）该轴。 */
 ErrCode motor_disable(Robot *robot, int joint)
 {
     return motor_write_u16(robot, joint, LEESN_REG_ENABLE, LEESN_CMD_RELEASE);
 }
 
+/* 急停该轴（RUN_CTRL = 急停命令）。 */
 ErrCode motor_estop(Robot *robot, int joint)
 {
     return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, LEESN_CMD_ESTOP);
 }
 
+/* 减速停止该轴（RUN_CTRL = 减速停命令）。 */
 ErrCode motor_stop_slow(Robot *robot, int joint)
 {
     return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, LEESN_CMD_STOP_SLOW);
 }
 
+/* 设运行速度（rpm，内部换算成驱动器速度寄存器值）。 */
 ErrCode motor_set_speed(Robot *robot, int joint, double rpm)
 {
     return motor_write_i32(robot, joint, LEESN_REG_VEL_RUN,
                            LEESN_RPM_TO_VELREG(rpm));
 }
 
+/* 设运行速度（16 位寄存器版，0~10000）。 */
 ErrCode motor_set_speed16(Robot *robot, int joint, int rpm)
 {
     if (rpm < 0 || rpm > 10000) return ERR_ARG;
     return motor_write_u16(robot, joint, LEESN_REG_RUN_SPEED16, (uint16_t)rpm);
 }
 
+/* 一次写加速/减速时间（LEESN_REG_ACC_TIME 起连续 2 个寄存器，单位 ms）。
+ * 实测六轴：启停速度 50rpm、加速 **80ms**、减速 **90ms** ⇒ 段末速度归零要 170ms。
+ * ⚠️ 只写 RAM 不固化 ⇒ 断电恢复原值；别顺手发保存命令。 */
 ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms)
 {
     uint16_t vals[2];
@@ -123,16 +144,23 @@ ErrCode motor_set_profile(Robot *robot, int joint, int accel_ms, int decel_ms)
     return robot_request(robot, frame, len, &resp);
 }
 
+/* 把当前位置清零（写 LEESN_REG_SET_POS = 0）。
+ * 这是 home 堵转清零的实现基础：读数必然是定义值、零信息量，不能用来判断机械零点。 */
 ErrCode motor_clear_pos(Robot *robot, int joint)
 {
     return motor_write_i32(robot, joint, LEESN_REG_SET_POS, 0);
 }
 
+/* 固化参数到 Flash（写 SAVE_CMD = 1）。
+ * ⚠️ 它会把【所有】带记忆的 RAM 值一起写进 Flash（含 ACC/DEC）⇒ 先调好再固化。
+ * ⚠️ 写 **0 是恢复出厂设置**，别误发。 */
 ErrCode motor_save_params(Robot *robot, int joint)
 {
     return motor_write_u16(robot, joint, LEESN_REG_SAVE_CMD, 0x0001);
 }
 
+/* 临时关闭位置超差报警（动态阈值与静态阈值都写 0）。
+ * 用途：堵转回零等必然产生大位置误差的动作。用完记得 restore。 */
 ErrCode motor_disable_pos_err_alarm(Robot *robot, int joint)
 {
     ErrCode rc;
@@ -141,6 +169,7 @@ ErrCode motor_disable_pos_err_alarm(Robot *robot, int joint)
     return motor_write_u16(robot, joint, LEESN_REG_ERR_STAT, 0);
 }
 
+/* 恢复位置超差报警（动态 200 / 静态 100）。 */
 ErrCode motor_restore_pos_err_alarm(Robot *robot, int joint)
 {
     ErrCode rc;
@@ -149,22 +178,28 @@ ErrCode motor_restore_pos_err_alarm(Robot *robot, int joint)
     return motor_write_u16(robot, joint, LEESN_REG_ERR_STAT, 100);
 }
 
+/* 设位置超差预警阈值（步）。 */
 ErrCode motor_set_pos_err_prewarn(Robot *robot, int joint, uint16_t steps)
 {
     return motor_write_u16(robot, joint, LEESN_REG_ERR_PREWARN, steps);
 }
 
+/* 开/关该轴的软限位（0x0001 开 / 0x0000 关）。 */
 ErrCode motor_set_limit(Robot *robot, int joint, int enable)
 {
     return motor_write_u16(robot, joint, LEESN_REG_LIMIT, enable ? 0x0001 : 0x0000);
 }
 
+/* 连续运行（RUN_CTRL = 正转/反转命令），不是定位。 */
 ErrCode motor_run(Robot *robot, int joint, int dir)
 {
     uint16_t cmd = (dir > 0) ? LEESN_CMD_RUN_CW : LEESN_CMD_RUN_CCW;
     return motor_write_u16(robot, joint, LEESN_REG_RUN_CTRL, cmd);
 }
 
+/* 读该轴电流（mA）；失败返回 -1。
+ * ⚠️ 实测静止电流 ~500/499/495/385/371/254，而 [stall] 阈值是 480/490/480/400/390
+ * ⇒ J1/J2/J3 一上电就满足"已堵转"判据（未证实是否有害）。 */
 int motor_read_current(Robot *robot, int joint)
 {
     uint16_t val;
@@ -173,6 +208,8 @@ int motor_read_current(Robot *robot, int joint)
     return (int)val;
 }
 
+/* 读该轴位置（步）。*ok 传出读取是否成功。
+ * ⚠️ 失联时返回 0 并置 ok=0 —— 上层必须看 ok，否则 0 会被当成真实位置。 */
 int32_t motor_read_position(Robot *robot, int joint, int *ok)
 {
     int32_t val;
@@ -184,6 +221,9 @@ int32_t motor_read_position(Robot *robot, int joint, int *ok)
     return val;
 }
 
+/* 读 32 位状态字。
+ * ⚠️ 其中 STAT_INPOS(bit12) 是【粘滞位】，只看它必然假阳性（实测差 28.5° 也报"到位"）。
+ * 到位判据只能用：无报警 + 已退出 RUN + 位置在 target±tol 内。 */
 ErrCode motor_read_status(Robot *robot, int joint, uint32_t *status)
 {
     uint8_t frame[16];
@@ -198,6 +238,8 @@ ErrCode motor_read_status(Robot *robot, int joint, uint32_t *status)
     return ERR_NONE;
 }
 
+/* 【一次事务同时读位置 + 状态】（连读 4 个寄存器）。
+ * 比分开读省一半总线往返 —— 单笔事务 1.70ms，能合并就合并。 */
 ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *status)
 {
     uint8_t frame[16];
@@ -218,6 +260,9 @@ ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *s
 }
 
 
+/* 目标步数合理性闸门（仅本文件用）。
+ * 拦的是逻辑错误（NaN 转 int32、高低字写反、单位搞错）造成的超大目标，
+ * 那种目标的代价是电机猛冲、超时急停、把臂甩出去。 */
 static int abs_move_steps_ok(int joint, int32_t steps)
 {
     if (!motor_move_steps_ok(steps)) {
@@ -230,6 +275,10 @@ static int abs_move_steps_ok(int joint, int32_t steps)
     return 1;
 }
 
+/* 每转脉冲数(0x0024)对齐闸门（仅本文件用）。
+ * ⚠️ 该寄存器出厂 4000、断电即回 4000，只有上电写入才是 10000。
+ * 未对齐时同样的角度会被放大 2.5 倍（实测 90° 会转成 225°）。
+ * 编码器在电机侧 ⇒ 程序读回永远自洽，看不出来，只能靠【写后读回比对】。 */
 static int abs_move_subdiv_ok(Robot *robot, int joint)
 {
     if (robot_subdivision_ok(robot, joint)) {
@@ -244,6 +293,7 @@ static int abs_move_subdiv_ok(Robot *robot, int joint)
     return 0;
 }
 
+/* 判断目标步数是否在 ±ROBOT_ABS_MOVE_STEPS_LIMIT 内。 */
 int motor_move_steps_ok(int32_t steps)
 {
     if (steps > ROBOT_ABS_MOVE_STEPS_LIMIT) return 0;
@@ -251,6 +301,9 @@ int motor_move_steps_ok(int32_t steps)
     return 1;
 }
 
+/* 下发绝对位置目标（步）。下发前过两道闸门：步数量级 + 每转脉冲对齐。
+ * ⚠️ 运行中写这个寄存器 = 【立即执行 + 强行结束当前指令】⇒ 每段末独立加减速、
+ * 速度归零（ACC+DEC = 80+90 = 170ms）。这是 movel"直 vs 顺"不可兼得的根因。 */
 ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
 {
     if (!abs_move_steps_ok(joint, steps)) return ERR_ARG;
@@ -258,6 +311,9 @@ ErrCode motor_move_abs(Robot *robot, int joint, int32_t steps)
     return motor_write_i32(robot, joint, LEESN_REG_ABS_MOVE, steps);
 }
 
+/* 同 motor_move_abs，但不等响应。
+ * ⚠️ 历史坑：早期版本绕过总线锁 ⇒ diag 会刷出"关节掉线"假报警。
+ * 现在走 robot_request_noread，持锁，不再有这个问题。 */
 ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps)
 {
     if (!abs_move_steps_ok(joint, steps)) return ERR_ARG;
@@ -266,6 +322,7 @@ ErrCode motor_move_abs_noread(Robot *robot, int joint, int32_t steps)
 }
 
 
+/* 读实时速度（rpm）；失败返回 -1。 */
 int motor_read_speed(Robot *robot, int joint)
 {
     int32_t val;
@@ -274,6 +331,7 @@ int motor_read_speed(Robot *robot, int joint)
     return (int)LEESN_VELREG_TO_RPM(val);
 }
 
+/* 读实时速度的原始寄存器值（不做 rpm 换算）；失败返回 -1。 */
 int32_t motor_read_speed_raw(Robot *robot, int joint)
 {
     int32_t val;
@@ -282,6 +340,7 @@ int32_t motor_read_speed_raw(Robot *robot, int joint)
     return val;
 }
 
+/* 读每转脉冲数(0x0024)；失败返回 -1。 */
 int32_t motor_read_subdivision(Robot *robot, int joint)
 {
     int32_t val;
@@ -290,11 +349,13 @@ int32_t motor_read_subdivision(Robot *robot, int joint)
     return val;
 }
 
+/* 写每转脉冲数(0x0024)。写完必须读回比对（见 abs_move_subdiv_ok 的说明）。 */
 ErrCode motor_write_subdivision(Robot *robot, int joint, int32_t per_rev)
 {
     return motor_write_i32(robot, joint, LEESN_REG_SUBDIV, per_rev);
 }
 
+/* 读位置误差（步）；失败返回 -1。 */
 int motor_read_pos_err(Robot *robot, int joint)
 {
     uint16_t val;
@@ -303,6 +364,7 @@ int motor_read_pos_err(Robot *robot, int joint)
     return (int)val;
 }
 
+/* 读编码器线数；失败返回 -1。 */
 int motor_read_enc_lines(Robot *robot, int joint)
 {
     uint16_t val;
@@ -311,6 +373,9 @@ int motor_read_enc_lines(Robot *robot, int joint)
     return (int)val;
 }
 
+/* 读报警状态，只取低 4 位（= 当前报警码）；失败返回 -1。
+ * 完整的 0x00A3 里高 12 位还带最近三次历史报警，见 cmd_alarm。
+ * ⚠️ 报警未清 ⇒ 状态字 bit21=1 ⇒ "已退出 RUN"永不成立 ⇒ 所有运动超时。 */
 int motor_read_alarm(Robot *robot, int joint)
 {
     uint16_t val;
@@ -319,11 +384,14 @@ int motor_read_alarm(Robot *robot, int joint)
     return (int)(val & 0x0F);
 }
 
+/* 清报警（写 0x00A4 = 0）。
+ * ⚠️ 报警是真实故障的证据，别为了"让运动能跑"就随手清 —— 先查报警码。 */
 ErrCode motor_clear_alarm(Robot *robot, int joint)
 {
     return motor_write_u16(robot, joint, LEESN_REG_CLEAR_ALARM, 0x0000);
 }
 
+/* 读设备通信地址（实测本机是 2 与 3 两个值）；失败返回 -1。 */
 int motor_read_device_addr(Robot *robot, int joint)
 {
     uint16_t val;
@@ -333,6 +401,7 @@ int motor_read_device_addr(Robot *robot, int joint)
 }
 
 
+/* 设力矩模式与力矩等级：val = (mode<<8) | level。mode 0~15、level 0~255。 */
 ErrCode motor_set_torque_mode(Robot *robot, int joint, int mode, int level)
 {
     uint16_t val;
@@ -342,6 +411,8 @@ ErrCode motor_set_torque_mode(Robot *robot, int joint, int mode, int level)
     return motor_write_u16(robot, joint, LEESN_REG_TORQUE_CFG, val);
 }
 
+/* 力矩运行：val 的 bit15=方向、bit14..1=力矩偏移(0~0x3FFF)、bit0=运行使能。
+ * 用途：robot_torque_probe —— 用受控力矩顶住机械限位做探测，而不是靠堵转硬顶。 */
 ErrCode motor_torque_run(Robot *robot, int joint, int dir, int offset, int run)
 {
     uint16_t val;

@@ -14,11 +14,13 @@ DhParam DH_TABLE[DH_JOINT_COUNT] = {
     { 0.0,       0.0,                 DH_D6_FLANGE_MM, 0.0       },
 };
 
+/* 设置工具长度（法兰面→笔尖，mm）。DH 表里末端的 a/d 会随之改变，影响正解末端位置。 */
 void dh_set_tool_length(double tool_mm)
 {
     DH_TABLE[5].d = DH_D6_FLANGE_MM + tool_mm;
 }
 
+/* 单个关节的标准 DH 齐次变换：Rz(theta) · Tz(d) · Tx(a) · Rx(alpha)。 */
 void dh_transform(const DhParam *p, double theta_rad, double t[4][4])
 {
     double ct = cos(theta_rad), st = sin(theta_rad);
@@ -30,6 +32,7 @@ void dh_transform(const DhParam *p, double theta_rad, double t[4][4])
     t[3][0] = 0.0;            t[3][1] = 0.0;         t[3][2] = 0.0;        t[3][3] = 1.0;
 }
 
+/* 4x4 齐次矩阵相乘 out = a*b（仅本文件用）。 */
 static void mat4_mul(const double a[4][4], const double b[4][4], double out[4][4])
 {
     int i, j, k;
@@ -49,6 +52,7 @@ static void mat4_mul(const double a[4][4], const double b[4][4], double out[4][4
     }
 }
 
+/* 六轴正解：关节角（度，机械角）→ 末端位姿矩阵。实测单次 <40us，不是性能瓶颈。 */
 void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][4])
 {
     double t[4][4];
@@ -68,6 +72,7 @@ void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][
     }
 }
 
+/* 从位姿矩阵拆出 XYZ + RPY（度），RPY 约定 Rz(yaw)*Ry(pitch)*Rx(roll)。 */
 void dh_pose_to_xyz_rpy(const double pose[4][4], double xyz[3], double rpy[3])
 {
     xyz[0] = pose[0][3];

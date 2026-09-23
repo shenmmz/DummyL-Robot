@@ -11,6 +11,7 @@
 #define LINE_EPS    1e-12
 
 
+/* 四元数相乘 out = a*b（仅本文件用）。 */
 static void quat_mul(const double a[4], const double b[4], double out[4])
 {
     out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3];
@@ -19,6 +20,7 @@ static void quat_mul(const double a[4], const double b[4], double out[4])
     out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0];
 }
 
+/* RPY（度）→ 四元数（仅本文件用）。 */
 static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, double q[4])
 {
     double roll = roll_deg * LINE_DEG2RAD;
@@ -36,6 +38,7 @@ static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, dou
     quat_mul(q_yaw, tmp, q);
 }
 
+/* 把 x 夹进 [-1, 1]，防 acos/asin 定义域越界（仅本文件用）。 */
 static double clamp_pm1(double x)
 {
     if (x > 1.0) return 1.0;
@@ -43,6 +46,7 @@ static double clamp_pm1(double x)
     return x;
 }
 
+/* 四元数 → RPY（度）（仅本文件用）。 */
 static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg, double *yaw_deg)
 {
     double roll = atan2(2*(q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
@@ -53,6 +57,11 @@ static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg
     *yaw_deg = yaw / LINE_DEG2RAD;
 }
 
+/* 四元数球面线性插值：t=0 得 q1，t=1 得 q2。
+ * ⚠️ movel 的姿态参数是"画斜线"的头号根因：end_pose 全取用户输入、起点由 FK 得，
+ * 姿态不一致时 SLERP 会拧姿态 ⇒ 笔尖绕法兰摆 tool_length*sin(theta)。
+ * 实测 80mm 直线：姿态抄【当前 getpos】原值 ⇒ 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。
+ * 只看法兰坐标永远发现不了（法兰直线度恒 0.0000mm）。 */
 static void slerp(const double q1[4], const double q2[4], double t, double out[4])
 {
     double qq2[4] = {q2[0], q2[1], q2[2], q2[3]};
@@ -81,6 +90,7 @@ static void slerp(const double q1[4], const double q2[4], double t, double out[4
 }
 
 
+/* 位姿 [x,y,z,rx,ry,rz]（mm/度）→ 4x4 齐次矩阵。 */
 void line_pose_to_matrix(const double pose6[6], double m[4][4])
 {
     double rx = pose6[3] * LINE_DEG2RAD;
@@ -106,6 +116,7 @@ void line_pose_to_matrix(const double pose6[6], double m[4][4])
     m[3][3] = 1.0;
 }
 
+/* 按步长把总距离切成几段（至少 1 段）。 */
 int line_count_for_distance(double dist_mm, double step_mm)
 {
     int count;
@@ -123,6 +134,11 @@ int line_count_for_distance(double dist_mm, double step_mm)
     return count;
 }
 
+/* 笛卡尔直线插补：位置线性插值 + 姿态四元数 SLERP，产出 count 个位姿点。
+ * count 被夹到 [2, LINE_MAX_POINTS]。任一分量出现 NaN/Inf 立即返回 -1。
+ * ⚠️ 起点姿态必须抄【当前 getpos 原值】：起点由 FK 得、终点取用户输入，
+ *   两者姿态不一致 ⇒ SLERP 拧姿态 ⇒ 笔尖绕法兰摆 tool_length×sin(θ)。
+ *   80mm 线实测：抄 getpos 原值 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。 */
 int line_plan(const double start_pose[6], const double end_pose[6],
                int count, LinePath *path)
 {
@@ -158,6 +174,9 @@ int line_plan(const double start_pose[6], const double end_pose[6],
     return 0;
 }
 
+/* 逐点 IK 解算整条直线：每点以【上一点解】为参考，解算 → unwrap → 限位过滤 → 连续选解。
+ * 失败返回 -1，并通过 fail_idx / fail_reason 说清是第几个点、哪个部位无解
+ * （"肩部/肘部/腕部 + 状态" 或 "候选解全部越软限位"）。 */
 int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits,
                 const double *start_joints, double (*q_out)[6],
                 int *fail_idx, char *fail_reason)
@@ -230,6 +249,9 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
     return 0;
 }
 
+/* 由各关节最大速度反算每段耗时。
+ * ★ 所有段取同一个 dt = 最慢那一轴所需时间 ⇒ 各轴同时到达（同步）。
+ * dt_total = dt x 段数。返回 -1 表示参数非法或某轴 vmax<=0。 */
 int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint[6],
                      double *seg_dt, double *dt_total)
 {
@@ -261,6 +283,8 @@ int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint
     return 0;
 }
 
+/* 找出相邻插补点之间最大的【单关节跳变】(度)，用于预警某段线会让某轴猛甩。
+ * out_joint / out_seg 传出是哪一轴、哪一段。 */
 double line_max_joint_jump(const double (*q_seq)[6], int count,
                            int *out_joint, int *out_seg)
 {

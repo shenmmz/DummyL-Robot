@@ -3,6 +3,7 @@
 
 #include <math.h>
 
+/* 3x3 单位阵。 */
 void mat3_identity(Mat3 m)
 {
     int i, j;
@@ -13,6 +14,7 @@ void mat3_identity(Mat3 m)
     }
 }
 
+/* 绕 X 轴旋转 ang 弧度。 */
 void mat3_rotx(double ang, Mat3 m)
 {
     double c = cos(ang), s = sin(ang);
@@ -21,6 +23,7 @@ void mat3_rotx(double ang, Mat3 m)
     m[2][1] = s;  m[2][2] = c;
 }
 
+/* 绕 Y 轴旋转 ang 弧度。 */
 void mat3_roty(double ang, Mat3 m)
 {
     double c = cos(ang), s = sin(ang);
@@ -29,6 +32,7 @@ void mat3_roty(double ang, Mat3 m)
     m[2][0] = -s; m[2][2] = c;
 }
 
+/* 绕 Z 轴旋转 ang 弧度。 */
 void mat3_rotz(double ang, Mat3 m)
 {
     double c = cos(ang), s = sin(ang);
@@ -37,6 +41,7 @@ void mat3_rotz(double ang, Mat3 m)
     m[1][0] = s;  m[1][1] = c;
 }
 
+/* 3x3 矩阵相乘 out = a*b。 */
 void mat3_mul(const Mat3 a, const Mat3 b, Mat3 out)
 {
     int i, j, k;
@@ -56,6 +61,7 @@ void mat3_mul(const Mat3 a, const Mat3 b, Mat3 out)
     }
 }
 
+/* 3x3 转置。 */
 void mat3_transpose(const Mat3 a, Mat3 out)
 {
     int i, j;
@@ -72,6 +78,7 @@ void mat3_transpose(const Mat3 a, Mat3 out)
     }
 }
 
+/* 3x3 矩阵作用于三维向量 out = m*v。 */
 void mat3_apply(const Mat3 m, const Vec3 v, Vec3 out)
 {
     int i, j;
