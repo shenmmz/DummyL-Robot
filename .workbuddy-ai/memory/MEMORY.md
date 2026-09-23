@@ -31,6 +31,13 @@
 > ⇒ **`tests/` 一个没动** —— 12 个注册进 ctest（12/12 过），另 4 个是离线工具
 > （`movl_tip_trace` / `movl_reach` / `ik_pose_check` / `udp_telemetry_test`），
 > 每个都守着一次真实事故，**别删**。
+>
+> 📋 **CLI 完整命令清单（2026-09-23 从 `cmd_parser.c` 逐条抄出，别再凭记忆写）**：
+> `home`｜`MoveJ`｜`MoveL`｜`disable`｜`enable`｜`motor`｜`getpos`｜`fk`｜`diag`｜`bcast`｜
+> `nrtest`｜`curtest`｜`busrate`｜`accel`｜`drvbaud`｜`alarm`（含 `alarm:clear`）｜`looptest`｜
+> `tabtest`｜`stall`｜`poseok`｜`zero`（含 `zero_save`）｜`help`/`?`｜`exit`/`quit`。
+> **⚠️ 没有 `reg` 命令**（我曾误记）。**也没有** `status`/`mask`/`unmask`/`scan`/`calib`（早已删除）。
+> 查串口用 Python `winreg`（`reg.exe` 被安全策略拦）。
 
 > 详细推导与测试卡见 `docs/测试方法与验收标准.md`（测试 1~22）、`docs/运动流畅性提速路线.md`。本文件只留结论、坑与指针。
 
