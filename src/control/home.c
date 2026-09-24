@@ -20,26 +20,12 @@ typedef struct {
     int    torque_level;
 } StallHome;
 
-/* 0x009E 恒力矩模式（手冊第 49 条「力矩模式设置(仅适用于闭环系统)」）。
- * 写入格式 val = (模式<<8) | 力矩等级，见 motor_set_torque_mode()。
- *   1 碰撞回原点：「值 1,表示执行碰撞回原点」← 本项目【唯一在用】的模式，
- *                 home_stall_start() 与 robot_torque_probe() 都用它；
- *                 真正起转靠 0x00CB（motor_torque_run），其中 bit14~1
- *                 「碰撞回原点时表示碰撞后偏移多少个脉冲作为原点」。
- *   2 抓取物体：「正向抓取,反向松开;反向抓取,正向松开」—— 未使用，留作备选。
- *   3 恒力矩运行：「值 3,表示恒力矩运行」—— 未使用。
- *   4 恒力矩保持：「值 4,表示恒力矩保持模式」—— 未使用（0x00CB 里方向位无意义）。
- * 力矩等级（低 8 位）0~255，0 最小、255 最大。手冊警告："值不宜设置过小，
- * 否则会导致电机不动或者速度达不到目标速度" ⇒ 本机实测取 120（见下表 torque_level）。 */
-#define TORQUE_MODE_HOME  1
-#define TORQUE_MODE_GRAB  2
-#define TORQUE_MODE_HOLD_RUN 3
-#define TORQUE_MODE_HOLD_KEEP 4
-
-/* 堵转清零后「回读位置是否算回到 0」的容差，单位 = 电机侧脉冲(pulses)。
- * 换算关节角：度 = steps × 360 / (传动比 × ENCODER_STEPS_PER_REV)，各轴不同。
- * 实测上电后第一次回零必然超差（清 0x00D2 清的是"原点偏移"，不清多圈计数器）
- * ⇒ 会打「清零后位置非0」的警告；已由 home_goto_pose() 改用【相对位移】抵消。 */
+/* 0x009E 恒力矩模式（手冊第 49 条）。高 8 位 = 模式，低 8 位 = 力矩等级 0~255。 */
+#define TORQUE_MODE_HOME  1        /* 碰撞回原点（唯一在用：堵转回零 / robot_torque_probe） */
+#define TORQUE_MODE_GRAB  2        /* 抓取物体（未使用） */
+#define TORQUE_MODE_HOLD_RUN 3     /* 恒力矩运行（未使用） */
+#define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持（未使用） */
+/* 堵转清零后「位置是否算回到 0」的容差，单位=电机侧脉冲；上电首次回零必然超差（清的是原点偏移，不清计数器）*/
 #define HOME_ZERO_TOL_STEPS    500
  static StallHome stall[7] = {
      [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .torque_level = 120 },
