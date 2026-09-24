@@ -99,8 +99,10 @@ const char *ik_sol_status_str(IkSolStatus s)
 /* 六轴 IK 主解算（解析法），最多 8 组解 = 肩 2 x 肘 2 x 腕 2。
  * ref_joints 只用于【腕奇异】分支定 theta4（其余分支不用）。
  * 返回解个数；info[] 逐位标注肩/肘/腕状态（VALID / SINGULAR / DEGENERATE / OUT_OF_REACH）。
- * ★ 本机 d3=52 在平面【外】⇒ 走的是"肩部偏置"模型，与 Hg_Robot_Arm 的共面假设不同，
- *   所以喂真机位姿给 Hg 的 IK 会差 40°。实测单次解算 <40µs，不是瓶颈。 */
+ * ★ 52mm 肘部偏置写在 d3（沿 z2、出平面），与 dh.c 的 DH_TABLE[2] 一致。
+ *   肩：θ1 用 atan2(−d3·wx + U·wy, U·wx + d3·wy)，U = ±√(r²−d3²)。
+ *   肘：平面投影里只有 a2=146 与 d4=115 两条边（52 在平面外，不进三角）。
+ *   腕：θ4/θ5/θ6。 */
 int ik_solve_ref(const DhParam *params, const double pose[4][4],
                  const double *ref_joints,
                  double solutions[IK_MAX_SOLUTIONS][6],

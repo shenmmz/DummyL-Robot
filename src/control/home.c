@@ -29,10 +29,10 @@ typedef struct {
 #define HOME_ZERO_TOL_STEPS    500
  static StallHome stall[7] = {
      [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .torque_level = 120 },
-     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 490, .torque_level = 120 },
+     [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 500, .torque_level = 120 },
      [3] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .torque_level = 120 },
      [4] = { .speed_rpm = 60,   .accel_ms = 80,  .decel_ms = 100, .dir = -1, .stall_current = 400, .torque_level = 120 },
-     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 390, .torque_level = 120 },
+     [5] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = -1, .stall_current = 400, .torque_level = 120 },
  };
 
 static struct {

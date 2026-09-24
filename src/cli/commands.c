@@ -79,7 +79,8 @@
  * 超了就该怀疑 movel 的姿态参数抄错了（没抄当前 getpos 原值）。 */
 #define MOVL_TIP_WARN_DEG  5.0
 
-/* 默认插补步长(mm)。80mm 线 ⇒ 81 个点，全部逆解 <3.3ms（IK 实测 <40µs/次）。 */
+/* 默认插补步长(mm)（ini [movel] step_mm 的兜底）。80mm 线 ⇒ 81 个点，
+ * 全部逆解 <3.3ms（IK 实测 <40µs/次）。调大 = 段少、快、但弓高按平方涨。 */
 #define MOVL_STEP_MM        1.0
 
 /* stream 模式的最小节拍(ms)。一轮总线实测 10.2ms ⇒ 20ms 时下发占 50%，
@@ -874,7 +875,10 @@ static int    g_tlm_mech_ok = 0;
  *   电机朝天文数字猛冲并超时急停 —— 曾实测甩出 34mm）；② 关节号合法；
  *   ③ 目标在软限位内；④ 本次位移不超单步上限 max_step_deg。
  * 配速：按位移比例分配 —— 位移最大的轴 = 设定速度，其余按比例，下限 1rpm，
- * 这样各轴同时到达。set_profile=0 时还会跳过"速度几乎没变"的重复写入。 */
+ * 这样各轴同时到达。set_profile=0 时还会跳过"速度几乎没变"的重复写入。
+ * ⚠️ dist[] 的单位是【脉冲】（tgt 与 motor_read_position 都是步数），
+ *    即电机端行程 ⇒ 与 second/include/plan.c 的 plan_speeds()（|Δθ|×reduction）
+ *    是同一个东西，只是量纲更干净。别再以为本机缺"按电机端分配"这块。 */
 static int movej_issue(Robot *robot, int num_joints, const int joints[6],
                        const double angles[6], const double *ref_angles,
                        double speed, int accel_ms, int decel_ms, int set_profile,
@@ -1243,6 +1247,19 @@ static double movl_stream_beat_s(void)
     if (ini_read_positive_double(INI_PATH, "movel", "stream_beat_s", &v))
         return v;
     return MOVL_STREAM_BEAT_S;
+}
+
+/* 取 ini [movel] step_mm（step/stream 的笛卡尔插补步长），兜底 1.0mm。
+ * 这是「弧 vs 停顿」的总旋钮：弓高 ≈ 0.00085 × step_mm²(mm)，段数 = 线长/step_mm。
+ *   1.0mm（默认）⇒ 50mm 线 50 段，弓高 0.001mm，但每段末归零 ⇒ 50 次停顿，很慢；
+ *   16mm       ⇒ 50mm 线 3 段，弓高 0.22mm，只停 3 次。
+ * ⚠️ 只影响 step/stream；smooth 是整段一次下发，不插补，永远吃整段的弓高。 */
+static double movl_step_mm(void)
+{
+    double v;
+    if (ini_read_positive_double(INI_PATH, "movel", "step_mm", &v))
+        return v;
+    return MOVL_STEP_MM;
 }
 
 /* 多关节 MoveJ（`MoveJ:J1..J6:角度..:速度:ACC:DEC`）：把 ACC/DEC 抬到安全下限后下发。 */
@@ -1662,7 +1679,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         for (j = 0; j < 6; j++) vmax[j] = speed_rpm * 6.0 / (double)red[j];
     }
 
-    double step_mm = MOVL_STEP_MM;
+    double step_mm = movl_step_mm();
     int rc = 0;
 
     rc = movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,

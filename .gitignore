@@ -13,11 +13,16 @@ docs/
 # ²âÊÔ³ÌĞò±¾µØ±àÒë²úÎï
 tests/*.exe
 
-# ä»¿çœŸè™šæ‹Ÿç¯å¢ƒï¼ˆ200MB+ï¼Œä¸å…¥åº“ï¼‰
+# WorkBuddy ¹¤×÷Ä¿Â¼£º¼ÇÒäÓë .bak ¿ìÕÕÖ»Áô±¾µØ£¬²»Èë¿â
+.workbuddy-ai/snapshots/
+.workbuddy-ai/plugins/
+.workbuddy-ai/binaries/
+
+# ä»¿çœŸè™šæ‹Ÿç¯å¢ƒï¼?200MB+ï¼Œä¸å…¥åº“ï¼?
 sim/.venv/
 
-# secondçš„æ„å»ºäº§ç‰©
+# secondçš„æ„å»ºäº§ç‰?
 second/build/
 
-# second çš„ä»¿çœŸè™šæ‹Ÿç¯å¢ƒï¼\88469MBï¼Œä¸å…¥åº“ï¼‰
+# second çš„ä»¿çœŸè™šæ‹Ÿç¯å¢ƒï¼\88469MBï¼Œä¸å…¥åº“ï¼?
 second/sim/.venv/
