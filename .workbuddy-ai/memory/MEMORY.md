@@ -45,7 +45,7 @@
   ⇒ 用户画直线发现弧（A→B→C，B 是弧中点峰值，不是终点）时，先告诉他**这是机制、不是 bug**。
   ⇒ **真正零弓高** = 让 smooth 也走 `line_solve`/`line_solve`+`line_plan`（已在仓库里），每秒发 ~50 段。
      现状总线 1.7ms/事务，能扛但是"刚好够"。
-- **★ d6 已定案 183**（=法兰 91.5 + 夹爪 91.5，`dh.c` 表里直接写字面量，提交 `1d8de30`）。
+- ~~**★ d6 已定案 183**（=法兰 91.5 + 夹爪 91.5，`dh.c` 表里直接写字面量，提交 `1d8de30`）~~ ⇒ **该定案已作废**（见下条与 §3.6）。
   ⚠️ **2026-09-28 用户拍板：d6 保持 91.5**（裸臂/法兰口径，未提交）。
   ⚠️★ **换档是纯重参数化**：同一组关节角下 TCP 沿**法兰轴**差 91.5mm（绘图位形法兰轴 = 世界 −Z ⇒ Z 差 +91.5）。
      物理位姿不变，但**下发的 Z 必须同步 +91.5**，否则 IK 让臂往下多走 91.5mm ⇒ **笔扎台面**。
@@ -147,6 +147,24 @@
 - **画弧是两者共有的** —— 2026-09-28 复核确认：`commands.c:1684` 调 `movl_plan(..., dist, dist, ...)` ⇒ `count=2`，**src 的插补已被短路成"终点一次 IK + 一次 MoveJ"**，和 second 一样走弧。旧记的"src 独有笛卡尔插补"是错的（`line.c` 代码还在、仍被调用，只是点数=2）。
 - **`[movel] step_mm` 已于 2026-09-28 删除**：smooth 不插补 ⇒ 该旋钮无效，连同 `seg_ramp_ratio` / `stream_beat_s` 一起从 ini 删了，对应的 6 个死函数 + 6 个死宏也从 `commands.c` 删了。**弓高现在只由整段长度决定，调不小**（要小只能把一条长线拆成几条短线）。
 
+## 3.6 ★ 运动学文件布局（2026-09-28 重构后，**找代码先看这里**）
+
+`src/kinematics/` 现为 **`dh.c` / `dh.h` / `fk.c` / `ik.c` / `ik.h` / `joint_zero.c` / `joint_zero.h`**：
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `dh.h` | 53 | **公共头**：`DhParam{theta_offset,d,a,alpha}`(:14-19) + `DH_JOINT_COUNT` + `DH_TABLE` extern + 口径注释 + 四个函数原型。★ 原 `dh_params.h` 已并入并删除 |
+| `dh.c` | 27 | **建模**：`DH_TABLE[6]` 定义 + `dh_set_tool_length`（d6 = 91.5 + tool_mm） |
+| `fk.c` | 79 | **正解**：`dh_transform` + `mat4_mul`(static) + `dh_forward` + `dh_pose_to_xyz_rpy` |
+| `ik.c` | 440 | **逆解**：`ik_solve_ref` 主解算 + 限位过滤 + 分支连续选解 |
+| `joint_zero.c/h` | — | 零点标定（电机角↔机械角），**不属建模** |
+
+- **`dh_params.h` 已不存在**（`git rm`）。`ik.h:5` / `line.h:5` 原 include 它，已改为 `kinematics/dh.h`。
+- **没有 `fk.h`**（刻意不建）：四个原型统一放 `dh.h` ⇒ 调用方 include 零改动。
+- **`mat3.c/h` 已删除**（2026-09-28，零引用死模块）；`ik.c` 内置的 static `r_mul`/`r_transpose`/`rz` **保留**。
+- **重构回归基线**：`fk:0,0,90,0,0,0` → `X=241.50 Y=0.00 Z=338.00`；`fk:0,0,0,0,0,0` → `X=-17.00 Y=-0.00 Z=492.50`。
+- ⚠️ **改 `CMakeLists.txt` 必须重新 configure**（`kinematics` 库源文件列表变了，加过 `fk.c`）。
+
 ## 4 现状与待办
 - **① 11 处 320ms 盲等 → `monitor_park()` 事件握手：已改，真机验证通过**（实测停住 20.38ms／0.01ms，累计 1→15 轮）。
 - **② `cmd_diag` 采样 N 30→10：已改**（SEM ±1.0% vs 判据 5%）。⚠️ `cmd_busrate` 仍是 30。
@@ -155,4 +173,4 @@
 - ⚠️ **真机当前被 `poseok` 闸门锁住**（关节1 越软限位 ⇒ 零点很可能已丢）⇒ **必须先 `home`**，否则 MoveJ/MoveL/tabtest 全部锁死。
 
 ## 5 指针（细节全在 PROJECT-DETAIL.md）
-波特率 `0x0009`（档位15=921600已固化；6台须广播一起写 + `0x00DC=1`）｜ACC/DEC `0x0098/99`（实测 80/90ms，只写 RAM）｜`alarm` `0x00A3/A4`｜`cmd_parse` "先设 type 后校验"的坑（已修，新增命令必守）｜⚠️ **构建：`build/` 生成器已换成 `Visual Studio 18 2026` + Debug**（`CMakeCache.txt` 实测），`ninja -C build` **不再适用** ⇒ 用 `cmake --build build --config Debug`。**产物在 `build/bin/Debug/*.exe`**（VS 生成器会按配置加子目录，旧 `build/bin/*.exe` 是 Ninja 时代的）。**源改动后必须重编才生效**｜MSVC 三坑（2026-09-28 已修）：① 环境同时有 `HTTP_PROXY`/`http_proxy` ⇒ MSB6001，须 `env -u http_proxy -u https_proxy cmake --build build --config Debug`；② `-Wextra` GCC 专有 ⇒ D8021，CMakeLists 已改 `WARN_FLAGS` 按编译器分支；③ 源码 UTF-8 无 BOM ⇒ C4819/C2001，`CMakeLists` 加 `/utf-8`；④ `strtok_r` POSIX 专有 ⇒ LNK2019，`cmd_parser.c` 里 `#define strtok_r strtok_s`（MSVC 签名一致）｜`looptest`/`nrtest`/`bcast`/`tabtest` 的坑（回环 RTT 不能从单事务里减；`tabtest` 会动臂）｜**d6=183**（=法兰 91.5+夹爪 91.5，基数在 `dh.c`，改后须重编+重启；旧 91.5 是裸臂口径）｜second/(Hg 运动学不能控制本机)。
+波特率 `0x0009`（档位15=921600已固化；6台须广播一起写 + `0x00DC=1`）｜ACC/DEC `0x0098/99`（实测 80/90ms，只写 RAM）｜`alarm` `0x00A3/A4`｜`cmd_parse` "先设 type 后校验"的坑（已修，新增命令必守）｜⚠️ **构建：`build/` 生成器已换成 `Visual Studio 18 2026` + Debug**（`CMakeCache.txt` 实测），`ninja -C build` **不再适用** ⇒ 用 `cmake --build build --config Debug`。**产物在 `build/bin/Debug/*.exe`**（VS 生成器会按配置加子目录，旧 `build/bin/*.exe` 是 Ninja 时代的）。**源改动后必须重编才生效**｜MSVC 三坑（2026-09-28 已修）：① 环境同时有 `HTTP_PROXY`/`http_proxy` ⇒ MSB6001，须 `env -u http_proxy -u https_proxy cmake --build build --config Debug`；② `-Wextra` GCC 专有 ⇒ D8021，CMakeLists 已改 `WARN_FLAGS` 按编译器分支；③ 源码 UTF-8 无 BOM ⇒ C4819/C2001，`CMakeLists` 加 `/utf-8`；④ `strtok_r` POSIX 专有 ⇒ LNK2019，`cmd_parser.c` 里 `#define strtok_r strtok_s`（MSVC 签名一致）｜`looptest`/`nrtest`/`bcast`/`tabtest` 的坑（回环 RTT 不能从单事务里减；`tabtest` 会动臂）｜**d6 = 91.5（法兰面，裸臂口径）+ ini `[tool] tool_length`**（基数写死在 `dh.c` 的 `dh_set_tool_length`，改后须重编+重启；~~旧记"定案 183"~~ 已作废，183 = 裸臂 91.5 + 夹爪 91.5 是"装夹爪后"的口径）｜second/(Hg 运动学不能控制本机)。

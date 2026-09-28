@@ -102,25 +102,25 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 
 ```
 DummyL-Robot/
-├── CMakeLists.txt              # 主构建：5 静态库（comm/kinematics/trajectory/control/utils）+ app
+├── CMakeLists.txt              # 主构建：7 静态库（comm/kinematics/trajectory/api/control/utils/cli）+ app
 ├── README.md                   # 本文件
-├── config/
-│   ├── robot_config.h          # 电机ID/减速比/堵转电流/限位（宏定义）
-│   ├── dh_params.h             # DH 参数表
-│   └── robot_config.ini        # 运行时可调参数（串口端口、波特率、默认速度）
 ├── src/
 │   ├── main.c                  # 入口 + CLI 交互循环
+│   ├── config/
+│   │   ├── robot_config.h      # 电机ID/减速比/堵转电流/限位（宏定义）
+│   │   └── robot_config.ini    # 运行时可调参数（串口端口、波特率、默认速度）
 │   ├── comm/
 │   │   ├── comm_if.h           # CommOps 接口层（串口帧收发统一接口抽象）
 │   │   ├── serial_win.c/h      # Windows 串口封装（实现 CommOps）
 │   │   ├── crc16.c/h           # CRC16 0xA001
 │   │   └── modbus_rtu.c/h      # Modbus RTU 主站：03H/06H/10H/04H 帧构造与解析
 │   ├── kinematics/
-│   │   ├── mat3.c/h            # 3x3 矩阵运算（纯 C）
-│   │   ├── dh.c/h              # DH 建模 + 正运动学 FK
-│   │   └── ik.c/h              # 球腕解耦解析 IK（8 组解）+ 限位筛选/最优解选择
+│   │   ├── dh.c/h              # 建模：DH 参数表 + d6 工具长度标定
+│   │   ├── fk.c                # 正解 FK：单关节变换 / 六轴正解 / 位姿→XYZ+RPY
+│   │   ├── ik.c/h              # 球腕解耦解析 IK（8 组解）+ 限位筛选/最优解选择
+│   │   └── joint_zero.c/h      # 编码器读数 → 机械角（零点/方向标定）
 │   ├── trajectory/
-│   │   └── planner.c/h         # 点到点梯形/S 曲线、关节插补
+│   │   └── line.c/h            # 笛卡尔直线插补（moveL 逐点 IK）
 │   ├── control/
 │   │   ├── robot.c/h           # 高层接口：movej / enable / disable / 状态查询
 │   │   ├── home.c/h            # 回零流程：顶限位→电流判堵转→急停→清零→就位

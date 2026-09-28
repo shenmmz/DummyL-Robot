@@ -2,7 +2,7 @@
 #define IK_H
 
 
-#include "kinematics/dh_params.h"
+#include "kinematics/dh.h"
 
 #define IK_MAX_SOLUTIONS 8
 

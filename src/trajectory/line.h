@@ -2,7 +2,7 @@
 #define LINE_H
 
 
-#include "kinematics/dh_params.h"
+#include "kinematics/dh.h"
 #include "kinematics/ik.h"
 
 #define LINE_MAX_POINTS 257
