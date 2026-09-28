@@ -23,14 +23,14 @@ int ini_read_pen_length(const char *path, double *pen_mm);
  * ⚠️ 阈值疑似偏低：实测静止电流 ~500/499/495/385/371/254 vs 阈值 480/490/480/400/390。 */
 int ini_read_stall_current(const char *path, int th[6]);
 
-/* 读 [movel] max_step_deg（逆解单点最大关节跳变，超了就判奇异）。 */
+/* 读 [safety] max_step_deg（单次运动位移上限，度）。 */
 int ini_read_max_step_deg(const char *path, double *deg);
 
 /* 通用读正数 double（读不到或 <=0 都算失败）。 */
 int ini_read_positive_double(const char *path, const char *section,
                              const char *key, double *out);
 
-/* 读 [movel] max_jump_deg（相邻点最大允许跳变）。 */
+/* 读 [safety] max_jump_deg（单个插补段内单关节跳变上限，度）。 */
 int ini_read_max_jump_deg(const char *path, double *deg);
 
 #endif

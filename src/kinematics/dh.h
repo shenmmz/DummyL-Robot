@@ -16,7 +16,7 @@ void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][
 /* 位姿矩阵 → 位置(mm) + RPY(度)。 */
 void dh_pose_to_xyz_rpy(const double pose[4][4], double xyz[3], double rpy[3]);
 
-/* 设工具长度（在 d6=183 装夹爪末端之外再加一段）。ini [tool] tool_length。 */
+/* 设工具长度：d6 = 91.5（法兰面，腕心+91.5，裸臂口径）+ tool_mm。ini [tool] tool_length。 */
 void dh_set_tool_length(double tool_mm);
 
 #endif

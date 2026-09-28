@@ -99,9 +99,10 @@ const char *ik_sol_status_str(IkSolStatus s)
 /* 六轴 IK 主解算（解析法），最多 8 组解 = 肩 2 x 肘 2 x 腕 2。
  * ref_joints 只用于【腕奇异】分支定 theta4（其余分支不用）。
  * 返回解个数；info[] 逐位标注肩/肘/腕状态（VALID / SINGULAR / DEGENERATE / OUT_OF_REACH）。
- * ★ 52mm 肘部偏置写在 d3（沿 z2、出平面），与 dh.c 的 DH_TABLE[2] 一致。
+ * ★ 52mm 肘部偏置写在 a3（沿 x3、与大臂共面），与 dh.c 的 DH_TABLE[2] 一致。
  *   肩：θ1 用 atan2(−d3·wx + U·wy, U·wx + d3·wy)，U = ±√(r²−d3²)。
- *   肘：平面投影里只有 a2=146 与 d4=115 两条边（52 在平面外，不进三角）。
+ *       共面档 d3=0 ⇒ 自动退化成 atan2(wy,wx) 与 atan2(−wy,−wx) 两组。
+ *   肘：平面投影里两条边是 a2=146 与 l_ew=√(a3²+d4²)=126.2101（52 折进长度与相位）。
  *   腕：θ4/θ5/θ6。 */
 int ik_solve_ref(const DhParam *params, const double pose[4][4],
                  const double *ref_joints,
@@ -114,6 +115,11 @@ int ik_solve_ref(const DhParam *params, const double pose[4][4],
     double d3 = params[2].d;
     double d4 = params[3].d;
     double d6 = params[5].d;
+    /* 肘部偏置 a3（沿 x3）与 d4 合成后的【等效前臂长】与【相位】。
+     * a3=0（52 写在 d3 的老档）时 l_ew=d4、beta=0 ⇒ 本函数逐字退化成老写法。 */
+    double a3 = params[2].a;
+    double l_ew = hypot(a3, d4);
+    double beta = atan2(-a3, d4);
     double w[3];
     double r, d_horiz, Y;
     double theta1, theta3, theta2;
@@ -134,7 +140,7 @@ int ik_solve_ref(const DhParam *params, const double pose[4][4],
         }
     }
 
-    if (a2 <= IK_EPS || d4 <= IK_EPS) {
+    if (a2 <= IK_EPS || l_ew <= IK_EPS) {
         if (info) {
             for (idx = 0; idx < IK_MAX_SOLUTIONS; idx++)
                 info[idx].shoulder = IK_SOL_DEGENERATE;
@@ -163,7 +169,7 @@ int ik_solve_ref(const DhParam *params, const double pose[4][4],
 
         theta1 = atan2(-d3 * w[0] + U * w[1], U * w[0] + d3 * w[1]);
 
-        s3v = (P * P + Y * Y - a2 * a2 - d4 * d4) / (2.0 * a2 * d4);
+        s3v = (P * P + Y * Y - a2 * a2 - l_ew * l_ew) / (2.0 * a2 * l_ew);
         if (s3v < -1.0 - 1e-9 || s3v > 1.0 + 1e-9) {
             shoulder_reachable = 0;
             if (info) {
@@ -187,10 +193,10 @@ int ik_solve_ref(const DhParam *params, const double pose[4][4],
             double c3 = (elbow == 0) ? c3abs : -c3abs;
             int elbow_ok = 1;
 
-            theta3 = atan2(s3v, c3);
+            theta3 = atan2(s3v, c3) + beta;
 
-            A = a2 + d4 * s3v;
-            B = d4 * c3;
+            A = a2 + l_ew * s3v;
+            B = l_ew * c3;
             D0 = A * A + B * B;
             if (D0 < IK_EPS) {
                 elbow_ok = 0;
