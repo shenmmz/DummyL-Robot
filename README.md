@@ -116,7 +116,7 @@ DummyL-Robot/
 │   │   └── modbus_rtu.c/h      # Modbus RTU 主站：03H/06H/10H/04H 帧构造与解析
 │   ├── kinematics/
 │   │   ├── dh.c/h              # 建模：DH 参数表 + d6 工具长度标定
-│   │   ├── fk.c                # 正解 FK：单关节变换 / 六轴正解 / 位姿→XYZ+RPY
+│   │   ├── fk.c/h              # 正解 FK：单关节变换 / 六轴正解 / 位姿→XYZ+RPY
 │   │   ├── ik.c/h              # 球腕解耦解析 IK（8 组解）+ 限位筛选/最优解选择
 │   │   └── joint_zero.c/h      # 编码器读数 → 机械角（零点/方向标定）
 │   ├── trajectory/

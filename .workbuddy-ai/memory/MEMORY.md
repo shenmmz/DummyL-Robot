@@ -149,21 +149,23 @@
 
 ## 3.6 ★ 运动学文件布局（2026-09-28 重构后，**找代码先看这里**）
 
-`src/kinematics/` 现为 **`dh.c` / `dh.h` / `fk.c` / `ik.c` / `ik.h` / `joint_zero.c` / `joint_zero.h`**：
+`src/kinematics/` 现为 **`dh.c` / `dh.h` / `fk.c` / `fk.h` / `ik.c` / `ik.h` / `joint_zero.c` / `joint_zero.h`**：
 
 | 文件 | 行数 | 内容 |
 |---|---|---|
-| `dh.h` | 53 | **公共头**：`DhParam{theta_offset,d,a,alpha}`(:14-19) + `DH_JOINT_COUNT` + `DH_TABLE` extern + 口径注释 + 四个函数原型。★ 原 `dh_params.h` 已并入并删除 |
+| `dh.h` | 38 | **建模公共头**：`DhParam{theta_offset,d,a,alpha}` + `DH_JOINT_COUNT` + `DH_TABLE` extern + 口径注释。★ 原 `dh_params.h` 已并入并删除 |
 | `dh.c` | 27 | **建模**：`DH_TABLE[6]` 定义 + `dh_set_tool_length`（d6 = 91.5 + tool_mm） |
+| `fk.h` | 25 | **正解头**：`DH_EPS` + `dh_transform` / `dh_forward` / `dh_pose_to_xyz_rpy`（`#include dh.h` 取 `DhParam`） |
 | `fk.c` | 79 | **正解**：`dh_transform` + `mat4_mul`(static) + `dh_forward` + `dh_pose_to_xyz_rpy` |
 | `ik.c` | 440 | **逆解**：`ik_solve_ref` 主解算 + 限位过滤 + 分支连续选解 |
 | `joint_zero.c/h` | — | 零点标定（电机角↔机械角），**不属建模** |
 
 - **`dh_params.h` 已不存在**（`git rm`）。`ik.h:5` / `line.h:5` 原 include 它，已改为 `kinematics/dh.h`。
-- **没有 `fk.h`**（刻意不建）：四个原型统一放 `dh.h` ⇒ 调用方 include 零改动。
+- **include 归属**：`commands.c`（唯一 FK 调用方）→ `dh.h` + `fk.h`；`main.c`（只用 `dh_set_tool_length`）→ 只 `dh.h`；
+  `ik.c`/`ik.h`/`line.h`/`fk.c` → `dh.h`（`fk.h` 自己 include `dh.h`）。
 - **`mat3.c/h` 已删除**（2026-09-28，零引用死模块）；`ik.c` 内置的 static `r_mul`/`r_transpose`/`rz` **保留**。
 - **重构回归基线**：`fk:0,0,90,0,0,0` → `X=241.50 Y=0.00 Z=338.00`；`fk:0,0,0,0,0,0` → `X=-17.00 Y=-0.00 Z=492.50`。
-- ⚠️ **改 `CMakeLists.txt` 必须重新 configure**（`kinematics` 库源文件列表变了，加过 `fk.c`）。
+- ⚠️ **改 `CMakeLists.txt` 必须重新 configure**（`kinematics` 库源文件列表变了，加过 `fk.c`）。只加头文件不用 reconfigure。
 
 ## 4 现状与待办
 - **① 11 处 320ms 盲等 → `monitor_park()` 事件握手：已改，真机验证通过**（实测停住 20.38ms／0.01ms，累计 1→15 轮）。

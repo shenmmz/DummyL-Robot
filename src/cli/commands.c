@@ -12,6 +12,7 @@
 #include "comm/modbus_rtu.h"
 #include "comm/serial_win.h"
 #include "kinematics/dh.h"
+#include "kinematics/fk.h"
 #include "kinematics/ik.h"
 #include "trajectory/line.h"
 #include "config/robot_config.h"

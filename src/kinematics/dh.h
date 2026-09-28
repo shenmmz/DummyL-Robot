@@ -2,10 +2,8 @@
 #define DH_H
 
 /* ============================================================
- * 建模与正解的公共头（原 dh_params.h 已并入本文件，2026-09-28）。
- *   实现：dh.c = 建模（DH_TABLE + dh_set_tool_length）
- *         fk.c = 正解（dh_transform / dh_forward / dh_pose_to_xyz_rpy）
- *   调用方（commands.c / main.c / ik.c / line.c）只需 include 本头。
+ * 建模：DH 参数表 + 工具长度标定。表定义在 dh.c。
+ * 正解（FK）的声明在 fk.h，实现在 fk.c。
  * ============================================================ */
 
 #define DH_JOINT_COUNT 6
@@ -34,20 +32,7 @@ typedef struct {
  *   Hg_Robot_Arm 的 DUMMY_T 同口径；ik.c 肘三角配套用 l_ew=hypot(a3,d4) / beta=atan2(-a3,d4)。 */
 extern DhParam DH_TABLE[DH_JOINT_COUNT];
 
-/* RPY 万向锁判据（dh_pose_to_xyz_rpy 用）。 */
-#define DH_EPS 1e-6
-
-/* 单关节 DH 变换矩阵（fk.c）。 */
-void dh_transform(const DhParam *p, double theta_rad, double t[4][4]);
-
-/* 六轴正解：关节角（度，机械角）→ 末端位姿矩阵（fk.c）。
- * 实测单次 <40us，不是性能瓶颈。 */
-void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][4]);
-
-/* 位姿矩阵 → 位置(mm) + RPY(度)（fk.c）。 */
-void dh_pose_to_xyz_rpy(const double pose[4][4], double xyz[3], double rpy[3]);
-
-/* 设工具长度：d6 = 91.5（法兰面，腕心+91.5，裸臂口径）+ tool_mm。ini [tool] tool_length（dh.c）。 */
+/* 设工具长度：d6 = 91.5（法兰面，腕心+91.5，裸臂口径）+ tool_mm。ini [tool] tool_length。 */
 void dh_set_tool_length(double tool_mm);
 
 #endif
