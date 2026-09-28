@@ -6,6 +6,12 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+/* MSVC 没有 POSIX 的 strtok_r（链接报 LNK2019，且因未声明被当返回 int ⇒ C4047 一串）。
+ * 它的 strtok_s 签名 strtok_s(char*, const char*, char**) 与 strtok_r 完全一致，直接映射。 */
+#ifdef _MSC_VER
+#define strtok_r strtok_s
+#endif
+
 /* 忽略大小写的字符串比较（命令名不区分大小写，仅本文件用）。 */
 static int ci_strcmp(const char *a, const char *b)
 {
@@ -233,36 +239,39 @@ int cmd_parse(const char *line, ParsedCmd *out)
         char *rest = save;
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
-        double v[9];
+        double v[6];
         int n = 0, i;
-        int has_keep = 0;
-        while (tok != NULL && n < 9) {
+        while (tok != NULL && n < 6) {
             if (!parse_full_number(tok, &v[n])) {
                 break;
             }
             n++;
             tok = strtok_r(NULL, ",", &ctx);
         }
-        if (tok != NULL && strcmp(tok, "keep") == 0) has_keep = 1;
 
-        if (n != 3 && n != 6 && n != 9) {
-            printf("[警告] 用法: MoveL:X,Y,Z[,Rx,Ry,Rz][,SPD,ACC,DEC][,keep][,step|stream|smooth]\n");
+        if (n != 3 && n != 6) {
+            printf("[警告] 用法: MoveL:X,Y,Z[,SPD,ACC,DEC]\n"
+                   "       （姿态恒取当前 getpos，不再接受 Rx,Ry,Rz）\n");
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         out->type = CMD_MOVEL;
         out->movl_mode = MOVL_MODE_SMOOTH;
-        out->keep_pose = 0;
+        /* ★ 姿态永远抄当前位姿。起点姿态由 FK 得、终点姿态若取用户输入，
+         *   两者不等时 SLERP 会把姿态从起点一路拧到终点 ⇒ 笔尖绕法兰摆
+         *   pen_length×2sin(θ/2) ⇒ 画斜线。实测 80mm 线：抄 getpos 原值
+         *   ⇒ 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。 */
+        out->keep_pose = 1;
         for (i = 0; i < 3; i++) out->cartesian[i] = v[i];
+        for (i = 3; i < 6; i++) out->cartesian[i] = 0.0;  /* cmd_movel 会用 start_pose 覆盖 */
 
         if (n == 3) {
-            out->keep_pose = 1;
             out->speeds[0]   =  60;
             out->accel_ms[0] =  80;
             out->decel_ms[0] =  90;
-        } else if (n == 6 && has_keep) {
-            out->keep_pose = 1;
+        } else {
             if (v[3] <= 0.0) {
-                printf("[警告] MoveL 速度须大于 0 rpm\n");
+                printf("[警告] MoveL 第 4 个参数现在是【速度 rpm】，须大于 0（收到 %.2f）。\n", v[3]);
+                printf("       新用法 MoveL:X,Y,Z[,SPD,ACC,DEC] —— 不再接受 Rx,Ry,Rz。\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
             if (v[4] <= 0.0 || v[5] <= 0.0) {
@@ -272,48 +281,27 @@ int cmd_parse(const char *line, ParsedCmd *out)
             out->speeds[0]   = v[3];
             out->accel_ms[0] = (int)v[4];
             out->decel_ms[0] = (int)v[5];
-        } else if (n == 6) {
-            for (i = 0; i < 3; i++) out->cartesian[3 + i] = v[3 + i];
-            out->speeds[0]   =  60;
-            out->accel_ms[0] =  80;
-            out->decel_ms[0] =  90;
-        } else {
-            if (has_keep)
-                printf("[提示] 已给出 Rx,Ry,Rz，keep 被忽略（姿态以你给的值为准）\n");
-            for (i = 0; i < 3; i++) out->cartesian[3 + i] = v[3 + i];
-            if (v[6] <= 0.0) {
-                printf("[警告] MoveL 速度须大于 0 rpm\n");
-                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
-            }
-            if (v[7] <= 0.0 || v[8] <= 0.0) {
-                printf("[警告] MoveL 加减速时间须大于 0 ms\n");
-                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
-            }
-            out->speeds[0]   = v[6];
-            out->accel_ms[0] = (int)v[7];
-            out->decel_ms[0] = (int)v[8];
         }
-        if (has_keep) tok = strtok_r(NULL, ",", &ctx);
+
+        if (tok != NULL && strcmp(tok, "keep") == 0) {
+            printf("[提示] keep 已默认生效（MoveL 姿态恒取当前位姿），无需再写。\n");
+            tok = strtok_r(NULL, ",", &ctx);
+        }
         if (tok != NULL) {
-            if (strcmp(tok, "sync") == 0) {
-                printf("[警告] sync 模式已移除（分段必然段末归零 ⇒ 会停顿，实际用不到）。\n"
-                       "       要逐段过流保护请改用 ,step；要不停顿就用默认 smooth。\n");
-                out->type = CMD_UNKNOWN;
-                return CMD_UNKNOWN;
-            } else if (strcmp(tok, "step") == 0) {
-                out->movl_mode = MOVL_MODE_STEP;
-            } else if (strcmp(tok, "stream") == 0) {
-                out->movl_mode = MOVL_MODE_STREAM;
-            } else if (strcmp(tok, "smooth") == 0) {
+            if (strcmp(tok, "smooth") == 0) {
                 out->movl_mode = MOVL_MODE_SMOOTH;
+            } else if (strcmp(tok, "step") == 0 || strcmp(tok, "stream") == 0 ||
+                       strcmp(tok, "sync") == 0) {
+                printf("[警告] MoveL 模式 %s 已移除：现在只有 smooth"
+                       "（一次 IK + MoveJ，不插补）。\n", tok);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             } else {
-                printf("[警告] MoveL 模式须为 step(逐段到位+过流保护)、"
-                       "stream(周期刷新) 或 smooth(流畅优先，不分段)：%s\n", tok);
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth]\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
             tok = strtok_r(NULL, ",", &ctx);
             if (tok != NULL) {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,Rx,Ry,Rz][,SPD,ACC,DEC][,keep][,MODE]\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth]\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
         }
@@ -715,17 +703,15 @@ static const char HELP_TEXT[] =
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节关节空间运动：轴N 至角度ANGLE(度)，\n"
     "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
     "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
-    "  MoveL:X,Y,Z[,MODE]    笛卡尔直线运动，【姿态保持当前不变】（推荐）；\n"
-    "                          Rx,Ry,Rz 抄错会让笔尖画斜线(实测偏 7.71mm 而法兰\n"
-    "                          0.0000mm)，所以能不抄就不抄\n"
-    "  MoveL:X,Y,Z,SPD,ACC,DEC,keep[,MODE]   姿态保持 + 自定义速度\n"
-    "  MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]   完整写法：姿态角须抄 getpos\n"
-    "                          打印的原值(含负号、含 -0.00)\n"
-    "                          MODE 缺省=【不分段】(流畅优先，零段间停顿，2026-09-23 改)\n"
-    "                          step 逐段到位(有逐段过流保护，但段末会停) /\n"
-    "                          stream 周期刷新 / smooth 同缺省\n"
-    "                          ⚠️ 缺省(不分段)时全程【不查过流(碰撞)】；要保护显式加 ,step\n"
-    "                          ⚠️ sync 模式已于 2026-09-23 移除（分段必然停顿）\n"
+    "  MoveL:X,Y,Z                 笛卡尔直线运动（姿态恒取当前 getpos，推荐）\n"
+    "  MoveL:X,Y,Z,SPD,ACC,DEC    同上 + 自定义速度（SPD=rpm，ACC/DEC=ms）\n"
+    "                          ★ 2026-09-28 精简后只认上面两种写法：\n"
+    "                          ① 不再接受 Rx,Ry,Rz —— 姿态恒抄当前位姿，杜绝\n"
+    "                             SLERP 拧姿态把笔尖甩离直线（实测会偏 7.71mm）\n"
+    "                          ② 模式只有 smooth：终点一次 IK + 一次 MoveJ\n"
+    "                             ⇒ 不插补、零段间停顿；末端走弧（弓高 = 整段）\n"
+    "                          ③ step / stream / sync 已移除，写了会被拒绝\n"
+    "                          ④ ⚠️ 全程【不查过流】⇒ 无碰撞保护，路径自己确认\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"

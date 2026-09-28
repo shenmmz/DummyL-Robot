@@ -1,12 +1,15 @@
 # ============================================================
 # DummyL-Robot 主构建脚本
 # 平台: Windows PC (USB 转 RS485 -> 立三 LEESN 闭环步进电机)
-# 工具链: C11 + MinGW-w64 GCC + CMake/Ninja
+# 工具链: C11 + MinGW-w64 GCC + CMake/Ninja（也可用 Visual Studio 生成器）
 # 目标: lib(comm/kinematics/trajectory/control/utils) + app + tests
 # 用法:
 #   cmake -G Ninja -B build -DCMAKE_C_COMPILER=C:/Qt/Tools/mingw1310_64/bin/gcc.exe
 #   cmake --build build
 #   ctest --test-dir build
+# ⚠️ 用 Visual Studio 生成器时，若环境同时设了 HTTP_PROXY 与 http_proxy（仅大小写不同），
+#    MSBuild 会因字典键冲突报 MSB6001 ⇒ 先 unset 小写那个再编:
+#      env -u http_proxy -u https_proxy cmake --build build --config Debug
 # ============================================================
 cmake_minimum_required(VERSION 3.16)
 
@@ -24,6 +27,19 @@ endif()
 # 产物统一输出到 build/bin 与 build/lib
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# ---------- 告警开关: GCC/Clang 与 MSVC 不同名，别写死 ----------
+# ⚠️ MSVC 不认 -Wextra（报 D8021 无效的数值参数），-Wall 会被当成 /Wall（噪音极大）。
+#    本工程现在两种编译器都可能用（MinGW/Ninja 与 Visual Studio），所以按编译器分支。
+if(MSVC)
+    set(WARN_FLAGS /W3)
+    # 源码是 UTF-8 无 BOM。不加 /utf-8 会把中文按 GBK(936) 解码 ⇒ C4819，
+    # 严重时吞掉字符串字面量的结束引号 ⇒ C2001「字符串字面量中的换行符」
+    # （实测 ik.c:92 case IK_SOL_OUT_OF_REACH: return "超可达"; 就是这么炸的）。
+    add_compile_options(/utf-8)
+else()
+    set(WARN_FLAGS -Wall -Wextra)
+endif()
 
 # ---------- 静态库: comm ----------
 # Windows 串口封装 + Modbus RTU（含 CRC16）
@@ -87,7 +103,7 @@ add_library(cli STATIC
     src/cli/commands.c
 )
 target_include_directories(cli PUBLIC src ${CMAKE_SOURCE_DIR})
-target_compile_options(cli PRIVATE -Wall -Wextra)
+target_compile_options(cli PRIVATE ${WARN_FLAGS})
 target_link_libraries(cli PUBLIC control utils kinematics)
 
 # 公共头文件目录与警告选项
@@ -95,7 +111,7 @@ target_link_libraries(cli PUBLIC control utils kinematics)
 # 注：config/ 已于 2026-09-11 迁入 src/，故 config/*.h 走 src 路径解析
 foreach(lib comm kinematics trajectory api control utils)
     target_include_directories(${lib} PUBLIC src ${CMAKE_SOURCE_DIR})
-    target_compile_options(${lib} PRIVATE -Wall -Wextra)
+    target_compile_options(${lib} PRIVATE ${WARN_FLAGS})
 endforeach()
 
 # api 依赖 comm（Modbus 帧构造）
@@ -118,7 +134,7 @@ target_link_libraries(control PUBLIC
 
 # ---------- 应用: CLI 主程序 ----------
 add_executable(dummyrobot src/main.c)
-target_compile_options(dummyrobot PRIVATE -Wall -Wextra)
+target_compile_options(dummyrobot PRIVATE ${WARN_FLAGS})
 # winmm：timeBeginPeriod/timeEndPeriod（抬高系统定时器精度，压低堵转轮询周期）
 target_link_libraries(dummyrobot PRIVATE control utils cli)
 if(WIN32)
@@ -139,7 +155,7 @@ enable_testing()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_ik_singular.c")
 add_executable(test_ik_singular tests/test_ik_singular.c)
 target_include_directories(test_ik_singular PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_ik_singular PRIVATE -Wall -Wextra)
+target_compile_options(test_ik_singular PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_ik_singular PRIVATE kinematics trajectory m)
 add_test(NAME ik_singular COMMAND test_ik_singular)
 endif()
@@ -150,7 +166,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_ik_wrist.c")
 add_executable(test_ik_wrist tests/test_ik_wrist.c)
 target_include_directories(test_ik_wrist PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_ik_wrist PRIVATE -Wall -Wextra)
+target_compile_options(test_ik_wrist PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_ik_wrist PRIVATE kinematics trajectory m)
 add_test(NAME ik_wrist COMMAND test_ik_wrist)
 endif()
@@ -162,7 +178,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_line_nan.c")
 add_executable(test_line_nan tests/test_line_nan.c)
 target_include_directories(test_line_nan PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_line_nan PRIVATE -Wall -Wextra)
+target_compile_options(test_line_nan PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_line_nan PRIVATE kinematics trajectory m)
 add_test(NAME line_nan COMMAND test_line_nan)
 endif()
@@ -173,7 +189,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_safety_gate.c")
 add_executable(test_safety_gate tests/test_safety_gate.c)
 target_include_directories(test_safety_gate PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_safety_gate PRIVATE -Wall -Wextra)
+target_compile_options(test_safety_gate PRIVATE ${WARN_FLAGS})
 # 注意：control 与 api 互相引用（control→api 取 motor_*，api→control 取
 # robot_request/joint_slave），静态库有环，必须重复列出让链接器回扫。
 target_link_libraries(test_safety_gate PRIVATE control api control utils)
@@ -186,7 +202,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_wrist_geom.c")
 add_executable(test_wrist_geom tests/test_wrist_geom.c)
 target_include_directories(test_wrist_geom PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_wrist_geom PRIVATE -Wall -Wextra)
+target_compile_options(test_wrist_geom PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_wrist_geom PRIVATE kinematics m)
 add_test(NAME wrist_geom COMMAND test_wrist_geom)
 endif()
@@ -194,7 +210,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_ik_verify.c")
 add_executable(test_ik_verify tests/test_ik_verify.c)
 target_include_directories(test_ik_verify PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_ik_verify PRIVATE -Wall -Wextra)
+target_compile_options(test_ik_verify PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_ik_verify PRIVATE kinematics trajectory m)
 add_test(NAME ik_verify COMMAND test_ik_verify)
 endif()
@@ -202,7 +218,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_dh_verify.c")
 add_executable(test_dh_verify tests/test_dh_verify.c)
 target_include_directories(test_dh_verify PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_dh_verify PRIVATE -Wall -Wextra)
+target_compile_options(test_dh_verify PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_dh_verify PRIVATE kinematics trajectory m)
 add_test(NAME dh_verify COMMAND test_dh_verify)
 endif()
@@ -210,7 +226,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_dh_calib.c")
 add_executable(test_dh_calib tests/test_dh_calib.c)
 target_include_directories(test_dh_calib PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_dh_calib PRIVATE -Wall -Wextra)
+target_compile_options(test_dh_calib PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_dh_calib PRIVATE kinematics m)
 add_test(NAME dh_calib COMMAND test_dh_calib)
 endif()
@@ -221,7 +237,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_crc16.c")
 add_executable(test_crc16 tests/test_crc16.c src/comm/modbus_rtu.c)
 target_include_directories(test_crc16 PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_crc16 PRIVATE -Wall -Wextra)
+target_compile_options(test_crc16 PRIVATE ${WARN_FLAGS})
 add_test(NAME crc16 COMMAND test_crc16)
 endif()
 
@@ -231,7 +247,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_stall.c")
 add_executable(test_stall tests/test_stall.c)
 target_include_directories(test_stall PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_stall PRIVATE -Wall -Wextra)
+target_compile_options(test_stall PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_stall PRIVATE control utils)
 add_test(NAME stall COMMAND test_stall)
 endif()
@@ -243,7 +259,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_movel_keep.c")
 add_executable(test_movel_keep tests/test_movel_keep.c)
 target_include_directories(test_movel_keep PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_movel_keep PRIVATE -Wall -Wextra)
+target_compile_options(test_movel_keep PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_movel_keep PRIVATE utils)
 add_test(NAME movel_keep COMMAND test_movel_keep)
 endif()
@@ -251,7 +267,7 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_z170.c")
 add_executable(test_z170 tests/test_z170.c)
 target_include_directories(test_z170 PRIVATE src ${CMAKE_SOURCE_DIR})
-target_compile_options(test_z170 PRIVATE -Wall -Wextra)
+target_compile_options(test_z170 PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_z170 PRIVATE kinematics trajectory m)
 add_test(NAME z170 COMMAND test_z170)
 endif()
@@ -273,7 +289,7 @@ foreach(tool movl_tip_trace movl_reach ik_pose_check movl_verify)
     if(EXISTS "${CMAKE_SOURCE_DIR}/tests/${tool}.c")
         add_executable(${tool} tests/${tool}.c)
         target_include_directories(${tool} PRIVATE src ${CMAKE_SOURCE_DIR})
-        target_compile_options(${tool} PRIVATE -Wall -Wextra)
+        target_compile_options(${tool} PRIVATE ${WARN_FLAGS})
         target_link_libraries(${tool} PRIVATE kinematics trajectory m)
     endif()
 endforeach()
@@ -282,6 +298,6 @@ endforeach()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/udp_telemetry_test.c")
     add_executable(udp_telemetry_test tests/udp_telemetry_test.c)
     target_include_directories(udp_telemetry_test PRIVATE src ${CMAKE_SOURCE_DIR})
-    target_compile_options(udp_telemetry_test PRIVATE -Wall -Wextra)
+    target_compile_options(udp_telemetry_test PRIVATE ${WARN_FLAGS})
     target_link_libraries(udp_telemetry_test PRIVATE utils)
 endif()

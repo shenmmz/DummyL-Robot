@@ -70,42 +70,17 @@
 
 /* ---- ③ 几何与安全闸门 ---- */
 
-/* 允许的几何弓高预算(mm)（ini [movel] bow_mm 的兜底）。step/stream 模式据此判
- * 「弓高是否超预算」并告警。弓高 ≈ 0.001 × 段长²(mm)
- * ⇒ 2.0mm 对应约 45mm 以内的段不分段。 */
+/* 允许的几何弓高预算(mm)（ini [movel] bow_mm 的兜底）。MoveL 每次据此判
+ * 「本次弓高是否超预算」并告警。弓高 ≈ 0.001 × 段长²(mm)
+ * ⇒ 2.0mm 对应约 45mm 以内的段。 */
 #define MOVL_BOW_BUDGET_MM   2.0
 
 /* 笔尖方向偏差告警阈值(度)。依据：J5 差 1° ⇒ 笔尖偏 0.72mm；5° ≈ 3.6mm。
  * 超了就该怀疑 movel 的姿态参数抄错了（没抄当前 getpos 原值）。 */
 #define MOVL_TIP_WARN_DEG  5.0
 
-/* 默认插补步长(mm)（ini [movel] step_mm 的兜底）。80mm 线 ⇒ 81 个点，
- * 全部逆解 <3.3ms（IK 实测 <40µs/次）。调大 = 段少、快、但弓高按平方涨。 */
-#define MOVL_STEP_MM        1.0
-
-/* stream 模式的最小节拍(ms)。一轮总线实测 10.2ms ⇒ 20ms 时下发占 50%，
- * 六轴起步严重不同步，末端偏差会远大于弓高。 */
-#define MOVL_STREAM_MIN_MS  20
-
-/* stream 模式的节拍(s)（ini [movel] stream_beat_s 的兜底）。 */
-#define MOVL_STREAM_BEAT_S  0.10
-
-/* 段时长至少要等于 (ACC+DEC) 的几倍，才算「爬得完坡」。
- * 3.0 × (80+90)ms = 510ms ⇒ 短于 510ms 的段在 stream 下必然爬不完坡。 */
-#define MOVL_SEG_RAMP_RATIO 3.0
-
 /* 估算弓高时在段内采几个中间点（纯计算，不占总线；24 点足够）。 */
 #define MOVL_BOW_SAMPLES    24
-
-/* ⚠️ 【死宏】当前无任何引用：弓高告警现在直接拿 ini 的 bow_mm 比
- *    （见 cmd_movel 里 bow > bow_budget*1.2+0.05 那段）。留档待接回或删除。 */
-#define MOVL_BOW_WARN_MM    1.0
-
-/* stream 模式「段内采一次样」要预留的时间(ms)。
- * ⚠️ 与 MIN_MS(20)/BEAT_S(0.10) 口径不匹配：判据是 used + 本值 ≤ period_ms，
- *    即节拍要 ≥180ms 才采得到 ⇒ 默认配置下永远采不到，只会打
- *    「节拍太短，段内一次都没采到」的提示。这三个值要一起重定。 */
-#define MOVL_STREAM_PROBE_MS 150
 
 /* 腕部奇异判定阈值(度)：|J5| 小于它就算进入奇异区（θ4 与 θ6 同轴、分配不唯一）。
  * 依据（实测）：home 位形沿 +Y 走 30mm，第 1 段就要 J4 转 89.98°。 */
@@ -139,10 +114,6 @@ static double movl_max_jump_deg(void);
 /* 浮点比较容差：位移(mm) / 角度(度)。用于判「起终点相同、无需运动」。 */
 #define MOVL_EPS_MM         0.05
 #define MOVL_EPS_DEG        0.05
-
-/* 本进程累计发出的 Modbus 写帧数（仅统计用，不参与控制逻辑）。
- * 用途：stream 模式算「单事务下发耗时」= 下发总耗时 ÷ 本计数。 */
-static int g_tx_written = 0;
 
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
                           const double angles[6], double speed,
@@ -973,7 +944,6 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
         for (i = 0; i < num_joints; i++) {
             j = joints[i];
             if (robot_is_masked(robot, j)) continue;
-            g_tx_written++;
             if (motor_set_profile(robot, j, accel_ms, decel_ms) != ERR_NONE)
                 printf("[警告] 关节%d 加减速设置失败\n", j);
         }
@@ -987,7 +957,6 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
             if (!set_profile && last_spd_ok[j] &&
                 fabs(s - last_spd[j]) <= 0.02 * ((ref > 1e-9) ? ref : 1.0))
                 continue;
-            g_tx_written++;
             if (motor_set_speed(robot, j, s) != ERR_NONE)
                 printf("[警告] 关节%d 速度设置失败\n", j);
             else {
@@ -999,7 +968,6 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
     for (i = 0; i < num_joints; i++) {
         j = joints[i];
         if (robot_is_masked(robot, j)) continue;
-        g_tx_written++;
         if (motor_move_abs(robot, j, tgt[j]) != ERR_NONE) {
             printf("[警告] 关节%d 多关节运动发指令失败\n", j);
             continue;
@@ -1182,30 +1150,6 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
     status_clear();
 }
 
-/* 采一次末端实际位置并更新偏差峰值（只读，不动臂）。任一轴读失败直接返回。 */
-static void movl_dev_sample(Robot *robot, const double *line_a, const double *line_b)
-{
-    const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-    double motor[6], mech[6], m[4][4], xyz[3];
-    int32_t pos[7];
-    int ok[7], j;
-
-    if (line_a == NULL || line_b == NULL) return;
-    for (j = 1; j <= 6; j++) {
-        pos[j] = motor_read_position(robot, j, &ok[j]);
-        if (!ok[j]) return;
-    }
-    for (j = 0; j < 6; j++) motor[j] = STEPS2DEG(pos[j + 1], red[j]);
-    joint_zero_motor_to_mech(motor, mech);
-    dh_forward(DH_TABLE, mech, m);
-    for (j = 0; j < 3; j++) xyz[j] = m[j][3];
-    {
-        double dev = movl_point_dev_mm(xyz, line_a, line_b);
-        if (!g_dev_seen || dev > g_dev_peak) g_dev_peak = dev;
-        g_dev_seen = 1;
-    }
-}
-
 /* 一次下发 + 等到位（movej_issue → movej_wait 的薄封装）。 */
 static void movej_joints(Robot *robot, int num_joints, const int joints[6],
                          const double angles[6], double speed,
@@ -1228,38 +1172,6 @@ static int movl_acc_floor_ms(void)
     if (ini_read_positive_double(INI_PATH, "movel", "acc_floor_ms", &v))
         return (int)v;
     return MOVL_ACC_FLOOR_MS;
-}
-
-/* 取 ini [movel] seg_ramp_ratio，兜底 3.0。
- * 含义：段节拍至少要有 (ACC+DEC) x 该倍率，否则每段爬不完坡就要刹车。 */
-static double movl_seg_ramp_ratio(void)
-{
-    double v;
-    if (ini_read_positive_double(INI_PATH, "movel", "seg_ramp_ratio", &v))
-        return v;
-    return MOVL_SEG_RAMP_RATIO;
-}
-
-/* 取 ini [movel] stream_beat_s，兜底 0.10s（stream 模式的节拍）。 */
-static double movl_stream_beat_s(void)
-{
-    double v;
-    if (ini_read_positive_double(INI_PATH, "movel", "stream_beat_s", &v))
-        return v;
-    return MOVL_STREAM_BEAT_S;
-}
-
-/* 取 ini [movel] step_mm（step/stream 的笛卡尔插补步长），兜底 1.0mm。
- * 这是「弧 vs 停顿」的总旋钮：弓高 ≈ 0.00085 × step_mm²(mm)，段数 = 线长/step_mm。
- *   1.0mm（默认）⇒ 50mm 线 50 段，弓高 0.001mm，但每段末归零 ⇒ 50 次停顿，很慢；
- *   16mm       ⇒ 50mm 线 3 段，弓高 0.22mm，只停 3 次。
- * ⚠️ 只影响 step/stream；smooth 是整段一次下发，不插补，永远吃整段的弓高。 */
-static double movl_step_mm(void)
-{
-    double v;
-    if (ini_read_positive_double(INI_PATH, "movel", "step_mm", &v))
-        return v;
-    return MOVL_STEP_MM;
 }
 
 /* 多关节 MoveJ（`MoveJ:J1..J6:角度..:速度:ACC:DEC`）：把 ACC/DEC 抬到安全下限后下发。 */
@@ -1299,48 +1211,6 @@ static void movl_stall_thresholds(int th[6])
     }
     if (ini_read_stall_current(INI_PATH, th)) return;
     for (i = 0; i < ROBOT_JOINT_COUNT; i++) th[i] = def[i];
-}
-
-/* 是否至少有一个轴启用了过流保护。全 0 ⇒ 关闭。 */
-static int movl_stall_on(const int th[6])
-{
-    int i;
-    for (i = 0; i < ROBOT_JOINT_COUNT; i++) {
-        if (th[i] > 0) return 1;
-    }
-    return 0;
-}
-
-/* MoveL 分段过流保护：任一轴实时电流 >= 自身阈值（100%）就急停【全部】关节，
- * 返回 1；否则返回 0。
- * ⚠️ 只在 step/stream 模式的分段点被调用；默认的 smooth 模式【全程不查】⇒
- *   想要碰撞保护必须显式写 `movel ...,step`。 */
-static int movl_stall_guard(Robot *robot, const int th[6])
-{
-    double worst = 0.0;
-    int worst_j = 0, worst_cur = 0;
-    int j;
-
-    if (!movl_stall_on(th)) return 0;
-
-    for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
-        int cur;
-        double r;
-        if (th[j] <= 0) continue;
-        if (robot_is_masked(robot, j + 1)) continue;
-        cur = robot_read_current_ma(robot, j + 1);
-        if (cur <= 0) continue;
-        r = (double)cur / (double)th[j];
-        if (r > worst) { worst = r; worst_j = j + 1; worst_cur = cur; }
-    }
-    if (worst >= 1.0) {
-        printf("[过流保护] 关节%d 实时电流 %d mA 超阈值 %d mA（%.0f%%），急停全部关节\n",
-               worst_j, worst_cur, th[worst_j - 1], worst * 100.0);
-        for (j = 0; j < ROBOT_JOINT_COUNT; j++)
-            if (!robot_is_masked(robot, j + 1)) motor_estop(robot, j + 1);
-        return 1;
-    }
-    return 0;
 }
 
 /* 直线规划：笛卡尔插补 → 逐点 IK → 时间表；再做两道安全闸。
@@ -1598,12 +1468,10 @@ static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
 }
 
 /* `movel X,Y,Z[,Rx,Ry,Rz] [SPD,ACC,DEC] [keep][,模式]` 主流程。
- * 模式：smooth(默认，整段一次下发) / step(1mm 弦，逐段等响应)
- *       / stream(不等+每节拍重设速度)。
- * ⚠️ sync 模式已于 2026-09-23 移除（分段必然段末归零 ⇒ 会停顿，实际用不到）；
- *   现在写 `,sync` 会被直接拒绝。
- * smooth 的代价：① 走关节空间直线（弓高=整段）② 全程不查过流
- *   ⇒ 想要碰撞保护必须显式写 `,step`。
+ * ⚠️ **模式只剩 smooth 一种**：终点一次 IK + 一次 MoveJ。
+ *   sync（2026-09-23）/ step / stream 均已移除，写了会被解析器拒绝（cmd_parser.c:293）。
+ * smooth 的代价：① 走关节空间直线（弓高 = 整段）② **全程不查过流 ⇒ 无碰撞保护**。
+ *   ⇒ 移动前请自行确认路径无障碍；运动期间过流保护只剩静止时后台巡检兜底。
  * 姿态：不给 Rx,Ry,Rz 或写 keep ⇒ 沿用当前姿态（避免 SLERP 拧姿态）。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
@@ -1616,7 +1484,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     double vmax[6];
     JointLimit limits[ROBOT_JOINT_COUNT];
     int joints[6] = {1, 2, 3, 4, 5, 6};
-    int count, fail_idx = -1, i, j;
+    int count, fail_idx = -1, j;
     char fail_reason[64] = {0};
     double total_dt = 0.0;
     double base_rpm = (cmd->speeds[0] > 0) ? cmd->speeds[0] : 60.0;
@@ -1679,10 +1547,13 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         for (j = 0; j < 6; j++) vmax[j] = speed_rpm * 6.0 / (double)red[j];
     }
 
-    double step_mm = movl_step_mm();
     int rc = 0;
 
-    rc = movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,
+    /* ⚠️ 第 5、6 个参数都是 dist（不是笔误）：step_mm 传整段距离 ⇒
+     *    line_count_for_distance() 算出 count=2，笛卡尔插补退化成【只有起点+终点】
+     *    ⇒ 本函数实际只做「终点一次 IK + 一次 MoveJ」，末端走弧。
+     *    逐点 IK / 限位过滤 / 跳变闸仍然生效，只是点数=2。 */
+    rc = movl_plan(start_pose, end_pose, q_start, limits, dist, dist, vmax,
                    q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
     if (rc != 0) {
         if (rc != -4) {
@@ -1690,27 +1561,6 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                    fail_idx, fail_reason);
         }
         return;
-    }
-
-    if (cmd->movl_mode == MOVL_MODE_STREAM && count > 2) {
-        double beat_s = movl_stream_beat_s();
-        double ramp_s = movl_seg_ramp_ratio() * (double)(acc + dec) / 1000.0;
-        int n_seg;
-        if (ramp_s > beat_s) beat_s = ramp_s;
-        n_seg = (int)ceil(total_dt / beat_s);
-        if (n_seg < 1) n_seg = 1;
-        if (n_seg < count - 1) {
-            step_mm = dist / (double)n_seg;
-            rc = movl_plan(start_pose, end_pose, q_start, limits, dist, step_mm, vmax,
-                           q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
-            if (rc != 0) {
-                if (rc != -4) {
-                    printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位：%s\n",
-                           fail_idx, fail_reason);
-                }
-                return;
-            }
-        }
     }
 
     dev_reset();
@@ -1735,7 +1585,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                "整段一次下发由驱动器自己规划 ⇒ 段间零停顿\n"
                "        代价：走关节空间直线，会偏离笛卡尔直线 %.2f mm"
                "（弓高 ∝ 长度²，线段越短越看不出来）\n"
-               "        ⚠️ 全程【不查过流】⇒ 无碰撞保护；要保护请改用 ,step\n",
+               "        ⚠️ 全程【不查过流】⇒ 无碰撞保护（step/stream 已移除）\n",
                dist, sync_rpm, total_dt, bow_full);
 
         movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec,
@@ -1744,167 +1594,6 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         return;
     }
 
-    {
-        double bow = 0.0;
-        for (i = 1; i < count; i++) {
-            double d = movl_bow_mm(q_seq[i - 1], q_seq[i], start_pose, end_pose);
-            if (d > bow) bow = d;
-        }
-        printf("MoveL: %d 段, 步长 %.1f mm, 位移 %.1f mm, 节拍 %.3f s, 预计 %.2f s, "
-               "模式 %s, 几何弓高 ≤ %.2f mm（过流保护 %s）",
-               count - 1, step_mm, dist, (count > 1) ? seg_dt[0] : 0.0, total_dt,
-               (cmd->movl_mode == MOVL_MODE_STREAM) ? "stream" : "step", bow,
-               movl_stall_on(stall_th) ? "开启" : "关闭（六轴阈值均为 0）");
-        {
-            const double bow_budget = movl_bow_budget();
-            if (bow > bow_budget * 1.2 + 0.05)
-                printf("\n[警告] 弓高 %.2f mm 超出预算 %.2f mm（段数被节拍压到 %d 段）："
-                       "降速或调大 ACC/DEC 可把节拍拉长、段数变多；"
-                       "也可调大 bow_mm 接受这条弧", bow, bow_budget, count - 1);
-        }
-        if (count > 1 && seg_dt[0] * 1000.0 < (double)(acc + dec)) {
-            static double hint_seg_ms = -1.0;
-            static int    hint_ramp   = -1;
-            double seg_ms = seg_dt[0] * 1000.0;
-            if (fabs(seg_ms - hint_seg_ms) > 0.5 || (acc + dec) != hint_ramp) {
-                hint_seg_ms = seg_ms;
-                hint_ramp   = acc + dec;
-                printf("\n[提示] 段时长 %.0f ms 短于加减速时间之和 %d ms：每段都爬不完坡就要刹车，"
-                       "实际耗时会明显长于预计。想又快又顺就调小 ACC/DEC，"
-                       "想更少停顿就调大 ACC/DEC（但会压低段数、弓高变大）",
-                       seg_ms, acc + dec);
-            }
-        }
-        printf("\n");
-    }
-
-    int32_t s_tgt[7] = {0};
-    uint8_t s_pend[7] = {0};
-    int s_remain = 0;
-    uint32_t mv_t0 = GetTickCount();
-    uint32_t iss_sum = 0, iss_max = 0, iss_n = 0;
-    uint32_t iss_tx = 0;
-    int probe_n = 0;
-    for (i = 1; i < count; i++) {
-        if (movl_stall_guard(robot, stall_th)) return;
-        if (movl_stall_on(stall_th)) {
-            double worst = 0.0;
-            for (j = 0; j < ROBOT_JOINT_COUNT; j++) {
-                int cur;
-                double r;
-                if (stall_th[j] <= 0) continue;
-                if (robot_is_masked(robot, j + 1)) continue;
-                cur = robot_read_current_ma(robot, j + 1);
-                if (cur <= 0) continue;
-                r = (double)cur / (double)stall_th[j];
-                if (r > worst) worst = r;
-            }
-            if (worst > 0.6) {
-                double factor = 0.8 / worst;
-                if (factor > 1.0) factor = 1.0;
-                speed_rpm = base_rpm * factor;
-                if (speed_rpm < 1.0) speed_rpm = 1.0;
-                {
-                    const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-                    for (j = 0; j < 6; j++) vmax[j] = speed_rpm * 6.0 / (double)red[j];
-                }
-                if ((count - i) >= 2)
-                    line_time_table(&q_seq[i], count - i, vmax, &seg_dt[i], NULL);
-            }
-        }
-
-        double seg_speed = 0.0;
-        {
-            const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-            double t_eff = seg_dt[i - 1] - (double)(acc + dec) / 2000.0;
-            double t_floor = 0.25 * seg_dt[i - 1];
-            if (t_eff < t_floor) t_eff = t_floor;
-            for (j = 0; j < 6; j++) {
-                double d = fabs(q_seq[i][j] - q_seq[i - 1][j]) * (double)red[j];
-                double rpm = d / t_eff / 6.0;
-                if (rpm > seg_speed) seg_speed = rpm;
-            }
-        }
-        if (seg_speed < 1.0) seg_speed = 1.0;
-
-        if (cmd->movl_mode == MOVL_MODE_STREAM) {
-            uint32_t t0 = GetTickCount();
-            int tx_before = g_tx_written;
-            int r = movej_issue(robot, 6, joints, q_seq[i], q_seq[i - 1],
-                                seg_speed, acc, dec, (i == 1) ? 1 : 0, s_tgt, s_pend);
-            if (r > 0) s_remain = r;
-            iss_tx += (uint32_t)(g_tx_written - tx_before);
-            uint32_t period_ms = (uint32_t)(seg_dt[i - 1] * 1000.0);
-            if (period_ms < MOVL_STREAM_MIN_MS) period_ms = MOVL_STREAM_MIN_MS;
-            uint32_t used = GetTickCount() - t0;
-            iss_sum += used; iss_n++;
-            if (used > iss_max) iss_max = used;
-
-            if (used + MOVL_STREAM_PROBE_MS <= period_ms) {
-                movl_dev_sample(robot, start_pose, end_pose);
-                probe_n++;
-                used = GetTickCount() - t0;
-            }
-            if (used < period_ms) Sleep(period_ms - used);
-            status_line("MoveL stream %d/%d 段", i, count - 1);
-        } else {
-            movej_joints(robot, 6, joints, q_seq[i], seg_speed, acc, dec,
-                         start_pose, end_pose);
-        }
-    }
-
-    status_clear();
-    if (cmd->movl_mode == MOVL_MODE_STREAM) {
-        if (s_remain > 0) movej_wait(robot, joints, s_tgt, s_pend, s_remain,
-                                     start_pose, end_pose);
-        printf("MoveL stream %d 段完成，实际耗时 %.2f s（预计 %.2f s），"
-               "段时长 %.0f ms（ACC/DEC = %d/%d ms）\n",
-               count - 1, (GetTickCount() - mv_t0) / 1000.0, total_dt,
-               (count > 1) ? seg_dt[0] * 1000.0 : 0.0, acc, dec);
-        if (probe_n > 0)
-            printf("    （偏差为全程峰值：段内采样 %d 次 + 收尾等待）\n", probe_n);
-        else
-            printf("    [注意] 节拍太短，段内一次都没采到 ⇒ 下面的偏差只覆盖最后\n"
-                   "           一段的收尾，不代表全程，不要拿它和 step 比。\n"
-                   "           想采到就放慢速度或调大 ACC/DEC，把节拍拉长到 %d ms 以上。\n",
-                   MOVL_STREAM_PROBE_MS);
-        dev_report("stream ");
-        if (iss_n > 0) {
-            double per = (double)iss_sum / (double)iss_n;
-            double per_tx = (double)iss_sum / (double)iss_tx;
-            double seg_ms = (count > 1) ? seg_dt[0] * 1000.0 : 0.0;
-            printf("    下发：每节拍 %.0f ms（峰值 %.0f ms），单事务 %.1f ms",
-                   per, (double)iss_max, per_tx);
-            if (seg_ms > 0.0)
-                printf("，占段时长 %.0f%%", 100.0 * per / seg_ms);
-            printf("\n");
-            if (seg_ms > 0.0 && per > 0.25 * seg_ms) {
-                static int beat_hint_done = 0;
-                if (!beat_hint_done) {
-                    beat_hint_done = 1;
-                    printf("    [提示] 节拍超过段时长的 25%%，六轴起步严重不同步，末端偏差会远大于弓高。\n"
-                           "           优先降低单事务耗时（换低延迟转换器 / 提高波特率 / 广播下发），"
-                           "其次加长段时长（调大 ACC/DEC 或放慢速度）。\n");
-                }
-            }
-            if (per_tx > 8.0) {
-                static int lat_hint_done = 0;
-                if (!lat_hint_done) {
-                    lat_hint_done = 1;
-                    printf("    [提示] 单事务 %.1f ms 明显偏慢（115200 下纯线上时间约 1.8 ms）。\n"
-                           "           FTDI / CP210x / PL2303 芯片：设备管理器 → 端口(COM 和 LPT) →\n"
-                           "           你的串口 → 端口设置 → 高级 → “延迟计时器(毫秒)” 16 改 1 →\n"
-                           "           确定后重开本程序，通常可提速数倍。\n"
-                           "           【CH340（VID_1A86&PID_7523）不适用】：其驱动没有这一项，改不了。\n"
-                           "           只能换 FTDI/CP210x 转换器；提波特率收益有限——实测 8.4 倍开销里\n"
-                           "           线上只占 1.8 ms，波特率翻倍最多省一成，大头是等响应与系统调度。\n",
-                           per_tx);
-                }
-            }
-        }
-    } else {
-        dev_report("step ");
-    }
 }
 
 /* 法兰法线（矩阵第三列 = 工具 Z 轴）与竖直方向的夹角（度）。0 = 垂直地面。

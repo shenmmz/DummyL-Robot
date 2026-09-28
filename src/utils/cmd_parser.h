@@ -30,14 +30,13 @@
 #define CMD_DRVBAUD   26
 #define CMD_PIPE      27
 
-/* movel 的三种模式。
- * ⚠️ sync（按弓高预算分段 + 逐航点等到位）已于 2026-09-23 移除：分段必然段末
- *    速度归零（ACC+DEC=170ms），实际场景用不到。写 ,sync 会被直接拒绝。
- * step=分段+每段等响应（有逐段过流保护，但段末同样归零 ⇒ 会停）
- * stream=按节拍连发（段末同样归零）/ smooth=一段走完（关节空间直线、【不查过流】）。 */
+/* movel 模式：★ 2026-09-28 起【只保留 smooth】。
+ * smooth = 对终点跑一次 IK → 一次 MoveJ → 驱动器自己做关节空间插值
+ *          （等价于 second 的 plan_movel：整段一次 IK、不插补）。
+ *          ⇒ 无段间停顿；代价是末端走弧（弓高 = 整段）且【不查过流】。
+ * 已移除：step（逐段插补+逐段过流保护）、stream（按节拍连发）、sync（2026-09-23 移除）。
+ *   三者写进命令都会被拒绝。要恢复见 git 历史（2026-09-28 的父提交）。 */
 typedef enum {
-    MOVL_MODE_STEP = 1,
-    MOVL_MODE_STREAM = 2,
     MOVL_MODE_SMOOTH = 3
 } MovlMode;
 
