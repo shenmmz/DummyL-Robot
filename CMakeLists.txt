@@ -51,7 +51,6 @@ add_library(comm STATIC
 # ---------- 静态库: kinematics ----------
 # 矩阵运算 + DH 建模/正解 + 球腕解耦解析 IK
 add_library(kinematics STATIC
-    src/kinematics/mat3.c
     src/kinematics/dh.c
     src/kinematics/ik.c
     src/kinematics/joint_zero.c

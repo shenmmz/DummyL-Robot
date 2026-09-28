@@ -29,9 +29,8 @@
  * 这一块是「运动行为」的全部可调旋钮，分四组（末尾另有一个运行期计数器）：
  *   ① 轮询与到位判据  ② 速度/加减速下限  ③ 几何与安全闸门  ④ 读回异常与免读路径
  * 每条的实测依据写在下面。改之前先看注释里的基线，别拿旧数值推理。
- * ⚠️ 与 ini 重名的项（bow_mm / acc_floor_ms / seg_ramp_ratio / stream_beat_s /
- *    max_step_deg / max_jump_deg）都以 ini 为准，这里的值只是
- *    「ini 缺键时的兜底」。改 ini 不用动这里，但两边口径必须一致。
+ * ⚠️ 与 ini 重名的项（acc_floor_ms / max_step_deg / max_jump_deg）都以 ini 为准，
+ *    这里的值只是「ini 缺键时的兜底」。改 ini 不用动这里，但两边口径必须一致。
  */
 
 /* ---- ① 轮询与到位判据 ---- */
@@ -69,11 +68,6 @@
 #define MOVL_ACC_FLOOR_MS   60
 
 /* ---- ③ 几何与安全闸门 ---- */
-
-/* 允许的几何弓高预算(mm)（ini [movel] bow_mm 的兜底）。MoveL 每次据此判
- * 「本次弓高是否超预算」并告警。弓高 ≈ 0.001 × 段长²(mm)
- * ⇒ 2.0mm 对应约 45mm 以内的段。 */
-#define MOVL_BOW_BUDGET_MM   2.0
 
 /* 笔尖方向偏差告警阈值(度)。依据：J5 差 1° ⇒ 笔尖偏 0.72mm；5° ≈ 3.6mm。
  * 超了就该怀疑 movel 的姿态参数抄错了（没抄当前 getpos 原值）。 */
@@ -1198,21 +1192,6 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
                  cmd->speeds[0], acc, dec, NULL, NULL);
 }
 
-/* 取六轴堵转阈值：优先监控器（含 stall: 临时改过的）→ ini → 编译期默认表。 */
-static void movl_stall_thresholds(int th[6])
-{
-    const int def[ROBOT_JOINT_COUNT] = ROBOT_STALL_CURRENT_MA_TABLE;
-    int i;
-
-    if (g_mon != NULL) {
-        for (i = 0; i < ROBOT_JOINT_COUNT; i++)
-            th[i] = monitor_get_stall_threshold(g_mon, i + 1);
-        return;
-    }
-    if (ini_read_stall_current(INI_PATH, th)) return;
-    for (i = 0; i < ROBOT_JOINT_COUNT; i++) th[i] = def[i];
-}
-
 /* 直线规划：笛卡尔插补 → 逐点 IK → 时间表；再做两道安全闸。
  * 返回 0 成功 / -1 插补失败 / -2 IK 失败或越软限位 / -3 时间表失败 /
  *      -4 单段跳变超上限（整条 MoveL 不下发）。
@@ -1330,41 +1309,6 @@ static double movl_max_jump_deg(void)
     double v;
     if (ini_read_max_jump_deg(INI_PATH, &v)) return v;
     return MOVL_JUMP_MAX_DEG;
-}
-
-/* 取 ini [movel] bow_mm（允许的几何弓高预算），兜底 MOVL_BOW_BUDGET_MM(2.0mm)。
- * step/stream 模式：实测弓高超预算就告警（说明段数被节拍压得太少）。 */
-static double movl_bow_budget(void)
-{
-    FILE *f;
-    char line[256];
-    int in_movel = 0;
-
-    f = fopen(INI_PATH, "r");
-    if (f == NULL) {
-        return MOVL_BOW_BUDGET_MM;
-    }
-    while (fgets(line, sizeof(line), f) != NULL) {
-        char *p = line;
-        char *eq;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == ';' || *p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
-        if (*p == '[') {
-            in_movel = (strncmp(p, "[movel]", 7) == 0) ? 1 : 0;
-            continue;
-        }
-        if (!in_movel) continue;
-        if (strncmp(p, "bow_mm", 6) != 0) continue;
-        eq = strchr(p, '=');
-        if (eq == NULL) continue;
-        fclose(f);
-        {
-            double v = atof(eq + 1);
-            return (v > 0.0) ? v : MOVL_BOW_BUDGET_MM;
-        }
-    }
-    fclose(f);
-    return MOVL_BOW_BUDGET_MM;
 }
 
 /* 两个角度之差，归一到 (-180, 180]。用于姿态比较，避免 359°/-1° 被判成差 360°。 */
@@ -1500,9 +1444,6 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                    "（过短的减速会丢步，表现为走到一半卡住）\n",
                    cmd->accel_ms[0], cmd->decel_ms[0], floor_ms, acc, dec);
     }
-    int stall_th[ROBOT_JOINT_COUNT];
-    movl_stall_thresholds(stall_th);
-
     for (j = 0; j < 6; j++) q_start[j] = robot_read_position_deg(robot, j + 1, NULL);
     {
         double m[4][4], rpy[3];
