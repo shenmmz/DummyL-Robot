@@ -57,11 +57,7 @@ static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg
     *yaw_deg = yaw / LINE_DEG2RAD;
 }
 
-/* 四元数球面线性插值：t=0 得 q1，t=1 得 q2。
- * ⚠️ movel 的姿态参数是"画斜线"的头号根因：end_pose 全取用户输入、起点由 FK 得，
- * 姿态不一致时 SLERP 会拧姿态 ⇒ 笔尖绕法兰摆 tool_length*sin(theta)。
- * 实测 80mm 直线：姿态抄【当前 getpos】原值 ⇒ 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。
- * 只看法兰坐标永远发现不了（法兰直线度恒 0.0000mm）。 */
+/* 四元数球面线性插值：t=0 得 q1，t=1 得 q2。 */
 static void slerp(const double q1[4], const double q2[4], double t, double out[4])
 {
     double qq2[4] = {q2[0], q2[1], q2[2], q2[3]};

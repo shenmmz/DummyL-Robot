@@ -39,14 +39,7 @@ int ik_solve_ref(const DhParam *params, const double pose[4][4],
 /* 解状态码转中文（给日志/告警用）。 */
 const char *ik_sol_status_str(IkSolStatus s);
 
-/* 简化逆解：只要解，不要状态。返回解数。
- * ✅ 2026-09-28 实测：口径统一到共面档后，本函数与 Hg_Robot_Arm 的 kin_ik
- *    【解集完全一致】—— 508 组位形最大最近解差 0.0000°、位置回代 0.000000mm
- *    （对端需开 -DKIN_FIX_ORIGINAL_BUGS 关掉它保留的原文 wrap bug，否则 146/508 组会崩）。
- *    ⚠️ 旧记录"喂真机位姿给它差 40°"是【口径不匹配】(52 在 d 列 vs a 列)造成的，已作废。
- *    口径不匹配时的真实数字：位置回代 73.539105mm，而关节角解集仍差 0.0000°
- *    ⇒ 只看姿态发现不了，必须量位置。
- * 实测单次解算 <40µs，不是瓶颈。 */
+/* 简化逆解：只要解、不要状态，返回解数。 */
 int ik_solve(const DhParam *params, const double pose[4][4],
              double solutions[IK_MAX_SOLUTIONS][6]);
 

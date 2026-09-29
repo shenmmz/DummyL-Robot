@@ -96,14 +96,7 @@ const char *ik_sol_status_str(IkSolStatus s)
     }
 }
 
-/* 六轴 IK 主解算（解析法），最多 8 组解 = 肩 2 x 肘 2 x 腕 2。
- * ref_joints 只用于【腕奇异】分支定 theta4（其余分支不用）。
- * 返回解个数；info[] 逐位标注肩/肘/腕状态（VALID / SINGULAR / DEGENERATE / OUT_OF_REACH）。
- * ★ 52mm 肘部偏置写在 a3（沿 x3、与大臂共面），与 dh.c 的 DH_TABLE[2] 一致。
- *   肩：θ1 用 atan2(−d3·wx + U·wy, U·wx + d3·wy)，U = ±√(r²−d3²)。
- *       共面档 d3=0 ⇒ 自动退化成 atan2(wy,wx) 与 atan2(−wy,−wx) 两组。
- *   肘：平面投影里两条边是 a2=146 与 l_ew=√(a3²+d4²)=126.2101（52 折进长度与相位）。
- *   腕：θ4/θ5/θ6。 */
+/* 六轴 IK 主解算（解析法），最多 8 组解 = 肩 2 x 肘 2 x 腕 2。 */
 int ik_solve_ref(const DhParam *params, const double pose[4][4],
                  const double *ref_joints,
                  double solutions[IK_MAX_SOLUTIONS][6],
@@ -323,8 +316,7 @@ int ik_solve(const DhParam *params, const double pose[4][4],
     return ik_solve_ex(params, pose, solutions, NULL);
 }
 
-/* 按关节软限位过滤候选解，返回剩下的个数。limits=NULL 表示不过滤。
- * 容差 ±1e-6°，避免边界解因浮点误差被误杀。 */
+/* 按关节软限位过滤候选解；limits=NULL 表示不过滤。 */
 int ik_filter_by_limits(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
                         const JointLimit *limits, double filtered[IK_MAX_SOLUTIONS][6])
 {
@@ -351,8 +343,7 @@ int ik_filter_by_limits(const double solutions[IK_MAX_SOLUTIONS][6], int candida
     return n;
 }
 
-/* 从候选解里挑 Σ w·(q - current)² 最小的一组，写入 best，返回 0；无候选返回 -1。
- * weights=NULL 时权重全 1（即只比总关节位移）。 */
+/* 从候选解里挑 Σ w·(q - current)² 最小的一组；无候选返回 -1。 */
 int ik_select_best(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
                    const double *current_joints, const double *weights, double best[6])
 {
@@ -392,16 +383,13 @@ double ik_wrap_deg(double deg)
     return r - 180.0;
 }
 
-/* 取与 ref_deg 最接近的等价角（相差 360 的整数倍）。
- * 用途：±180 分支切割时 float/double 可能挑到相反的代表值（相差 360 = 50 圈），
- * 所以【比对角度必须取模或先 unwrap】，否则会误判成大跳变。 */
+/* 取与 ref_deg 最接近的等价角（相差 360 的整数倍）。 */
 double ik_unwrap_near(double deg, double ref_deg)
 {
     return ref_deg + ik_wrap_deg(deg - ref_deg);
 }
 
-/* 把每组解整体平移到离 ref_joints 最近的 ±360k 分支上。
- * 不做这一步的话，359° 与 -1° 明明是同一姿态，却会被当成相差 360° 的两种解。 */
+/* 把每组解整体平移到离 ref_joints 最近的 ±360k 分支上。 */
 int ik_unwrap_solutions(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
                         const double *ref_joints, double out[IK_MAX_SOLUTIONS][6])
 {
@@ -420,9 +408,7 @@ int ik_unwrap_solutions(const double solutions[IK_MAX_SOLUTIONS][6], int candida
     return n;
 }
 
-/* 先 unwrap 再 select_best：保证相邻插补点选到【同一分支】。
- * 直接 select_best 会在 ±180° 分支间来回跳，表现为某轴突然翻转一整圈。
- * ⚠️ 比对角度必须取模：float/double 差异会让代表值落到相反一侧。 */
+/* 先 unwrap 再 select_best，保证相邻插补点选到同一分支。 */
 int ik_select_best_continuous(const double solutions[IK_MAX_SOLUTIONS][6], int candidate_cnt,
                               const double *current_joints, const double *weights, double best[6])
 {

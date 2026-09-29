@@ -19,15 +19,11 @@ void line_pose_to_matrix(const double pose6[6], double m[4][4]);
 /* 按步长算需要几个点（含首尾，上限 LINE_MAX_POINTS=257）。 */
 int line_count_for_distance(double dist_mm, double step_mm);
 
-/* 位置线性插值 + 姿态 SLERP，生成 count 个位姿点。
- * ⚠️ end_pose 的姿态必须抄【当前 getpos】原值，否则画斜线。
- * 实测 80mm 线：抄 getpos 原值 ⇒ 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。 */
+/* 位置线性插值 + 姿态 SLERP，生成 count 个位姿点。 */
 int line_plan(const double start_pose[6], const double end_pose[6],
               int count, LinePath *path);
 
-/* 逐点位姿逆解成关节序列（带限位过滤 + 连续选优）。
- * 失败时经 fail_idx/fail_reason 回带第一个坏点与原因。
- * ⚠️ 若第 1 段就要求某轴转几十度，多半是路径擦过腕部奇异(J5≈0)或分支翻转。 */
+/* 逐点位姿逆解成关节序列（带限位过滤 + 连续选优）；失败时回带第一个坏点与原因。 */
 int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits,
                const double *start_joints, double (*q_out)[6],
                int *fail_idx, char *fail_reason);

@@ -15,8 +15,7 @@ DhParam DH_TABLE[DH_JOINT_COUNT] = {
     { 0.0,                   91.5,    0.0,   0.0                },
 };
 
-/* 设工具长度：d6 = 91.5（法兰面，腕心+91.5，裸臂口径）+ tool_mm。ini [tool] tool_length。
- * ⚠️ 这是【物理标定项】——d6 基值 91.5 是量出来的法兰面偏置，不是可优化掉的冗余。 */
+/* 设工具长度：d6 = 91.5（法兰面基值）+ tool_mm。 */
 void dh_set_tool_length(double tool_mm)
 {
     DH_TABLE[5].d = 91.5 + tool_mm;

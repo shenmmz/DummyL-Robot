@@ -15,8 +15,7 @@
 /* 单个关节的标准 DH 齐次变换：Rz(theta) · Tz(d) · Tx(a) · Rx(alpha)。 */
 void dh_transform(const DhParam *p, double theta_rad, double t[4][4]);
 
-/* 六轴正解：关节角（度，机械角）→ 末端位姿矩阵。
- * 实测单次 <40us，不是性能瓶颈。 */
+/* 六轴正解：关节角（度，机械角）→ 末端位姿矩阵。 */
 void dh_forward(const DhParam *params, const double *joints_deg, double pose[4][4]);
 
 /* 位姿矩阵 → 位置(mm) + RPY(度)，约定 Rz(yaw)*Ry(pitch)*Rx(roll)。 */

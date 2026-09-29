@@ -16,9 +16,7 @@ struct SerialPort {
     char name[64];
 };
 
-/* 打开串口（本机是 CH340 / CH341SER 驱动）。
- * ⚠️ CH340 注册表里【没有】FTDI 那种 LatencyTimer 项，所以"改设备管理器延迟计时器"
- * 这条路对它根本不存在 —— 当年正是这个误导把排查方向带偏了。 */
+/* 打开串口。 */
 SerialPort *serial_open(const char *port_name, uint32_t baudrate)
 {
     SerialPort *port;
@@ -120,11 +118,7 @@ int serial_write(SerialPort *port, const uint8_t *data, size_t len)
     return ok ? (int)written : -1;
 }
 
-/* 从串口读数据。
- * ⚠️ 关键约束：**max_len 必须等于实际会到达的字节数**。
- * 请求长度大于实际长度时 ReadFile 不会完成，只能等 ReadIntervalTimeout，
- * 而 CH341SER 把它挂在 ~15.6ms 节拍上 ⇒ 每笔白等一节拍。
- * 详见 modbus_read_reply()。 */
+/* 从串口读数据。 */
 int serial_read(SerialPort *port, uint8_t *buf, size_t max_len, uint32_t timeout_ms)
 {
     DWORD got = 0;
@@ -228,10 +222,7 @@ static void ops_flush(void)
 }
 
 
-/* 运行中修改 PC 侧波特率。
- * ⚠️ 驱动器侧改波特率是【写完立即生效】，PC 侧必须同时改，否则当场失联。
- * ⚠️ 六台必须【广播一起写】（逐台写第一台就断）。
- * ⚠️ 不固化（0x00DC=1）则断电回 115200，而 ini 已是新速率 ⇒ 下次上电失联。 */
+/* 运行中修改 PC 侧波特率。 */
 int serial_set_baud(uint32_t baudrate)
 {
     DCB dcb;
@@ -252,7 +243,7 @@ int serial_set_baud(uint32_t baudrate)
     return 0;
 }
 
-/* 取当前波特率。判读文案必须用它，不要硬编码 MODBUS_BAUDRATE（改 ini 后会自相矛盾）。 */
+/* 取当前波特率。 */
 uint32_t serial_get_baud(void)
 {
     DCB dcb;
@@ -268,8 +259,7 @@ uint32_t serial_get_baud(void)
     return (uint32_t)dcb.BaudRate;
 }
 
-/* 设置 RTS 电平（looptest 用）。
- * ⚠️ RTS 停在 ENABLE 会让六轴全部"离线"。 */
+/* 设置 RTS 电平。 */
 int serial_set_rts(int mode)
 {
     DCB dcb;

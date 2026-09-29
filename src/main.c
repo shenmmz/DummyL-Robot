@@ -68,10 +68,7 @@ static int ini_read_serial(const char *path, char *port, size_t port_sz, unsigne
     return 1;
 }
 
-/* 程序入口：读 ini → 枚举注册表串口（会【覆盖】ini 里的 port）→ robot_init
- * → 起后台监控线程 → 进入命令循环。
- * 两个坑：① robot_init 只要求串口能打开，六轴全离线也不退出（所以不接臂也能跑 looptest）；
- * ② 必须在【项目根目录】运行，INI_PATH 是相对路径。 */
+/* 程序入口：读 ini → 初始化 robot → 进 CLI 交互循环。 */
 int main(int argc, char **argv)
 {
     char port[64];

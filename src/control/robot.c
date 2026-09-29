@@ -18,7 +18,7 @@
 
 static const uint8_t SLAVE_ADDR_TABLE[ROBOT_JOINT_COUNT] = ROBOT_SLAVE_ADDR_TABLE;
 
-/* 关节号 → Modbus 从站地址。本机实测地址是 2 与 3。 */
+/* 关节号 → Modbus 从站地址。 */
 uint8_t joint_slave(int joint)
 {
     return SLAVE_ADDR_TABLE[joint - 1];
@@ -33,7 +33,7 @@ struct Robot {
     CRITICAL_SECTION lock;
 };
 
-/* 【持总线锁】发一帧并等响应。所有普通事务都要走这里。 */
+/* 持总线锁发一帧并等响应。 */
 ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *out)
 {
     ErrCode rc;
@@ -47,7 +47,7 @@ ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *o
     return rc;
 }
 
-/* 【持总线锁】发一帧、不等响应。 */
+/* 持总线锁发一帧，不等响应。 */
 ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len)
 {
     ErrCode rc;
@@ -61,10 +61,7 @@ ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len)
     return rc;
 }
 
-/* 手工持总线锁：把【多帧】当成一次不可分割的批处理（例如"先连发 6 个请求、
- * 再收 6 个响应"的流水线读）。持锁期间不要再调 robot_request ——
- * 临界区可重入、不会死锁，但语义上等于把批处理切碎，失去意义。
- * 持锁期间也不要调用会长时间阻塞的操作（会卡住监控线程）。 */
+/* 手工获取总线锁，用于多帧批处理。 */
 void robot_bus_lock(Robot *r)
 {
     if (r == NULL) return;
@@ -78,9 +75,7 @@ void robot_bus_unlock(Robot *r)
     LeaveCriticalSection(&r->lock);
 }
 
-/* 上电时把每转脉冲数(0x0024)写成 10000 并【读回校验】。
- * ⚠️ 该寄存器断电即回 4000，未对齐时同样角度会被放大 2.5 倍（实测 90° 转成 225°）。
- * 编码器在电机侧 ⇒ 程序读回永远自洽，只有写后读回比对才能发现。 */
+/* 上电时把每转脉冲数(0x0024)写成 10000 并读回校验。 */
 void robot_apply_subdivision(Robot *robot)
 {
     int i, ok_cnt = 0, fail_cnt = 0;
@@ -146,8 +141,7 @@ int robot_subdivision_ok(const Robot *robot, int joint)
     return robot->subdiv_ok[joint - 1] ? 1 : 0;
 }
 
-/* 打开串口并建立 Robot 对象。
- * ⚠️ 只要求【串口能打开】，六轴全离线也不报错退出 ⇒ 不接机械臂也能跑 looptest 这类离线测试。 */
+/* 打开串口并建立 Robot 对象。 */
 Robot *robot_init(const char *port_name, uint32_t baudrate)
 {
     Robot *r = (Robot *)calloc(1, sizeof(Robot));
@@ -254,7 +248,7 @@ int robot_is_masked(const Robot *robot, int joint)
     return robot->masked[joint - 1];
 }
 
-/* 使能某轴。⚠️ 不使能时读回的位置是假数，所以标准顺序是 enable → getpos → alarm。 */
+/* 使能某轴。 */
 ErrCode robot_enable(Robot *robot, int joint)
 {
     ErrCode rc;
@@ -298,8 +292,7 @@ ErrCode robot_disable(Robot *robot, int joint)
     return rc;
 }
 
-/* 判断机械角是否在软限位内：1=在内 / 0=越界（out_min 与 out_max 传出边界）/ <0=关节号非法。
- * 越界的目标必然让电机顶到机械极限并触发堵转/过流，是一次纯粹的无效冲撞。 */
+/* 判断机械角是否在软限位内（1=在内 / 0=越界 / <0=关节号非法）。 */
 int robot_angle_in_soft_limit(int joint, double deg, double *out_min, double *out_max)
 {
     const double lmin[ROBOT_JOINT_COUNT] = ROBOT_JOINT_LIMIT_MIN_DEG;
@@ -311,11 +304,7 @@ int robot_angle_in_soft_limit(int joint, double deg, double *out_min, double *ou
     return (deg >= lmin[joint - 1] && deg <= lmax[joint - 1]) ? 1 : 0;
 }
 
-/* 判"读回值是不是离谱"—— 用来区分【真位置】和【总线/读回异常】。
- * 命中条件（满足其一）：① 最严重越限轴超出 big_margin_deg；
- *                      ② 同时有 >=3 个轴越限（每轴越限须 >0.5° 死区）。
- * 依据：2026-09-19 实测六轴读回同时变成越限值、末端偏差冻结在 258.92mm 不动
- * ⇒ 这是通信异常，不是机械臂真的动了。返回 1 时调用方应立刻中止而不是等超时。 */
+/* 判断读回值是否离谱异常（用于区分真位置与总线读回异常）。 */
 int robot_readback_anomaly(const double deg[6], const int ok[6],
                            double big_margin_deg,
                            int *bad_joint, double *bad_excess)
@@ -423,7 +412,7 @@ int robot_is_online(Robot *robot, int joint)
     return (rc == ERR_NONE) ? 1 : 0;
 }
 
-/* 读位置（步）。⚠️ 必须看 *ok：失联时返回 0 但 ok=0，把 0 当真实位置会做出错误决策。 */
+/* 读位置（步），ok 出参表示是否成功。 */
 int32_t robot_read_position_steps(Robot *robot, int joint, int *ok)
 {
     int32_t val;
@@ -441,8 +430,7 @@ int32_t robot_read_position_steps(Robot *robot, int joint, int *ok)
     return val;
 }
 
-/* 读位置（机械角，度）= 步数 → 度 → 减零点。
- * ⚠️ 失联时会打 0,0,90,0,0,0 这种"看起来正常"的假数 ⇒ 必须用 alarm 交叉验证。 */
+/* 读位置（机械角，度）：步数换算后减零点。 */
 double robot_read_position_deg(Robot *robot, int joint, int *ok)
 {
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;

@@ -16,11 +16,10 @@ int ini_write_joint_zero(const char *path, const double zero[6]);
 /* 读 [tool] tool_length（mm）。缺键时 *tool_mm 保持 0。 */
 int ini_read_tool_length(const char *path, double *tool_mm);
 
-/* 读 [tool] pen_length（mm）。实测标定为 41.17。 */
+/* 读 [tool] pen_length（mm）。 */
 int ini_read_pen_length(const char *path, double *pen_mm);
 
-/* 读 [stall] 六轴堵转电流阈值（mA）。
- * ⚠️ 阈值疑似偏低：实测静止电流 ~500/499/495/385/371/254 vs 阈值 480/490/480/400/390。 */
+/* 读 [stall] 六轴堵转电流阈值（mA）。 */
 int ini_read_stall_current(const char *path, int th[6]);
 
 /* 读 [safety] max_step_deg（单次运动位移上限，度）。 */

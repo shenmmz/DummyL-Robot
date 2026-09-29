@@ -68,8 +68,7 @@ int monitor_get_stall_threshold(const Monitor *m, int joint)
     return m->stall_threshold_ma[joint - 1];
 }
 
-/* 创建监控对象：建快照锁，并建两个自动复位事件 ——
- * wake_ev（打断线程等待）与 parked_ev（通知调用方"已让出总线"）。 */
+/* 创建监控对象（快照锁 + 两个自动复位事件）。 */
 Monitor *monitor_create(Robot *robot, const int stall_threshold_ma[6])
 {
     Monitor *m;
@@ -127,9 +126,7 @@ void monitor_destroy(Monitor *m)
     free(m);
 }
 
-/* 巡检单个关节：读状态 + 电流，并做【边沿检测】——
- * 掉线/恢复、报警置位/清除、位置超差、软限位、堵转，都只在跳变时报一次，
- * 否则每 300ms 刷一行会把控制台淹掉。 */
+/* 巡检单轴，仅在跳变时报一次（掉线/恢复、报警、超差、软限位、堵转）。 */
 static void monitor_scan_joint(Monitor *m, int j)
 {
     ErrCode rc;
@@ -230,8 +227,7 @@ static void monitor_scan_joint(Monitor *m, int j)
     }
 }
 
-/* 巡检一轮（6 个关节），返回在线轴数，并把 poll_count 加一。
- * 实测一轮 = 6 轴 x 2 笔事务 = 12 笔 x 1.70ms ≈ 20.4ms（有报警查询时最多约 30ms）。 */
+/* 巡检一轮（6 个关节），返回在线轴数。 */
 int monitor_poll(Monitor *m)
 {
     int j;
@@ -283,11 +279,7 @@ int monitor_online_count(const Monitor *m)
 }
 
 
-/* 监控线程主循环。
- * ★ 用 WaitForSingleObject(wake_ev, interval) 代替 Sleep(interval)：
- *   这样"挂起请求"能【立即】打断它的等待，而不是等它睡满一整个周期。
- * 挂起时置 parked=1 并 SetEvent(parked_ev)，告诉调用方"总线已经让出来了"。
- * 未挂起时先清 parked=0 再巡检。 */
+/* 监控线程主循环（事件等待 + 挂起让总线）。 */
 static DWORD WINAPI monitor_thread_main(LPVOID arg)
 {
     Monitor *m = (Monitor *)arg;
@@ -331,10 +323,7 @@ void monitor_pause_active(int on)
     monitor_pause(g_active_monitor, on);
 }
 
-/* 等后台巡检【真正停住】，返回 1=已停 / 0=超时（打警告后按旧行为继续）。
- * 实现上轮询 parked 标志而不是只信事件：自动复位事件可能残留旧信号，
- * 被伪唤醒就再检查一遍。超时上限 MONITOR_PARK_TIMEOUT_MS(500ms)
- * ⇒ 兜底路径等价于旧的盲等，零回归风险。 */
+/* 等后台巡检真正停住，返回 1=已停 / 0=超时。 */
 int monitor_park_wait(int timeout_ms)
 {
     Monitor *m = g_active_monitor;
@@ -362,18 +351,14 @@ int monitor_park_wait(int timeout_ms)
     }
 }
 
-/* = 挂起 + 等后台真停住。
- * ★ 这是原来 11 处 `monitor_pause_active(1); Sleep(MONITOR_DEFAULT_INTERVAL_MS + 20);`
- * 的替代品。旧写法必须盲等 320ms（因为挂起标志只有到线程下一轮循环开头才被看到）；
- * 现在典型只要 0.1~30ms —— 后台在睡则几乎立刻返回，正在巡检则等它跑完这一轮。 */
+/* 挂起监控 + 等后台真停住。 */
 void monitor_park(void)
 {
     monitor_pause_active(1);
     monitor_park_wait(0);
 }
 
-/* 已完成巡检轮数。用途：隔 5 秒敲两次 diag，这个数应涨约 15（周期 ≈ 20ms 巡检 + 300ms 等待）。
- * 若完全不变 ⇒ 监控被永久挂起（某处漏了恢复），必须立刻排查。 */
+/* 返回已完成巡检的轮数。 */
 long monitor_poll_count(void)
 {
     Monitor *m = g_active_monitor;
@@ -384,9 +369,7 @@ long monitor_poll_count(void)
     return (long)InterlockedCompareExchange(&m->poll_count, 0, 0);
 }
 
-/* 起监控线程。
- * ⚠️ 这里会复位 paused / parked：home 是 stop → 回零 → start，
- * 若残留 paused=1，重启后巡检会【永远不跑】—— 这是安全监控，静默停摆最危险。 */
+/* 起监控线程。 */
 int monitor_start(Monitor *m, int interval_ms)
 {
     if (m == NULL || m->robot == NULL) {
