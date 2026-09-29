@@ -30,14 +30,17 @@
 #define CMD_DRVBAUD   26
 #define CMD_PIPE      27
 
-/* movel 模式：★ 2026-09-28 起【只保留 smooth】。
- * smooth = 对终点跑一次 IK → 一次 MoveJ → 驱动器自己做关节空间插值
- *          （等价于 second 的 plan_movel：整段一次 IK、不插补）。
+/* movel 模式：两种。
+ * smooth（默认）= 对终点跑一次 IK → 一次 MoveJ → 驱动器自己做关节空间插值。
  *          ⇒ 无段间停顿；代价是末端走弧（弓高 = 整段）且【不查过流】。
- * 已移除：step（逐段插补+逐段过流保护）、stream（按节拍连发）、sync（2026-09-23 移除）。
- *   三者写进命令都会被拒绝。要恢复见 git 历史（2026-09-28 的父提交）。 */
+ * interp   = 真正的笛卡尔逐点插补：按 [movel] step_mm 生成多个航点 → 逐点 IK
+ *          → 逐航点下发并等到位（分段走）。末端贴着直线（弓高 ∝ 段长²、极小），
+ *          且每段都走 movej_wait 的读回异常/超时急停保护。
+ *          代价：航点间有加减速停顿（非零停顿），比 smooth 慢。
+ * 已移除：stream（按节拍连发）、sync（2026-09-23 移除），写了会被拒绝。 */
 typedef enum {
-    MOVL_MODE_SMOOTH = 3
+    MOVL_MODE_SMOOTH = 3,
+    MOVL_MODE_INTERP = 4
 } MovlMode;
 
 /* 解析结果。⚠️ 新增命令务必把 out->type 放在【全部校验之后】再设，

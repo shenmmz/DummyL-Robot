@@ -311,18 +311,18 @@ int cmd_parse(const char *line, ParsedCmd *out)
         if (tok != NULL) {
             if (strcmp(tok, "smooth") == 0) {
                 out->movl_mode = MOVL_MODE_SMOOTH;
-            } else if (strcmp(tok, "step") == 0 || strcmp(tok, "stream") == 0 ||
-                       strcmp(tok, "sync") == 0) {
-                printf("[警告] MoveL 模式 %s 已移除：现在只有 smooth"
-                       "（一次 IK + MoveJ，不插补）。\n", tok);
+            } else if (strcmp(tok, "interp") == 0 || strcmp(tok, "step") == 0) {
+                out->movl_mode = MOVL_MODE_INTERP;
+            } else if (strcmp(tok, "stream") == 0 || strcmp(tok, "sync") == 0) {
+                printf("[警告] MoveL 模式 %s 已移除：可用 smooth（默认，不插补）或 interp（逐点插补）。\n", tok);
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             } else {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth] 或 9 段带姿态\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth|interp] 或 9 段带姿态\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
             tok = strtok_r(NULL, ",", &ctx);
             if (tok != NULL) {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth] 或 9 段带姿态\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth|interp] 或 9 段带姿态\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
         }
@@ -727,15 +727,18 @@ static const char HELP_TEXT[] =
     "  MoveL:X,Y,Z                 笛卡尔直线（姿态恒取当前 getpos，推荐）\n"
     "  MoveL:X,Y,Z,SPD,ACC,DEC    同上 + 自定义速度（SPD=rpm，ACC/DEC=ms）\n"
     "  MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC   9 段：显式指定目标姿态（SPD/ACC/DEC 必填）\n"
+    "  MoveL:...,DEC,interp      末尾加 ,interp 走逐点插补（末端贴直线、逐段保护）\n"
     "                          ★ 写法约定：\n"
     "                          ① 只 3/6 段时姿态沿用当前位姿，第 4 个数是速度不是 Rx；\n"
     "                             要显式给 Rx,Ry,Rz 必须写满 9 段\n"
     "                          ② 9 段若姿态与当前差太多，会警告\"拧姿态、笔尖偏离\"\n"
     "                             （实测偏 7.71mm），但仍照走；想保直线就抄 getpos 原值\n"
-    "                          ③ 模式只有 smooth：终点一次 IK + 一次 MoveJ\n"
-    "                             ⇒ 不插补、零段间停顿；末端走弧（弓高 = 整段）\n"
-    "                          ④ step / stream / sync 已移除，写了会被拒绝\n"
-    "                          ⑤ ⚠️ 全程【不查过流】⇒ 无碰撞保护，路径自己确认\n"
+    "                          ③ 模式 smooth（默认）：终点一次 IK + 一次 MoveJ ⇒ 不插补、\n"
+    "                             零段间停顿；但末端走弧（弓高 = 整段）且全程不查过流\n"
+    "                          ④ 模式 interp：按 [movel] step_mm 逐点插补、逐航点下发并\n"
+    "                             等到位 ⇒ 末端贴着直线（弓高极小）+ 每段读过流/超时保护；\n"
+    "                             代价是段间有加减速停顿，比 smooth 慢\n"
+    "                          ⑤ stream / sync 已移除，写了会被拒绝\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"

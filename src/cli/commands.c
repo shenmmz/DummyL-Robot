@@ -93,6 +93,11 @@
  * J4 转过 90°，臂会大幅度慢慢扫过一大片空间。 */
 #define MOVL_JUMP_MAX_DEG      30.0
 
+/* interp 逐点插补的默认步长(mm)（ini [movel] step_mm 的兜底）。
+ * 弓高 ∝ 段长²：8mm 段 ⇒ 单段弓高 ≈ 0.001×8² ≈ 0.06mm，肉眼不可见。
+ * 越小越贴直线但航点越多、越慢；上限受 LINE_MAX_POINTS=257 约束。 */
+#define MOVL_STEP_MM_DEFAULT   8.0
+
 /* ---- ④ 读回异常检测与免读路径 ---- */
 
 /* 读回异常判据：机械角超出软限位多少度才算「读数不可信」(度)。
@@ -1312,6 +1317,14 @@ static double movl_max_jump_deg(void)
     return MOVL_JUMP_MAX_DEG;
 }
 
+/* 取 ini [movel] step_mm（interp 模式的插补步长），缺键/非正兜底 8mm。 */
+static double movl_step_mm(void)
+{
+    double v;
+    if (ini_read_positive_double(INI_PATH, "movel", "step_mm", &v)) return v;
+    return MOVL_STEP_MM_DEFAULT;
+}
+
 /* 两个角度之差，归一到 (-180, 180]。用于姿态比较，避免 359°/-1° 被判成差 360°。 */
 static double ang_delta_deg(double a, double b)
 {
@@ -1412,11 +1425,12 @@ static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
     printf("       （告警阈值 %.1f°，ini [movel] tip_warn_deg 可调）\n", warn);
 }
 
-/* `movel X,Y,Z[,Rx,Ry,Rz] [SPD,ACC,DEC] [keep][,模式]` 主流程。
- * ⚠️ **模式只剩 smooth 一种**：终点一次 IK + 一次 MoveJ。
- *   sync（2026-09-23）/ step / stream 均已移除，写了会被解析器拒绝（cmd_parser.c:293）。
- * smooth 的代价：① 走关节空间直线（弓高 = 整段）② **全程不查过流 ⇒ 无碰撞保护**。
- *   ⇒ 移动前请自行确认路径无障碍；运动期间过流保护只剩静止时后台巡检兜底。
+/* `movel X,Y,Z[,Rx,Ry,Rz] [SPD,ACC,DEC] [keep][,smooth|interp]` 主流程。
+ * 两种模式（末尾关键字选，默认 smooth）：
+ *   smooth = 终点一次 IK + 一次 MoveJ，不插补 ⇒ 零段间停顿；但末端走弧
+ *            （弓高 = 整段）、全程不查过流。
+ *   interp = 按 ini [movel] step_mm 逐点插补 ⇒ 逐航点下发并等到位。末端贴直线
+ *            （弓高 ∝ 段长²、极小）+ 每段走读回异常/超时急停；代价段间有停顿。
  * 姿态：不给 Rx,Ry,Rz 或写 keep ⇒ 沿用当前姿态（避免 SLERP 拧姿态）。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
@@ -1491,11 +1505,13 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 
     int rc = 0;
 
-    /* ⚠️ 第 5、6 个参数都是 dist（不是笔误）：step_mm 传整段距离 ⇒
-     *    line_count_for_distance() 算出 count=2，笛卡尔插补退化成【只有起点+终点】
-     *    ⇒ 本函数实际只做「终点一次 IK + 一次 MoveJ」，末端走弧。
-     *    逐点 IK / 限位过滤 / 跳变闸仍然生效，只是点数=2。 */
-    rc = movl_plan(start_pose, end_pose, q_start, limits, dist, dist, vmax,
+    /* 步长按模式分叉：
+     *   smooth → step_mm = dist ⇒ line_count_for_distance 算出 count=2，
+     *            笛卡尔插补退化成【只有起点+终点】⇒ 终点一次 IK + 一次 MoveJ、末端走弧。
+     *   interp → step_mm = ini [movel] step_mm ⇒ count>2，逐点 IK ⇒ 逐航点下发贴着直线走。 */
+    double plan_step = (cmd->movl_mode == MOVL_MODE_INTERP) ? movl_step_mm() : dist;
+
+    rc = movl_plan(start_pose, end_pose, q_start, limits, dist, plan_step, vmax,
                    q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
     if (rc != 0) {
         if (rc != -4) {
@@ -1527,7 +1543,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                "整段一次下发由驱动器自己规划 ⇒ 段间零停顿\n"
                "        代价：走关节空间直线，会偏离笛卡尔直线 %.2f mm"
                "（弓高 ∝ 长度²，线段越短越看不出来）\n"
-               "        ⚠️ 全程【不查过流】⇒ 无碰撞保护（step/stream 已移除）\n",
+               "        ⚠️ 全程【不查过流】⇒ 无碰撞保护（要贴直线+逐段保护，末尾加 ,interp）\n",
                dist, sync_rpm, total_dt, bow_full);
 
         movej_joints(robot, 6, joints, q_end, sync_rpm, acc, dec,
@@ -1536,6 +1552,35 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         return;
     }
 
+    /* interp：逐航点下发。q_seq[0]≈当前位，从 seg=1 起逐点 movej 并等到位。
+     * 每段速度按 seg_dt 反推（与 smooth 同口径）；line_a/line_b 传整条线
+     * ⇒ movej_wait 跨段累计【到理想直线的偏差峰值】（dev_reset 已在前面清过）。
+     * 每段都走 movej_wait 的读回异常/超时逐轴急停 ⇒ 比 smooth 全程不查更安全。 */
+    {
+        const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+        uint32_t t0 = GetTickCount();
+        int seg;
+
+        printf("MoveL: 逐点插补(分段), 位移 %.1f mm, %d 航点(步长~%.1fmm), 速度 %.1f rpm\n"
+               "        末端贴着直线走（单段弓高 ≈ %.2f mm），每段过读回异常/超时急停保护\n"
+               "        代价：航点间有加减速停顿，比 smooth 慢\n",
+               dist, count, plan_step, base_rpm, 0.001 * plan_step * plan_step);
+
+        for (seg = 1; seg < count; seg++) {
+            double dmax = 0.0, seg_rpm;
+            for (j = 0; j < 6; j++) {
+                double d = fabs(q_seq[seg][j] - q_seq[seg - 1][j]) * (double)red[j];
+                if (d > dmax) dmax = d;
+            }
+            seg_rpm = (seg_dt[seg - 1] > 1e-6) ? (dmax / seg_dt[seg - 1] / 6.0) : base_rpm;
+            if (seg_rpm > base_rpm) seg_rpm = base_rpm;
+            if (seg_rpm < 1.0) seg_rpm = 1.0;
+            movej_joints(robot, 6, joints, q_seq[seg], seg_rpm, acc, dec,
+                         start_pose, end_pose);
+        }
+        movl_finish(t0, total_dt);
+        return;
+    }
 }
 
 /* 法兰法线（矩阵第三列 = 工具 Z 轴）与竖直方向的夹角（度）。0 = 垂直地面。

@@ -48,8 +48,9 @@ void cmd_nrtest(Robot *robot);
  * 用途：验证「周转能否与收发重叠」⇒ 理论 2.84ms/352Hz（3.6 倍，未验证）。 */
 void cmd_pipe(Robot *robot, const ParsedCmd *cmd);
 
-/* `movel`：笛卡尔直线。默认 smooth 模式（关节空间直线、全程不查过流）。
- * ⚠️ 姿态参数必须抄【当前 getpos】原值，否则画斜线。 */
+/* `movel`：笛卡尔直线。默认 smooth（关节空间直线、全程不查过流）；
+ * 末尾加 ,interp 则逐点插补（末端贴直线 + 每段过读回/超时保护）。
+ * ⚠️ 显式给姿态时参数必须抄【当前 getpos】原值，否则画斜线。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd);
 
 #endif
