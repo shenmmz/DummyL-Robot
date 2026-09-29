@@ -29,7 +29,7 @@ static int g_sock = -1;
 #endif
 static struct sockaddr_in g_dst;
 
-/* 从 ini 读一个 double 键值，缺键返回 def（仅本文件用）。 */
+/* 从 ini 读一个 double 键值，缺键返回 def。 */
 static double tlm_ini_double(const char *path, const char *key, double def)
 {
     FILE *f;

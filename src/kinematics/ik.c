@@ -10,7 +10,7 @@
 #define IK_WRIST_SINGULAR_SIN  1e-7
 #define IK_DEG2RAD (IK_PI / 180.0)
 
-/* 角度归一化到 (-pi, pi]（仅本文件用）。 */
+/* 角度归一化到 (-pi, pi]。 */
 static double norm_angle(double a)
 {
     while (a > IK_PI)  a -= 2.0 * IK_PI;
@@ -18,7 +18,7 @@ static double norm_angle(double a)
     return a;
 }
 
-/* 绕 Z 轴的 3x3 旋转矩阵（仅本文件用）。 */
+/* 绕 Z 轴的 3x3 旋转矩阵。 */
 static void rz(double theta, double r[3][3])
 {
     double c = cos(theta), s = sin(theta);
@@ -27,7 +27,7 @@ static void rz(double theta, double r[3][3])
     r[2][0] = 0.0; r[2][1] = 0.0; r[2][2] = 1.0;
 }
 
-/* 3x3 矩阵相乘 out = a*b（仅本文件用）。 */
+/* 3x3 矩阵相乘 out = a*b。 */
 static void r_mul(const double a[3][3], const double b[3][3], double out[3][3])
 {
     int i, j, k;
@@ -47,7 +47,7 @@ static void r_mul(const double a[3][3], const double b[3][3], double out[3][3])
     }
 }
 
-/* 3x3 转置（仅本文件用）。 */
+/* 3x3 转置。 */
 static void r_transpose(const double a[3][3], double out[3][3])
 {
     int i, j;
@@ -58,7 +58,7 @@ static void r_transpose(const double a[3][3], double out[3][3])
     }
 }
 
-/* 累积求出第 i 关节到基座的旋转 R0i（仅本文件用）。 */
+/* 累积求出第 i 关节到基座的旋转 R0i。 */
 static void build_r0i(const DhParam *params, const double *theta_rad, int i, double out[3][3])
 {
     double acc[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
@@ -76,7 +76,7 @@ static void build_r0i(const DhParam *params, const double *theta_rad, int i, dou
     memcpy(out, acc, sizeof(acc));
 }
 
-/* 由末端位姿沿末端法线回退 d6，得到腕心位置（仅本文件用）。 */
+/* 由末端位姿沿末端法线回退 d6，得到腕心位置。 */
 static void target_wrist(const double pose[4][4], double d6, double w[3])
 {
     w[0] = pose[0][3] - d6 * pose[0][2];

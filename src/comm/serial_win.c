@@ -182,7 +182,7 @@ static SerialPort *g_ops_port = NULL;
 
 static void ops_close(void);
 
-/* CommOps.open 适配（仅本文件用）。 */
+/* CommOps.open 适配。 */
 static int ops_open(const char *port, uint32_t baud)
 {
     if (g_ops_port != NULL) {
@@ -192,7 +192,7 @@ static int ops_open(const char *port, uint32_t baud)
     return g_ops_port != NULL ? 0 : -1;
 }
 
-/* CommOps.close 适配（仅本文件用）。 */
+/* CommOps.close 适配。 */
 static void ops_close(void)
 {
     if (g_ops_port != NULL) {
@@ -201,7 +201,7 @@ static void ops_close(void)
     }
 }
 
-/* CommOps.read_frame 适配（仅本文件用）。 */
+/* CommOps.read_frame 适配。 */
 static int ops_read_frame(uint8_t *buf, int cap, int timeout_ms)
 {
     if (g_ops_port == NULL || buf == NULL || cap <= 0) {
@@ -210,7 +210,7 @@ static int ops_read_frame(uint8_t *buf, int cap, int timeout_ms)
     return serial_read(g_ops_port, buf, (size_t)cap, (uint32_t)timeout_ms);
 }
 
-/* CommOps.write_frame 适配（仅本文件用）。 */
+/* CommOps.write_frame 适配。 */
 static int ops_write_frame(const uint8_t *buf, int len)
 {
     if (g_ops_port == NULL || buf == NULL || len <= 0) {
@@ -219,7 +219,7 @@ static int ops_write_frame(const uint8_t *buf, int len)
     return serial_write(g_ops_port, buf, (size_t)len);
 }
 
-/* CommOps.flush 适配（仅本文件用）。 */
+/* CommOps.flush 适配。 */
 static void ops_flush(void)
 {
     if (g_ops_port != NULL) {

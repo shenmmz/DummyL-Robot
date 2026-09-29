@@ -20,7 +20,7 @@ void dh_transform(const DhParam *p, double theta_rad, double t[4][4])
     t[3][0] = 0.0;            t[3][1] = 0.0;         t[3][2] = 0.0;        t[3][3] = 1.0;
 }
 
-/* 4x4 齐次矩阵相乘 out = a*b（仅本文件用）。 */
+/* 4x4 齐次矩阵相乘 out = a*b。 */
 static void mat4_mul(const double a[4][4], const double b[4][4], double out[4][4])
 {
     int i, j, k;

@@ -260,7 +260,7 @@ ErrCode motor_read_pos_status(Robot *robot, int joint, int32_t *pos, uint32_t *s
 }
 
 
-/* 目标步数合理性闸门（仅本文件用）。
+/* 目标步数合理性闸门。
  * 拦的是逻辑错误（NaN 转 int32、高低字写反、单位搞错）造成的超大目标，
  * 那种目标的代价是电机猛冲、超时急停、把臂甩出去。 */
 static int abs_move_steps_ok(int joint, int32_t steps)
@@ -275,7 +275,7 @@ static int abs_move_steps_ok(int joint, int32_t steps)
     return 1;
 }
 
-/* 每转脉冲数(0x0024)对齐闸门（仅本文件用）。
+/* 每转脉冲数(0x0024)对齐闸门。
  * ⚠️ 该寄存器出厂 4000、断电即回 4000，只有上电写入才是 10000。
  * 未对齐时同样的角度会被放大 2.5 倍（实测 90° 会转成 225°）。
  * 编码器在电机侧 ⇒ 程序读回永远自洽，看不出来，只能靠【写后读回比对】。 */

@@ -3,7 +3,7 @@
 #include <windows.h>
 
 
-/* Modbus CRC16（多项式 0xA001）（仅本文件用）。 */
+/* Modbus CRC16（多项式 0xA001）。 */
 static uint16_t crc16_modbus(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFFu;
@@ -25,20 +25,20 @@ static uint16_t crc16_modbus(const uint8_t *data, size_t len)
 }
 
 
-/* 写大端 u16（仅本文件用）。 */
+/* 写大端 u16。 */
 static void put_u16_be(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)(v >> 8);
     p[1] = (uint8_t)(v & 0xFF);
 }
 
-/* 读大端 u16（仅本文件用）。 */
+/* 读大端 u16。 */
 static uint16_t get_u16_be(const uint8_t *p)
 {
     return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
 
-/* 在帧尾追加 CRC16（低字节在前）（仅本文件用）。 */
+/* 在帧尾追加 CRC16（低字节在前）。 */
 static void append_crc(uint8_t *frame, size_t len)
 {
     uint16_t crc = crc16_modbus(frame, len);
@@ -215,7 +215,7 @@ static struct {
     double   noread_ms;
 } g_bus_stat;
 
-/* 取当前毫秒时基（QueryPerformanceCounter）（仅本文件用）。 */
+/* 取当前毫秒时基（QueryPerformanceCounter）。 */
 static double bus_ms_now(void)
 {
     static LARGE_INTEGER freq;

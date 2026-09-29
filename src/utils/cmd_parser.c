@@ -12,7 +12,7 @@
 #define strtok_r strtok_s
 #endif
 
-/* 忽略大小写的字符串比较（命令名不区分大小写，仅本文件用）。 */
+/* 忽略大小写的字符串比较（命令名不区分大小写）。 */
 static int ci_strcmp(const char *a, const char *b)
 {
     int ca, cb;
@@ -26,7 +26,7 @@ static int ci_strcmp(const char *a, const char *b)
     }
 }
 
-/* 解析一个"完整"数字：整串都必须合法，不接受 "12abc" 这种（仅本文件用）。 */
+/* 解析一个"完整"数字：整串都必须合法，不接受 "12abc" 这种。 */
 static int parse_full_number(const char *s, double *out)
 {
     char *end = NULL;

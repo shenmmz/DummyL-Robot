@@ -127,7 +127,7 @@ void monitor_destroy(Monitor *m)
     free(m);
 }
 
-/* 巡检单个关节（仅本文件用）：读状态 + 电流，并做【边沿检测】——
+/* 巡检单个关节：读状态 + 电流，并做【边沿检测】——
  * 掉线/恢复、报警置位/清除、位置超差、软限位、堵转，都只在跳变时报一次，
  * 否则每 300ms 刷一行会把控制台淹掉。 */
 static void monitor_scan_joint(Monitor *m, int j)
@@ -283,7 +283,7 @@ int monitor_online_count(const Monitor *m)
 }
 
 
-/* 监控线程主循环（仅本文件用）。
+/* 监控线程主循环。
  * ★ 用 WaitForSingleObject(wake_ev, interval) 代替 Sleep(interval)：
  *   这样"挂起请求"能【立即】打断它的等待，而不是等它睡满一整个周期。
  * 挂起时置 parked=1 并 SetEvent(parked_ev)，告诉调用方"总线已经让出来了"。

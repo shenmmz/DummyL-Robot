@@ -11,7 +11,7 @@
 #define LINE_EPS    1e-12
 
 
-/* 四元数相乘 out = a*b（仅本文件用）。 */
+/* 四元数相乘 out = a*b。 */
 static void quat_mul(const double a[4], const double b[4], double out[4])
 {
     out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3];
@@ -20,7 +20,7 @@ static void quat_mul(const double a[4], const double b[4], double out[4])
     out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0];
 }
 
-/* RPY（度）→ 四元数（仅本文件用）。 */
+/* RPY（度）→ 四元数。 */
 static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, double q[4])
 {
     double roll = roll_deg * LINE_DEG2RAD;
@@ -38,7 +38,7 @@ static void euler_to_quat(double roll_deg, double pitch_deg, double yaw_deg, dou
     quat_mul(q_yaw, tmp, q);
 }
 
-/* 把 x 夹进 [-1, 1]，防 acos/asin 定义域越界（仅本文件用）。 */
+/* 把 x 夹进 [-1, 1]，防 acos/asin 定义域越界。 */
 static double clamp_pm1(double x)
 {
     if (x > 1.0) return 1.0;
@@ -46,7 +46,7 @@ static double clamp_pm1(double x)
     return x;
 }
 
-/* 四元数 → RPY（度）（仅本文件用）。 */
+/* 四元数 → RPY（度）。 */
 static void quat_to_euler(const double q[4], double *roll_deg, double *pitch_deg, double *yaw_deg)
 {
     double roll = atan2(2*(q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
