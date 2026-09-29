@@ -244,65 +244,30 @@ int cmd_parse(const char *line, ParsedCmd *out)
             tok = strtok_r(NULL, ",", &ctx);
         }
 
-        if (n != 3 && n != 6 && n != 9) {
-            printf("[警告] 用法: MoveL:X,Y,Z[,SPD,ACC,DEC]\n"
-                   "       带姿态须写满 9 段: MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC\n");
+        if (n != 9) {
+            printf("[警告] 用法: MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC[,smooth|interp]\n"
+                   "       必须写满 9 段（含显式姿态 Rx,Ry,Rz），不接受缺姿态的简写。\n");
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         out->type = CMD_MOVEL;
         out->movl_mode = MOVL_MODE_INTERP;   /* 默认逐点插补；显式 ,smooth 才走 smooth */
         for (i = 0; i < 3; i++) out->cartesian[i] = v[i];
-        /* ★ 段数语义（只放行 9 段带姿态）：
-         *   3 段 X,Y,Z                      → 姿态抄当前（keep_pose=1），速度 60/80/90
-         *   6 段 X,Y,Z,SPD,ACC,DEC          → 姿态抄当前（keep_pose=1），自定义速度
-         *   9 段 X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC  → 用给定姿态（keep_pose=0）
-         * ⚠️ 3/6 段第 4 个数一律当【速度】而非 Rx —— 想显式指定姿态必须写满 9 段。
-         *   终点姿态若与 FK 起点不等，SLERP 会把姿态一路拧过去 ⇒ 笔尖绕法兰摆
-         *   pen_length×2sin(θ/2) ⇒ 画斜线（实测 80mm 线偏 7.71mm）；故非 9 段恒沿用
-         *   当前姿态。9 段执行前 cmd_movel 用 movl_pose_warn 比对当前姿态，超阈
-         *   打警告但仍照走（用户显式指令优先）。 */
-        if (n == 9) {
-            out->keep_pose = 0;
-            for (i = 3; i < 6; i++) out->cartesian[i] = v[i];
-            if (v[6] <= 0.0) {
-                printf("[警告] MoveL 速度须大于 0 rpm（收到 %.2f）\n", v[6]);
-                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
-            }
-            if (v[7] <= 0.0 || v[8] <= 0.0) {
-                printf("[警告] MoveL 加减速时间须大于 0 ms\n");
-                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
-            }
-            out->speeds[0]   = v[6];
-            out->accel_ms[0] = (int)v[7];
-            out->decel_ms[0] = (int)v[8];
-        } else {
-            out->keep_pose = 1;
-            for (i = 3; i < 6; i++) out->cartesian[i] = 0.0;  /* cmd_movel 会用 start_pose 覆盖 */
-            if (n == 3) {
-                out->speeds[0]   =  60;
-                out->accel_ms[0] =  80;
-                out->decel_ms[0] =  90;
-            } else {
-                if (v[3] <= 0.0) {
-                    printf("[警告] MoveL 第 4 个参数是【速度 rpm】，须大于 0（收到 %.2f）。\n", v[3]);
-                    printf("       若要显式指定姿态，请写满 9 段 MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC\n");
-                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
-                }
-                if (v[4] <= 0.0 || v[5] <= 0.0) {
-                    printf("[警告] MoveL 加减速时间须大于 0 ms\n");
-                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
-                }
-                out->speeds[0]   = v[3];
-                out->accel_ms[0] = (int)v[4];
-                out->decel_ms[0] = (int)v[5];
-            }
+        /* ★ 段数语义：movel 只接受 9 段 X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC（强制显式姿态）。
+         *   执行前 cmd_movel 用 movl_pose_warn 比对当前姿态，超阈打警告但仍照走
+         *   （用户显式指令优先）。已移除 keep 逃生门——姿态必须显式写满。 */
+        for (i = 3; i < 6; i++) out->cartesian[i] = v[i];
+        if (v[6] <= 0.0) {
+            printf("[警告] MoveL 速度须大于 0 rpm（收到 %.2f）\n", v[6]);
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
+        if (v[7] <= 0.0 || v[8] <= 0.0) {
+            printf("[警告] MoveL 加减速时间须大于 0 ms\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->speeds[0]   = v[6];
+        out->accel_ms[0] = (int)v[7];
+        out->decel_ms[0] = (int)v[8];
 
-        if (tok != NULL && strcmp(tok, "keep") == 0) {
-            out->keep_pose = 1;   /* 强制沿用当前姿态（覆盖 9 段里给定的 Rx,Ry,Rz） */
-            for (i = 3; i < 6; i++) out->cartesian[i] = 0.0;
-            tok = strtok_r(NULL, ",", &ctx);
-        }
         if (tok != NULL) {
             if (strcmp(tok, "smooth") == 0) {
                 out->movl_mode = MOVL_MODE_SMOOTH;
@@ -312,12 +277,12 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 printf("[警告] MoveL 模式 %s 已移除：可用 interp（默认，逐点插补）或 smooth（不插补，需显式写）。\n", tok);
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             } else {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth|interp] 或 9 段带姿态\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC[,smooth|interp]\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
             tok = strtok_r(NULL, ",", &ctx);
             if (tok != NULL) {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth|interp] 或 9 段带姿态\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC[,smooth|interp]\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
         }
@@ -686,7 +651,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
         char *e = strtok_r(NULL, ":", &save);
         char *extra = strtok_r(NULL, ":", &save);
         if (extra != NULL) {
-            printf("[警告] 用法: chain:关节号[:每段角度[:转速[:段数[:补发点%]]]]\n");
+            printf("[警告] 用法: chain:关节号[:每段角度[:转速[:段数[:补发点%%]]]]\n");
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         out->type = CMD_CHAINTEST;
@@ -696,7 +661,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->num_joints = 4;   /* 段数 */
         out->param = 50.0;     /* 补发点（本段走完百分比） */
         if (a == NULL) {
-            printf("[警告] 用法: chain:关节号[:每段角度[:转速[:段数[:补发点%]]]]，例如 chain:1:5:60:4:50\n");
+            printf("[警告] 用法: chain:关节号[:每段角度[:转速[:段数[:补发点%%]]]]，例如 chain:1:5:60:4:50\n");
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         {
@@ -740,6 +705,105 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
             out->param = p;
+        }
+    } else if (strcmp(cmd, "trigtest") == 0) {
+        /* trigtest:关节号[:每段角度[:转速[:段数]]] —— 0x00DD 表格重复触发探针 */
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *c = strtok_r(NULL, ":", &save);
+        char *d = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: trigtest:关节号[:每段角度[:转速[:段数]]]\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->type = CMD_TRIGTEST;
+        out->joint = 1;
+        out->angle_deg = 3.0;
+        out->speed_rpm = 60.0;
+        out->num_joints = 6;   /* 表点数 = 触发次数 */
+        if (a == NULL) {
+            printf("[警告] 用法: trigtest:关节号[:每段角度[:转速[:段数]]]，例如 trigtest:1:3:60:6\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        {
+            double jn;
+            if (!parse_full_number(a, &jn) || jn < 1.0 || jn > 6.0 ||
+                jn != (double)(int)jn) {
+                printf("[警告] trigtest 关节号须为 1..6 的整数：%s\n", a);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->joint = (int)jn;
+        }
+        if (b != NULL) {
+            double deg;
+            if (!parse_full_number(b, &deg) || deg <= 0.0 || deg > 30.0) {
+                printf("[警告] trigtest 每段角度须在 (0, 30] 度之间：%s\n", b);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->angle_deg = deg;
+        }
+        if (c != NULL) {
+            double r;
+            if (!parse_full_number(c, &r) || r <= 0.0 || r > 300.0) {
+                printf("[警告] trigtest 转速须在 (0, 300] rpm 之间：%s\n", c);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->speed_rpm = r;
+        }
+        if (d != NULL) {
+            double n;
+            if (!parse_full_number(d, &n) || n < 2.0 || n > 32.0 ||
+                n != (double)(int)n) {
+                printf("[警告] trigtest 段数须为 2..32 的整数：%s\n", d);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->num_joints = (int)n;
+        }
+    } else if (strcmp(cmd, "progread") == 0) {
+        /* progread:关节号[:起始地址[:字数]] —— 只读转储编程区（不动臂） */
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *c = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: progread:关节号[:起始地址[:字数]]\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->type = CMD_PROGREAD;
+        out->joint = 0;
+        out->angle_deg = 300.0;   /* 起始地址（编程区首地址） */
+        out->speed_rpm = 32.0;    /* 字数（16位寄存器个数） */
+        if (a == NULL) {
+            printf("[警告] 用法: progread:关节号[:起始地址[:字数]]，例如 progread:1:300:32\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        {
+            double jn;
+            if (!parse_full_number(a, &jn) || jn < 1.0 || jn > 6.0 ||
+                jn != (double)(int)jn) {
+                printf("[警告] progread 关节号须为 1..6 的整数：%s\n", a);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->joint = (int)jn;
+        }
+        if (b != NULL) {
+            double ad;
+            if (!parse_full_number(b, &ad) || ad < 300.0 || ad > 2047.0 ||
+                ad != (double)(int)ad) {
+                printf("[警告] progread 起始地址须在 300..2047：%s\n", b);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->angle_deg = ad;
+        }
+        if (c != NULL) {
+            double wn;
+            if (!parse_full_number(c, &wn) || wn < 2.0 || wn > 64.0 ||
+                wn != (double)(int)wn) {
+                printf("[警告] progread 字数须在 2..64：%s\n", c);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->speed_rpm = wn;
         }
     } else if (strcmp(cmd, "stall") == 0) {
         char *a = strtok_r(NULL, ":", &save);
@@ -835,7 +899,7 @@ static const char HELP_BRIEF[] =
     "  home[:N]                    回零（全轴；:N 仅单关节）\n"
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节运动（r=相对 a=绝对）\n"
     "  MoveJ:a1,...,a6,SPD,ACC,DEC 多关节同步（6角+3参数）\n"
-    "  MoveL:X,Y,Z[,...]           直线（默认 interp，,smooth 流畅）\n"
+    "  MoveL:X,Y,Z,Rx,Ry,Rz,...    直线（9段必填姿态，默认 interp）\n"
     "\n"
     "[使能 / 状态]\n"
     "  enable[:N]                  使能（全轴 / 关节N）\n"
@@ -853,6 +917,7 @@ static const char HELP_BRIEF[] =
     "  diag                        总线时延体检\n"
     "  busrate[:N]                 485 极限速率实测\n"
     "  pipe[:ROUNDS[:US]]          流水线批量读探针\n"
+    "  progread:N[:AD[:WORDS]]    编程区只读转储（反推指令格式）\n"
     "  bcast                       广播帧验证\n"
     "  accel[:ACC[,DEC]]           加减速时间读写（断电即失）\n"
     "  drvbaud[:CODE[:BAUD]|save]  波特率读/设/固化（⚠失联风险）\n"
@@ -861,6 +926,7 @@ static const char HELP_BRIEF[] =
     "[驱动器探针（⚠会真动臂）]\n"
     "  curtest[:N[:DEG[:RPM]]]     电流实测（标定堵转阈值）\n"
     "  tabtest:N[:DEG[:RPM]]       表格执行 0x00DD 试验\n"
+    "  trigtest:N[:DEG[:RPM[:N]]] 表格重复触发试验\n"
     "  queuetest:N[:DEG[:RPM]]     排队寄存器 0x00CE 试验\n"
     "  chain:N[:DEG[:RPM]]         补链排队试验（段数见 help:probe）\n"
     "\n"
@@ -875,18 +941,17 @@ static const char HELP_MOTION[] =
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节关节空间运动：轴N 至角度ANGLE(度)，\n"
     "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
     "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
-    "  MoveL:X,Y,Z                 笛卡尔直线（姿态恒取当前 getpos，推荐）\n"
-    "  MoveL:X,Y,Z,SPD,ACC,DEC    同上 + 自定义速度（SPD=rpm，ACC/DEC=ms）\n"
-    "  MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC   9 段：显式指定目标姿态（SPD/ACC/DEC 必填）\n"
+    "  MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC   笛卡尔直线（唯一格式，9 段写满）\n"
+    "                          SPD=rpm、ACC/DEC=ms；Rx,Ry,Rz 拄 getpos 的当前姿态\n"
     "  MoveL:...,DEC           默认=interp 逐点插补（末端贴直线、逐段保护；段间有加减速停顿，较慢）\n"
     "  MoveL:...,DEC,smooth    显式加 ,smooth 走流畅：终点一次 MoveJ、段间零停顿，但末端走弧、不查过流\n"
     "                          ★ 写法约定：\n"
-    "                          ① 只 3/6 段时姿态沿用当前位姿，第 4 个数是速度不是 Rx；\n"
-    "                             要显式给 Rx,Ry,Rz 必须写满 9 段\n"
+    "                          ① 只接受 9 段（含显式姿态 Rx,Ry,Rz）；原 3/6 段简写及 keep 后缀均已移除\n"
     "                          ② 9 段若姿态与当前差太多，会警告\"拧姿态、笔尖偏离\"\n"
     "                             （实测偏 7.71mm），但仍照走；想保直线就抄 getpos 原值\n"
-    "                          ③ 模式 interp（默认）：按 [movel] step_mm 逐点插补、逐航点下发并等到位\n"
-    "                             ⇒ 末端贴着直线（弓高极小）+ 每段读过流/超时保护；代价是段间加减速停顿\n"
+    "                          ③ 模式 interp（默认）：按 ini [movel] max_bow_mm（偏差预算）反推步长、逐航点下发并等到位\n"
+    "                             ⇒ 末端贴着直线 + 每段读过流/超时保护；代价是段间加减速停顿\n"
+    "                             想减航点/减停顿：把 [movel] max_bow_mm 调大（如 0.8、1.5），直线度会相应下降\n"
     "                          ④ 模式 smooth（须显式加 ,smooth）：终点一次 IK + 一次 MoveJ ⇒ 零段间停顿；\n"
     "                             但末端走弧（弓高 = 整段）且全程不查过流\n"
     "                          ⑤ stream / sync 已移除，写了会被拒绝\n";
@@ -958,6 +1023,15 @@ static const char HELP_PROBE[] =
     "                        相对位移表，让驱动器自己连续执行，全程高频读 0x00D6\n"
     "                        实时速度 ⇒ 看段间速度掉不掉 0（决定\"又直又顺\"能否成立）\n"
     "                        DEG=每段机械角(默认5,上限30)；轴会停在 +3×DEG 处，注意行程\n"
+    "  trigtest:N[:DEG[:RPM[:段数]]]  表格重复触发探针（tabtest 的盲区）：写一张 N 点\n"
+    "                        相同相对位移的表后，逐次写 0x00DD 触发、每次等本段走完，\n"
+    "                        再跟一轮不等走完的连发 ⇒ 验两件事：①表指针是否每次+1（一次\n"
+    "                        触发只吃一个点但自动前进）②运行中再触发会被强制重开还是丢帧\n"
+    "                        （成立 ⇒ interp 可改「预下载航点表+廉价触发帧」大幅减开销）\n"
+    "                        DEG 默认3° RPM 默认60 段数默认6(2..32)；停在 +段数×DEG 处\n"
+    "  progread:N[:起始[:字数]]   编程区只读转储（不动臂）：FC03 读地址 300+ 的存贮内容，\n"
+    "                        出厂演示程序若还在区内，可从中反推编程指令格式（0x00DB 连走\n"
+    "                        全靠它）⇒ 纯读零风险；起始默认 300，字数默认 32(上限 64)\n"
     "  queuetest:N[:DEG[:RPM]] 排队寄存器 0x00CE 探针（手册§66④）：向关节N 连发 3 段\n"
     "                        相对位移（段间不等到位），全程高频读 0x00D6 实时速度\n"
     "                        ⇒ 看排队跑多段时段间速度掉不掉 0（掉 0=仅串行、仍卡；\n"

@@ -36,11 +36,11 @@
 
 /* ---- ① 轮询与到位判据 ---- */
 
-/* 等位置时的轮询间隔(ms)。
- * ⚠️ 偏大，是当前最划算的一处提速点：读一轮六轴实测 10.2ms，加上这 10ms
- *    ⇒ 实际周期 ≈20.3ms。降到 1~2ms ⇒ 周期 ≈11.3ms，【1.8 倍】。
- *    属运动行为变更，改前须先 home + 用 50mm 线验收「段间停顿」。 */
-#define MOVEJ_POLL_MS      10
+/* 等位置时的轮询间隔(ms)（原 10）。读一轮六轴实测 10.2ms ⇒ 周期 20.3→≈12.2ms，
+ * 每段到位判定至多提前 ~8ms ⇒ 段尾停车窗等量变短（卡顿感直接来源之一）。
+ * Sleep(2) 受 Windows 定时器粒度影响，实际周期略浮动、无新风险（异常判定按轮数计）。
+ * ⚠️ 运动行为变更：须真机验收 50mm 线「段间停顿」与直线度后再定稿。 */
+#define MOVEJ_POLL_MS      2
 
 /* 到位容差（脉冲）。换算角度（1 步 = 360/(red×10000)°）：
  *   J2(red=100) 100 步 = 0.036°；其余五轴 100 步 = 0.072°。末端 ≈0.17mm。
@@ -62,11 +62,11 @@
 
 /* ---- ② 速度/加减速下限 ---- */
 
-/* 加/减速时间的安全下限(ms)（ini [movel] acc_floor_ms 的兜底）。用户敲的
- * acc/dec 低于它会被抬到这里并打提示。依据：过短的减速会丢步（表现为
- * 「走到一半卡住」）。实测驱动器当前 80/90ms ⇒ 60 这个下限不生效；
- * 要试更小的值须从 40 起，注意丢步/过流。 */
-#define MOVL_ACC_FLOOR_MS   60
+/* 加/减速时间的安全下限(ms)（ini [movel] acc_floor_ms 的兜底，两边现均为 40）。
+ * 用户敲的 acc/dec 低于它会被抬到这里并打提示。依据：过短的减速会丢步（表现为
+ * 「走到一半卡住」）。驱动器实测稳跑过 80/90ms；40 属试探区，丢步则退回 60
+ *（改 ini 即可，不用重编）。减速窗是段间停顿的主体：210→40 每段少停 ≈0.34s。 */
+#define MOVL_ACC_FLOOR_MS   40
 
 /* ---- ③ 几何与安全闸门 ---- */
 
@@ -93,10 +93,19 @@
  * J4 转过 90°，臂会大幅度慢慢扫过一大片空间。 */
 #define MOVL_JUMP_MAX_DEG      30.0
 
-/* interp 逐点插补的默认步长(mm)（ini [movel] step_mm 的兜底）。
- * 弓高 ∝ 段长²：8mm 段 ⇒ 单段弓高 ≈ 0.001×8² ≈ 0.06mm，肉眼不可见。
+/* interp 逐点插补的默认步长(mm)（ini [movel] step_mm 的兜底，仅在未配 max_bow_mm 时用）。
  * 越小越贴直线但航点越多、越慢；上限受 LINE_MAX_POINTS=257 约束。 */
 #define MOVL_STEP_MM_DEFAULT   8.0
+
+/* 弓高经验系数：单段弓高(mm) ≈ MOVL_BOW_K × 步长(mm)²。屏幕"单段弓高"与
+ * 偏差预算反推步长【共用此系数】，改一处两边同步。依据：20mm 段实测弓高≈0.40mm
+ * ⇒ 0.001×20²=0.40；与实测峰值偏差 0.25~0.35mm 相符（公式略保守，安全）。 */
+#define MOVL_BOW_K             0.001
+
+/* 偏差预算(max_bow_mm)反推步长后的夹取区间(mm)：下限防空转式爆航点，上限防
+ * 单段过长撞关节跳变闸(max_jump_deg 30°)。 */
+#define MOVL_STEP_MIN_MM       5.0
+#define MOVL_STEP_MAX_MM       60.0
 
 /* ---- ④ 读回异常检测与免读路径 ---- */
 
@@ -122,6 +131,8 @@ static void movej_joints(Robot *robot, int num_joints, const int joints[6],
 static void movej_multi(Robot *robot, const ParsedCmd *cmd);
 
 static void cmd_tabtest(Robot *robot, const ParsedCmd *cmd);
+static void cmd_trigtest(Robot *robot, const ParsedCmd *cmd);
+static void cmd_progread(Robot *robot, const ParsedCmd *cmd);
 static void cmd_queuetest(Robot *robot, const ParsedCmd *cmd);
 static void cmd_chaintest(Robot *robot, const ParsedCmd *cmd);
 static void cmd_busrate(Robot *robot, const ParsedCmd *cmd);
@@ -746,6 +757,12 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     case CMD_TABTEST:
         cmd_tabtest(robot, cmd);
         break;
+    case CMD_TRIGTEST:
+        cmd_trigtest(robot, cmd);
+        break;
+    case CMD_PROGREAD:
+        cmd_progread(robot, cmd);
+        break;
     case CMD_QUEUETEST:
         cmd_queuetest(robot, cmd);
         break;
@@ -1325,6 +1342,22 @@ static double movl_step_mm(void)
     return MOVL_STEP_MM_DEFAULT;
 }
 
+/* 由偏差预算(ini [movel] max_bow_mm, mm)反推 interp 步长(mm)：
+ *   弓高 = MOVL_BOW_K × 步长²  ⇒  步长 = sqrt(预算 / MOVL_BOW_K)
+ * 预算越大 ⇒ 步长越大 ⇒ 航点越少、段间停顿越少（拿直线度换流畅度）。
+ * 未配 max_bow_mm / 非正 ⇒ 返回 0，调用方退回 step_mm 老路。结果夹到
+ * [MOVL_STEP_MIN_MM, MOVL_STEP_MAX_MM]。 */
+static double movl_step_from_bow_budget(void)
+{
+    double tol, step;
+    if (!ini_read_positive_double(INI_PATH, "movel", "max_bow_mm", &tol) || tol <= 0.0)
+        return 0.0;
+    step = sqrt(tol / MOVL_BOW_K);
+    if (step < MOVL_STEP_MIN_MM) step = MOVL_STEP_MIN_MM;
+    if (step > MOVL_STEP_MAX_MM) step = MOVL_STEP_MAX_MM;
+    return step;
+}
+
 /* 两个角度之差，归一到 (-180, 180]。用于姿态比较，避免 359°/-1° 被判成差 360°。 */
 static double ang_delta_deg(double a, double b)
 {
@@ -1425,13 +1458,12 @@ static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
     printf("       （告警阈值 %.1f°，ini [movel] tip_warn_deg 可调）\n", warn);
 }
 
-/* `movel X,Y,Z[,Rx,Ry,Rz] [SPD,ACC,DEC] [keep][,smooth|interp]` 主流程。
+/* `movel X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC[,smooth|interp]` 主流程（9 段唯一格式）。
  * 两种模式（末尾关键字选，默认 interp）：
  *   smooth = 终点一次 IK + 一次 MoveJ，不插补 ⇒ 零段间停顿；但末端走弧
- *            （弓高 = 整段）、全程不查过流。
  *   interp = 按 ini [movel] step_mm 逐点插补 ⇒ 逐航点下发并等到位。末端贴直线
  *            （弓高 ∝ 段长²、极小）+ 每段走读回异常/超时急停；代价段间有停顿。
- * 姿态：不给 Rx,Ry,Rz 或写 keep ⇒ 沿用当前姿态（避免 SLERP 拧姿态）。 */
+ * 姿态：9 段里的 Rx,Ry,Rz 必须显式写（一般抄 getpos 当前值）；已无 keep 简写。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
     const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -1469,11 +1501,6 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         start_pose[5] = rpy[2] * RAD2DEG;
     }
     for (j = 0; j < 6; j++) end_pose[j] = cmd->cartesian[j];
-    if (cmd->keep_pose) {
-        for (j = 0; j < 3; j++) end_pose[3 + j] = start_pose[3 + j];
-        printf("MoveL: 姿态保持当前不变（Rx=%.2f Ry=%.2f Rz=%.2f，取自当前位姿）\n",
-               end_pose[3], end_pose[4], end_pose[5]);
-    }
 
     double dx = end_pose[0] - start_pose[0];
     double dy = end_pose[1] - start_pose[1];
@@ -1506,10 +1533,15 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     int rc = 0;
 
     /* 步长按模式分叉：
-     *   smooth → step_mm = dist ⇒ line_count_for_distance 算出 count=2，
-     *            笛卡尔插补退化成【只有起点+终点】⇒ 终点一次 IK + 一次 MoveJ、末端走弧。
-     *   interp → step_mm = ini [movel] step_mm ⇒ count>2，逐点 IK ⇒ 逐航点下发贴着直线走。 */
-    double plan_step = (cmd->movl_mode == MOVL_MODE_INTERP) ? movl_step_mm() : dist;
+     *   smooth → step = dist ⇒ count=2，笛卡尔插补退化成【只有起点+终点】⇒ 终点一次
+     *            IK + 一次 MoveJ、末端走弧、零段间停顿。
+     *   interp → 优先用偏差预算 [movel] max_bow_mm 反推步长（预算越大航点越少越不顿）；
+     *            未配预算则退回 [movel] step_mm。count>2，逐点 IK ⇒ 逐航点贴着直线走。 */
+    double plan_step = dist;
+    if (cmd->movl_mode == MOVL_MODE_INTERP) {
+        plan_step = movl_step_from_bow_budget();
+        if (plan_step <= 0.0) plan_step = movl_step_mm();
+    }
 
     rc = movl_plan(start_pose, end_pose, q_start, limits, dist, plan_step, vmax,
                    q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
@@ -1569,7 +1601,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         printf("MoveL: 逐点插补(分段), 位移 %.1f mm, %d 航点(步长~%.1fmm), 速度 %.1f rpm\n"
                "        末端贴着直线走（单段弓高 ≈ %.2f mm），每段过读回异常/超时急停保护\n"
                "        代价：航点间有加减速停顿，比 smooth 慢\n",
-               dist, count, plan_step, base_rpm, 0.001 * plan_step * plan_step);
+               dist, count, plan_step, base_rpm, MOVL_BOW_K * plan_step * plan_step);
 
         QueryPerformanceFrequency(&qf);
 
@@ -2124,6 +2156,181 @@ static void cmd_tabtest(Robot *robot, const ParsedCmd *cmd)
     printf("速度曲线判读：回落 %d 次 ⇒ %s\n", n_div,
            (n_div == 0) ? "段间不归零" : "每段末都归零（与 ACC+DEC 对应，见 accel 命令）");
     monitor_pause_active(0);
+}
+
+#define TRIG_REG_PTR    0x00AB
+#define TRIG_N_SLOW     6    /* 阶段①：触发的次数（= 表点数） */
+#define TRIG_N_FAST     10   /* 阶段②：连发帧数 */
+#define TRIG_FAST_GAP_MS 60  /* 阶段②：每帧间隔，60ms 足够插进任意一段的运行中窗口 */
+
+/* 0x00DD 表格【重复触发】探针：tabtest 只测了"一次触发走几个点"，漏测了手册里
+ * "当前表指针值与常数相加=下次位置"的自增机制 ⇒ 逐次触发即可沿表逐点执行，
+ * 每次下发只剩 8 字节触发帧（位置数据早已预下载）；另验运行中再触发的行为。
+ * 两阶段均只动单轴小角度，会真动臂。 */
+static void cmd_trigtest(Robot *robot, const ParsedCmd *cmd)
+{
+    const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+    int j = cmd->joint;
+    int32_t seg = DEG2STEPS(cmd->angle_deg, red[j - 1]);
+    double rpm = cmd->speed_rpm;
+    int n_tbl = TRIG_N_SLOW + TRIG_N_FAST;   /* 共用一张表，点数覆盖两阶段 */
+    int i, ok = 0, mid_hit = 0;
+    uint32_t t0, tk;
+    double est_s, span;
+    int32_t pos_run, pos_prev, pos_end;
+    uint16_t ptr = 0;
+    int32_t dmin, dmax;
+
+    if (seg == 0) {
+        printf("[错误] 每段 %.3f° 换算后是 0 步，调大每段角度\n", cmd->angle_deg);
+        return;
+    }
+    est_s = (double)seg / (rpm * (double)ENCODER_STEPS_PER_REV / 60.0);
+    if (est_s < 0.05) est_s = 0.05;
+    span = est_s * 1.4 + 0.25;   /* 单段预算窗口（含加减速与总线往返） */
+
+    printf("trigtest 关节%d：%d 点相对位移表（每段 %+.2f° = %+d 步，%.0f rpm，单段约 %.2f s）\n",
+           j, n_tbl, cmd->angle_deg, seg, rpm, est_s);
+    printf("  阶段①慢发 %d 次：每次触发后等 %.2f s（本段走完），验【指针自增】——每触发应恰好走 1 段\n",
+           TRIG_N_SLOW, span);
+    printf("  阶段②连发 %d 次：每次触发后只等 %d ms（必落在运行中），验【运行中再触发】\n",
+           TRIG_N_FAST, TRIG_FAST_GAP_MS);
+    printf("  ⚠️ 轴全程向 +，预计共停在前 %d×%.2f° = +%.1f°（阶段②若丢帧会少些），确认行程\n",
+           n_tbl, cmd->angle_deg, n_tbl * cmd->angle_deg);
+
+    monitor_park();
+
+    pos_run = motor_read_position(robot, j, &ok);
+    if (!ok) { printf("[错误] 读位置失败，实验中止\n"); monitor_pause_active(0); return; }
+
+    if (motor_set_speed(robot, j, rpm) != ERR_NONE)
+        printf("[警告] 关节%d 速度设置失败\n", j);
+    for (i = 0; i < n_tbl; i++) {
+        if (motor_write_i32(robot, j, (uint16_t)(TAB_DATA_ADDR + 2 * i), seg) != ERR_NONE) {
+            printf("[错误] 写表数据[%d] 失败（地址 %d），实验中止\n", i, TAB_DATA_ADDR + 2 * i);
+            monitor_pause_active(0);
+            return;
+        }
+    }
+    motor_write_u16(robot, j, TAB_REG_SIZE, (uint16_t)n_tbl);
+    motor_write_u16(robot, j, TAB_REG_PTR, 0);
+    motor_write_u16(robot, j, TAB_REG_BASE, (uint16_t)(TAB_DATA_ADDR - 300));
+    motor_read_u16(robot, j, TRIG_REG_PTR, &ptr);
+    printf("  表已下发：%d 点 × %+d 步；触发前指针 0x00AB = %u\n\n", n_tbl, seg, (unsigned)ptr);
+
+    /* ── 阶段①：慢发，每次等本段走完 ── */
+    printf("%6s %10s %12s %8s\n", "#", "触发后(ms)", "位移(步)", "≈段数");
+    pos_prev = pos_run;
+    for (i = 0; i < TRIG_N_SLOW; i++) {
+        int32_t p;
+        long d;
+        t0 = GetTickCount();
+        if (motor_write_u16(robot, j, TAB_REG_EXEC, 0x8001u) != ERR_NONE) {
+            printf("[错误] 第 %d 次触发失败，实验中止\n", i + 1);
+            break;
+        }
+        tk = GetTickCount();
+        Sleep((DWORD)(span * 1000.0));
+        p = motor_read_position(robot, j, &ok);
+        if (!ok) { printf("[错误] 位置读回失败，实验中止\n"); break; }
+        d = (int32_t)(p - pos_prev);
+        printf("%6d %10ld %12ld %8.2f\n", i + 1, (long)(tk - t0), (long)d,
+               (double)d / (double)seg);
+        pos_prev = p;
+    }
+    motor_read_u16(robot, j, TRIG_REG_PTR, &ptr);
+    printf("触发 %d 次后指针 0x00AB = %u（若≈触发次数 ⇒ 自增机制成立）\n\n",
+           TRIG_N_SLOW, (unsigned)ptr);
+
+    /* ── 阶段②：连发，每次只等 60ms（必在运行中再触发） ── */
+    printf("%6s %12s %10s\n", "#", "位移(步)", "≈段数");
+    pos_run = pos_prev;
+    dmin = dmax = 0;
+    for (i = 0; i < TRIG_N_FAST; i++) {
+        int32_t p;
+        int32_t d;
+        if (motor_write_u16(robot, j, TAB_REG_EXEC, 0x8001u) != ERR_NONE) {
+            printf("[错误] 连发第 %d 帧失败，实验中止\n", i + 1);
+            break;
+        }
+        Sleep(TRIG_FAST_GAP_MS);
+        p = motor_read_position(robot, j, &ok);
+        if (!ok) { printf("[错误] 位置读回失败，实验中止\n"); break; }
+        d = p - pos_prev;
+        if (i > 0) {                 /* 首帧起点不可控，位移统计从第 2 帧起 */
+            if (d < dmin) dmin = d;
+            if (d > dmax) dmax = d;
+            if (d > seg / 2) mid_hit = 1;   /* 单帧窗口走掉超过半段 ⇒ 触发起效 */
+        }
+        printf("%6d %12ld %10.2f\n", i + 1, (long)d, (double)d / (double)seg);
+        pos_prev = p;
+    }
+    pos_end = pos_prev;
+    motor_read_u16(robot, j, TRIG_REG_PTR, &ptr);
+
+    /* 最后一段还在路上，等它走完再统计 */
+    Sleep((DWORD)(span * 1000.0));
+    pos_end = motor_read_position(robot, j, &ok);
+
+    printf("\n总位移 %ld 步 = %.2f 段（慢发%d次+连发%d帧 ⇒ 指针自增若成立期望≈%d 段）\n",
+           (long)(pos_end - pos_run),
+           (double)(pos_end - pos_run) / (double)seg,
+           TRIG_N_SLOW, TRIG_N_FAST, TRIG_N_SLOW + TRIG_N_FAST);
+    printf("连发期单帧位移区间：%ld ~ %ld 步（≈%.2f ~ %.2f 段）；指针终值 0x00AB = %u\n",
+           (long)dmin, (long)dmax, (double)dmin / seg, (double)dmax / seg, (unsigned)ptr);
+
+    printf("判读：\n");
+    if (mid_hit) {
+        printf("  ② 运行中再触发【起效】⇒ 触发帧不被丢 ⇒ interp 可改「预下载航点表 + "
+               "8 字节触发帧」；还需看上面区间：≥≈ 1 段 ⇒ 强制重开下一点（用户设想的百分比补链成立）；"
+               "≪ 1 段 ⇒ 重开把进度抹掉，需精确控窗\n");
+    } else {
+        printf("  ② 运行中再触发仍被丢（连发期几乎不动）⇒ 与 0x00CE 同性质，触发路线否决\n");
+    }
+    monitor_pause_active(0);
+}
+
+/* 编程区只读转储：FC03 逐字读地址 300+ 的存贮内容（不动臂、零风险）。
+ * 手册未公开编程指令格式，但出厂演示程序若还在区内，其编码会直接暴露：
+ * 操作码布局 / 每指令字数 / 速度位置字段 ⇒ 反推出可写入的连续运动程序。 */
+static void cmd_progread(Robot *robot, const ParsedCmd *cmd)
+{
+    int j = cmd->joint;
+    uint16_t start = (uint16_t)cmd->angle_deg;
+    int n = (int)cmd->speed_rpm;
+    int i, nfail = 0;
+
+    printf("progread 关节%d：FC03 逐字读编程区 [%d, %d) 共 %d 个寄存器（只读，不动臂）\n",
+           j, start, start + n, n);
+    if (motor_read_device_addr(robot, j) < 0) {
+        printf("[错误] 关节%d 无响应，实验中止\n", j);
+        return;
+    }
+    for (i = 0; i < n; i += 8) {
+        char line[128];
+        uint16_t buf[8];
+        int k, off = 0;
+        off += snprintf(line + off, sizeof(line) - off, "  %4u:", (unsigned)(start + i));
+        for (k = 0; k < 8 && i + k < n; k++) {
+            if (motor_read_u16(robot, j, (uint16_t)(start + i + k), &buf[k]) != ERR_NONE) {
+                buf[k] = 0xFFFF;
+                off += snprintf(line + off, sizeof(line) - off, "   ----");
+                nfail++;
+            } else {
+                off += snprintf(line + off, sizeof(line) - off, " %04X", (unsigned)buf[k]);
+            }
+        }
+        printf("%s\n", line);
+        for (k = 0; k < 8 && i + k < n; k++)
+            printf("       %5u ", (unsigned)buf[k]);
+        printf("\n");
+    }
+    if (nfail) {
+        printf("（%d 字读失败，显 ----；编程区可能不支持 FC03 直读，或地址超范围）\n", nfail);
+    } else {
+        printf("判读线索：全 0000/FFFF ⇒ 区空；出现成对非零值（如 63BF 0000 = 25535）⇒ 可能含表格/指令数据\n"
+               "  对照实验：先 progread 存档 → tabtest 写表后再次 progread ⇒ 内容变化处即存贮位置\n");
+    }
 }
 
 #define QUEUE_N_POINT   3
