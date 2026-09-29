@@ -174,7 +174,7 @@ int line_plan(const double start_pose[6], const double end_pose[6],
     return 0;
 }
 
-/* 逐点 IK 解算整条直线：每点以【上一点解】为参考，解算 → unwrap → 限位过滤 → 连续选解。
+/* 逐点 IK 解算整条直线：每点以【上一点解】为参考，解算 → 限位过滤 → unwrap 连续选解。
  * 失败返回 -1，并通过 fail_idx / fail_reason 说清是第几个点、哪个部位无解
  * （"肩部/肘部/腕部 + 状态" 或 "候选解全部越软限位"）。 */
 int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits,
@@ -183,7 +183,6 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
 {
     double prev[6];
     double sols[IK_MAX_SOLUTIONS][6];
-    double unwrapped[IK_MAX_SOLUTIONS][6];
     double filtered[IK_MAX_SOLUTIONS][6];
     IkSolInfo info[IK_MAX_SOLUTIONS];
     int i, j, cnt, n;
@@ -228,8 +227,12 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
             if (fail_idx) *fail_idx = i;
             return -1;
         }
-        n = ik_unwrap_solutions(sols, cnt, prev, unwrapped);
-        n = ik_filter_by_limits(unwrapped, n, limits, filtered);
+        /* 限位判定必须在【物理角】（IK 输出的 (-180,180]）上做，不能放在 unwrap 之后：
+         * ik_unwrap_solutions 为求连续会把解平移到贴近 prev 的 ±360k 分支，在 ±180°
+         * 软限位边缘会把本来可达的点平移成 190°/-190° 之类而被误杀（旧实现先 unwrap
+         * 再过滤，报"候选解全部越软限位"是假的不可达）。连续性交给下面的
+         * ik_select_best_continuous —— 它内部对已过滤的物理解再 unwrap 选最近支。 */
+        n = ik_filter_by_limits(sols, cnt, limits, filtered);
         if (n <= 0) {
             if (fail_reason)
                 snprintf(fail_reason, 64, "候选解全部越软限位（点%d，IK 产出%d组）", i, cnt);
@@ -250,12 +253,15 @@ int line_solve(const LinePath *path, const DhParam *dh, const JointLimit *limits
 }
 
 /* 由各关节最大速度反算每段耗时。
- * ★ 所有段取同一个 dt = 最慢那一轴所需时间 ⇒ 各轴同时到达（同步）。
- * dt_total = dt x 段数。返回 -1 表示参数非法或某轴 vmax<=0。 */
+ * ★ 每段各自取【该段】最慢轴所需时间 ⇒ 段内各轴同时到达（同步），段间按各自
+ *   行程分配时长：小的段快走完，不被全路径最慢那一段拖着整体爬。
+ *   （旧实现把 dt 取成全路径统一最大值，只要有一段擦过奇异大跳，其余所有段都被
+ *     拉到同样慢，dt_total 被放大成 worst_dt × 段数。）
+ * dt_total = Σ seg_dt。返回 -1 表示参数非法或某轴 vmax<=0。 */
 int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint[6],
                      double *seg_dt, double *dt_total)
 {
-    double dt = 0.0;
+    double total = 0.0;
     int i, j;
 
     if (q_seq == NULL || seg_dt == NULL || count < 2) {
@@ -268,17 +274,16 @@ int line_time_table(const double (*q_seq)[6], int count, const double vmax_joint
     }
 
     for (i = 0; i < count - 1; i++) {
+        double dt = 0.0;
         for (j = 0; j < 6; j++) {
             double need = fabs(q_seq[i + 1][j] - q_seq[i][j]) / vmax_joint[j];
             if (need > dt) dt = need;
         }
-    }
-
-    for (i = 0; i < count - 1; i++) {
         seg_dt[i] = dt;
+        total += dt;
     }
     if (dt_total != NULL) {
-        *dt_total = dt * (double)(count - 1);
+        *dt_total = total;
     }
     return 0;
 }
