@@ -239,9 +239,9 @@ int cmd_parse(const char *line, ParsedCmd *out)
         char *rest = save;
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
-        double v[6];
+        double v[9];
         int n = 0, i;
-        while (tok != NULL && n < 6) {
+        while (tok != NULL && n < 9) {
             if (!parse_full_number(tok, &v[n])) {
                 break;
             }
@@ -249,42 +249,63 @@ int cmd_parse(const char *line, ParsedCmd *out)
             tok = strtok_r(NULL, ",", &ctx);
         }
 
-        if (n != 3 && n != 6) {
+        if (n != 3 && n != 6 && n != 9) {
             printf("[警告] 用法: MoveL:X,Y,Z[,SPD,ACC,DEC]\n"
-                   "       （姿态恒取当前 getpos，不再接受 Rx,Ry,Rz）\n");
+                   "       带姿态须写满 9 段: MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC\n");
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         out->type = CMD_MOVEL;
         out->movl_mode = MOVL_MODE_SMOOTH;
-        /* ★ 姿态永远抄当前位姿。起点姿态由 FK 得、终点姿态若取用户输入，
-         *   两者不等时 SLERP 会把姿态从起点一路拧到终点 ⇒ 笔尖绕法兰摆
-         *   pen_length×2sin(θ/2) ⇒ 画斜线。实测 80mm 线：抄 getpos 原值
-         *   ⇒ 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。 */
-        out->keep_pose = 1;
         for (i = 0; i < 3; i++) out->cartesian[i] = v[i];
-        for (i = 3; i < 6; i++) out->cartesian[i] = 0.0;  /* cmd_movel 会用 start_pose 覆盖 */
-
-        if (n == 3) {
-            out->speeds[0]   =  60;
-            out->accel_ms[0] =  80;
-            out->decel_ms[0] =  90;
-        } else {
-            if (v[3] <= 0.0) {
-                printf("[警告] MoveL 第 4 个参数现在是【速度 rpm】，须大于 0（收到 %.2f）。\n", v[3]);
-                printf("       新用法 MoveL:X,Y,Z[,SPD,ACC,DEC] —— 不再接受 Rx,Ry,Rz。\n");
+        /* ★ 段数语义（只放行 9 段带姿态）：
+         *   3 段 X,Y,Z                      → 姿态抄当前（keep_pose=1），速度 60/80/90
+         *   6 段 X,Y,Z,SPD,ACC,DEC          → 姿态抄当前（keep_pose=1），自定义速度
+         *   9 段 X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC  → 用给定姿态（keep_pose=0）
+         * ⚠️ 3/6 段第 4 个数一律当【速度】而非 Rx —— 想显式指定姿态必须写满 9 段。
+         *   终点姿态若与 FK 起点不等，SLERP 会把姿态一路拧过去 ⇒ 笔尖绕法兰摆
+         *   pen_length×2sin(θ/2) ⇒ 画斜线（实测 80mm 线偏 7.71mm）；故非 9 段恒沿用
+         *   当前姿态。9 段执行前 cmd_movel 用 movl_pose_warn 比对当前姿态，超阈
+         *   打警告但仍照走（用户显式指令优先）。 */
+        if (n == 9) {
+            out->keep_pose = 0;
+            for (i = 3; i < 6; i++) out->cartesian[i] = v[i];
+            if (v[6] <= 0.0) {
+                printf("[警告] MoveL 速度须大于 0 rpm（收到 %.2f）\n", v[6]);
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
-            if (v[4] <= 0.0 || v[5] <= 0.0) {
+            if (v[7] <= 0.0 || v[8] <= 0.0) {
                 printf("[警告] MoveL 加减速时间须大于 0 ms\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
-            out->speeds[0]   = v[3];
-            out->accel_ms[0] = (int)v[4];
-            out->decel_ms[0] = (int)v[5];
+            out->speeds[0]   = v[6];
+            out->accel_ms[0] = (int)v[7];
+            out->decel_ms[0] = (int)v[8];
+        } else {
+            out->keep_pose = 1;
+            for (i = 3; i < 6; i++) out->cartesian[i] = 0.0;  /* cmd_movel 会用 start_pose 覆盖 */
+            if (n == 3) {
+                out->speeds[0]   =  60;
+                out->accel_ms[0] =  80;
+                out->decel_ms[0] =  90;
+            } else {
+                if (v[3] <= 0.0) {
+                    printf("[警告] MoveL 第 4 个参数是【速度 rpm】，须大于 0（收到 %.2f）。\n", v[3]);
+                    printf("       若要显式指定姿态，请写满 9 段 MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC\n");
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                if (v[4] <= 0.0 || v[5] <= 0.0) {
+                    printf("[警告] MoveL 加减速时间须大于 0 ms\n");
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                out->speeds[0]   = v[3];
+                out->accel_ms[0] = (int)v[4];
+                out->decel_ms[0] = (int)v[5];
+            }
         }
 
         if (tok != NULL && strcmp(tok, "keep") == 0) {
-            printf("[提示] keep 已默认生效（MoveL 姿态恒取当前位姿），无需再写。\n");
+            out->keep_pose = 1;   /* 强制沿用当前姿态（覆盖 9 段里给定的 Rx,Ry,Rz） */
+            for (i = 3; i < 6; i++) out->cartesian[i] = 0.0;
             tok = strtok_r(NULL, ",", &ctx);
         }
         if (tok != NULL) {
@@ -296,12 +317,12 @@ int cmd_parse(const char *line, ParsedCmd *out)
                        "（一次 IK + MoveJ，不插补）。\n", tok);
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             } else {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth]\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth] 或 9 段带姿态\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
             tok = strtok_r(NULL, ",", &ctx);
             if (tok != NULL) {
-                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth]\n");
+                printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth] 或 9 段带姿态\n");
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
         }
@@ -703,15 +724,18 @@ static const char HELP_TEXT[] =
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节关节空间运动：轴N 至角度ANGLE(度)，\n"
     "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
     "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
-    "  MoveL:X,Y,Z                 笛卡尔直线运动（姿态恒取当前 getpos，推荐）\n"
+    "  MoveL:X,Y,Z                 笛卡尔直线（姿态恒取当前 getpos，推荐）\n"
     "  MoveL:X,Y,Z,SPD,ACC,DEC    同上 + 自定义速度（SPD=rpm，ACC/DEC=ms）\n"
-    "                          ★ 2026-09-28 精简后只认上面两种写法：\n"
-    "                          ① 不再接受 Rx,Ry,Rz —— 姿态恒抄当前位姿，杜绝\n"
-    "                             SLERP 拧姿态把笔尖甩离直线（实测会偏 7.71mm）\n"
-    "                          ② 模式只有 smooth：终点一次 IK + 一次 MoveJ\n"
+    "  MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC   9 段：显式指定目标姿态（SPD/ACC/DEC 必填）\n"
+    "                          ★ 写法约定：\n"
+    "                          ① 只 3/6 段时姿态沿用当前位姿，第 4 个数是速度不是 Rx；\n"
+    "                             要显式给 Rx,Ry,Rz 必须写满 9 段\n"
+    "                          ② 9 段若姿态与当前差太多，会警告\"拧姿态、笔尖偏离\"\n"
+    "                             （实测偏 7.71mm），但仍照走；想保直线就抄 getpos 原值\n"
+    "                          ③ 模式只有 smooth：终点一次 IK + 一次 MoveJ\n"
     "                             ⇒ 不插补、零段间停顿；末端走弧（弓高 = 整段）\n"
-    "                          ③ step / stream / sync 已移除，写了会被拒绝\n"
-    "                          ④ ⚠️ 全程【不查过流】⇒ 无碰撞保护，路径自己确认\n"
+    "                          ④ step / stream / sync 已移除，写了会被拒绝\n"
+    "                          ⑤ ⚠️ 全程【不查过流】⇒ 无碰撞保护，路径自己确认\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"
