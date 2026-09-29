@@ -6,7 +6,7 @@
 #include "utils/cmd_parser.h"
 #include "utils/ini_rw.h"
 #include "utils/telemetry.h"
-#include "kinematics/joint_zero.h"
+#include "kinematics/zero.h"
 #include "kinematics/dh.h"
 #include "cli/commands.h"
 
@@ -181,7 +181,7 @@ int main(int argc, char **argv)
     {
         double loaded[6];
         if (ini_read_joint_zero(INI_PATH, loaded)) {
-            joint_zero_save(loaded);
+            zero_save(loaded);
             printf("零点标定来源：ini [joint_zero]\n");
         } else {
             printf("零点标定来源：默认（robot_config.h 编译期宏）\n");

@@ -4,7 +4,7 @@
 #include "api/motor_reg.h"
 #include "control/robot_internal.h"
 #include "config/robot_config.h"
-#include "kinematics/joint_zero.h"
+#include "kinematics/zero.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -50,7 +50,7 @@ static struct {
 static double home_forward_deg(int j)
 {
     static const double mech[ROBOT_JOINT_COUNT] = ROBOT_HOME_MECH_DEG;
-    const double *zero = joint_zero_get();
+    const double *zero = zero_get();
     return mech[j - 1] + zero[j - 1];
 }
 /* 回零后退让时的速度：关节 6 单列 100rpm。
@@ -932,7 +932,7 @@ ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed
                 double mech[6] = {0}, motor[6] = {0};
                 int32_t target;
                 mech[joint - 1] = angle_deg;
-                joint_zero_mech_to_motor(mech, motor);
+                zero_mech_to_motor(mech, motor);
                 target = DEG2STEPS(motor[joint - 1], reductions[joint - 1]);
                 int wr = home_wait_inpos(robot, joint, target, home_timeout_ms);
                 if (wr == 1) {

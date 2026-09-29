@@ -5,7 +5,7 @@
 #include "comm/comm_if.h"
 #include "comm/modbus_rtu.h"
 #include "config/robot_config.h"
-#include "kinematics/joint_zero.h"
+#include "kinematics/zero.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -370,7 +370,7 @@ ErrCode robot_movej(Robot *robot, int joint, double angle_deg, double speed_rpm)
         mech[i] = 0.0;
     }
     mech[joint - 1] = angle_deg;
-    joint_zero_mech_to_motor(mech, motor);
+    zero_mech_to_motor(mech, motor);
     steps = DEG2STEPS(motor[joint - 1], reductions[joint - 1]);
     if (speed_rpm <= 0.0) {
         speed_rpm = 60.0;
@@ -462,7 +462,7 @@ double robot_read_position_deg(Robot *robot, int joint, int *ok)
         motor[i] = 0.0;
     }
     motor[joint - 1] = STEPS2DEG(steps, reductions[joint - 1]);
-    joint_zero_motor_to_mech(motor, mech);
+    zero_motor_to_mech(motor, mech);
     if (ok) *ok = 1;
     return mech[joint - 1];
 }

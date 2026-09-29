@@ -8,7 +8,7 @@
 #include "utils/err.h"
 #include "utils/ini_rw.h"
 #include "utils/telemetry.h"
-#include "kinematics/joint_zero.h"
+#include "kinematics/zero.h"
 #include "comm/modbus_rtu.h"
 #include "comm/serial_win.h"
 #include "kinematics/dh.h"
@@ -792,7 +792,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
  * 新零点应该是多少"。只算不写，写要显式用 zero:save。 */
 void cmd_zero(Robot *robot)
 {
-    const double *zero = joint_zero_get();
+    const double *zero = zero_get();
     const double target[6] = {0, 0, 90, 0, 0, 0};
     double reading[6];
     double corrected[6];
@@ -822,7 +822,7 @@ void cmd_zero(Robot *robot)
 void cmd_zero_save(Robot *robot, const double vals[6])
 {
     (void)robot;
-    joint_zero_save(vals);
+    zero_save(vals);
     if (ini_write_joint_zero(INI_PATH, vals)) {
         printf("零点标定已保存（内存 + ini：%s）：\n", INI_PATH);
     } else {
@@ -853,7 +853,7 @@ static int movej_issue(Robot *robot, int num_joints, const int joints[6],
     static double last_spd[7] = {0};
     static int    last_spd_ok[7] = {0};
     const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-    const double *zero = joint_zero_get();
+    const double *zero = zero_get();
     double dist[7] = {0};
     double max_dist = 0;
     int i, j, remain = 0;
@@ -1078,7 +1078,7 @@ static void movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
         }
         for (j = 0; j < 6; j++)
             motor[j] = ok[j + 1] ? STEPS2DEG(pos[j + 1], red[j]) : 0.0;
-        joint_zero_motor_to_mech(motor, mech);
+        zero_motor_to_mech(motor, mech);
 
         if (g_tlm_mech_ok) {
             for (j = 0; j < 6; j++)
