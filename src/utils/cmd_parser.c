@@ -43,12 +43,7 @@ static int parse_full_number(const char *s, double *out)
     return 1;
 }
 
-/* 把一行文本解析成 ParsedCmd。
- * ⚠️ 项目铁律（踩过坑）：新增命令时 out->type 要么放在【全部校验之后】设置，
- * 要么保证失败时复位。历史事故：分支先设 out->type 再校验，失败 return CMD_UNKNOWN，
- * 但 main.c【只看 cmd->type 不看返回值】⇒ 非法参数（如 busrate:7）打完警告命令照样执行。
- * 修法：入口 memset(out,0,...) + 46 处先复位 type 再返回。
- * ⚠️ line==NULL || out==NULL 那处【不能】写 out->type。 */
+/* 把一行文本解析成 ParsedCmd。 */
 int cmd_parse(const char *line, ParsedCmd *out)
 {
     char buf[128];
@@ -255,7 +250,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
             { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
         }
         out->type = CMD_MOVEL;
-        out->movl_mode = MOVL_MODE_SMOOTH;
+        out->movl_mode = MOVL_MODE_INTERP;   /* 默认逐点插补；显式 ,smooth 才走 smooth */
         for (i = 0; i < 3; i++) out->cartesian[i] = v[i];
         /* ★ 段数语义（只放行 9 段带姿态）：
          *   3 段 X,Y,Z                      → 姿态抄当前（keep_pose=1），速度 60/80/90
@@ -314,7 +309,7 @@ int cmd_parse(const char *line, ParsedCmd *out)
             } else if (strcmp(tok, "interp") == 0 || strcmp(tok, "step") == 0) {
                 out->movl_mode = MOVL_MODE_INTERP;
             } else if (strcmp(tok, "stream") == 0 || strcmp(tok, "sync") == 0) {
-                printf("[警告] MoveL 模式 %s 已移除：可用 smooth（默认，不插补）或 interp（逐点插补）。\n", tok);
+                printf("[警告] MoveL 模式 %s 已移除：可用 interp（默认，逐点插补）或 smooth（不插补，需显式写）。\n", tok);
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             } else {
                 printf("[警告] MoveL 参数过多，用法: MoveL:X,Y,Z[,SPD,ACC,DEC][,smooth|interp] 或 9 段带姿态\n");
@@ -640,6 +635,112 @@ int cmd_parse(const char *line, ParsedCmd *out)
             }
             out->speed_rpm = r;
         }
+    } else if (strcmp(cmd, "queuetest") == 0) {
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *c = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: queuetest:关节号[:每段角度[:转速rpm]]\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->type = CMD_QUEUETEST;
+        out->joint = 1;
+        out->angle_deg = 5.0;
+        out->speed_rpm = 60.0;
+        if (a == NULL) {
+            printf("[警告] 用法: queuetest:关节号[:每段角度[:转速rpm]]，例如 queuetest:1:5:60\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        {
+            double jn;
+            if (!parse_full_number(a, &jn) || jn < 1.0 || jn > 6.0 ||
+                jn != (double)(int)jn) {
+                printf("[警告] queuetest 关节号须为 1..6 的整数：%s\n", a);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->joint = (int)jn;
+        }
+        if (b != NULL) {
+            double d;
+            if (!parse_full_number(b, &d) || d <= 0.0 || d > 30.0) {
+                printf("[警告] queuetest 每段角度须在 (0, 30] 度之间：%s\n", b);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->angle_deg = d;
+        }
+        if (c != NULL) {
+            double r;
+            if (!parse_full_number(c, &r) || r <= 0.0 || r > 300.0) {
+                printf("[警告] queuetest 转速须在 (0, 300] rpm 之间：%s\n", c);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->speed_rpm = r;
+        }
+    } else if (strcmp(cmd, "chain") == 0) {
+        /* chain:关节号[:每段角度[:转速[:段数[:补发点%]]]] —— 0x00CE 流水线补链探针 */
+        char *a = strtok_r(NULL, ":", &save);
+        char *b = strtok_r(NULL, ":", &save);
+        char *c = strtok_r(NULL, ":", &save);
+        char *d = strtok_r(NULL, ":", &save);
+        char *e = strtok_r(NULL, ":", &save);
+        char *extra = strtok_r(NULL, ":", &save);
+        if (extra != NULL) {
+            printf("[警告] 用法: chain:关节号[:每段角度[:转速[:段数[:补发点%]]]]\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->type = CMD_CHAINTEST;
+        out->joint = 1;
+        out->angle_deg = 5.0;
+        out->speed_rpm = 60.0;
+        out->num_joints = 4;   /* 段数 */
+        out->param = 50.0;     /* 补发点（本段走完百分比） */
+        if (a == NULL) {
+            printf("[警告] 用法: chain:关节号[:每段角度[:转速[:段数[:补发点%]]]]，例如 chain:1:5:60:4:50\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        {
+            double jn;
+            if (!parse_full_number(a, &jn) || jn < 1.0 || jn > 6.0 ||
+                jn != (double)(int)jn) {
+                printf("[警告] chain 关节号须为 1..6 的整数：%s\n", a);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->joint = (int)jn;
+        }
+        if (b != NULL) {
+            double deg;
+            if (!parse_full_number(b, &deg) || deg <= 0.0 || deg > 30.0) {
+                printf("[警告] chain 每段角度须在 (0, 30] 度之间：%s\n", b);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->angle_deg = deg;
+        }
+        if (c != NULL) {
+            double r;
+            if (!parse_full_number(c, &r) || r <= 0.0 || r > 300.0) {
+                printf("[警告] chain 转速须在 (0, 300] rpm 之间：%s\n", c);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->speed_rpm = r;
+        }
+        if (d != NULL) {
+            double n;
+            if (!parse_full_number(d, &n) || n < 1.0 || n > 8.0 ||
+                n != (double)(int)n) {
+                printf("[警告] chain 段数须为 1..8 的整数：%s\n", d);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->num_joints = (int)n;
+        }
+        if (e != NULL) {
+            double p;
+            if (!parse_full_number(e, &p) || p < 10.0 || p > 90.0) {
+                printf("[警告] chain 补发点须在 10~90%% 之间：%s\n", e);
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            out->param = p;
+        }
     } else if (strcmp(cmd, "stall") == 0) {
         char *a = strtok_r(NULL, ":", &save);
         char *b = strtok_r(NULL, ":", &save);
@@ -707,6 +808,14 @@ int cmd_parse(const char *line, ParsedCmd *out)
             out->joint = 0;
         }
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
+        char *tp = strtok_r(NULL, ":", &save);
+        if (tp != NULL) {
+            snprintf(out->help_topic, sizeof(out->help_topic), "%s", tp);
+            if (strtok_r(NULL, ":", &save) != NULL) {
+                printf("[警告] help 只接受一个主题，用法: help[:motion|enable|state|diag|probe|all]\n");
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+        }
         out->type = CMD_HELP;
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
         out->type = CMD_EXIT;
@@ -717,8 +826,50 @@ int cmd_parse(const char *line, ParsedCmd *out)
 }
 
 
-static const char HELP_TEXT[] =
-    "可用命令（命名对齐 ABB RAPID，大小写不敏感）:\n"
+/* ── 分级帮助：help 打印速查索引，help:主题 打印该组详解，help:all 全展开。
+ *    命名对齐 ABB RAPID，大小写不敏感。──────────────────────────────── */
+static const char HELP_BRIEF[] =
+    "DummyL 命令速查（大小写不敏感）  详解：help:motion / enable / state / diag / probe\n"
+    "\n"
+    "[运动]\n"
+    "  home[:N]                    回零（全轴；:N 仅单关节）\n"
+    "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节运动（r=相对 a=绝对）\n"
+    "  MoveJ:a1,...,a6,SPD,ACC,DEC 多关节同步（6角+3参数）\n"
+    "  MoveL:X,Y,Z[,...]           直线（默认 interp，,smooth 流畅）\n"
+    "\n"
+    "[使能 / 状态]\n"
+    "  enable[:N]                  使能（全轴 / 关节N）\n"
+    "  disable[:N]                 泄力失能（全轴 / 关节N）\n"
+    "  getpos                      读当前位姿\n"
+    "  motor                       电机实时监控开关\n"
+    "  fk:J1,...,J6                离线正解预览（不动臂）\n"
+    "  zero                        显示零点与机械角\n"
+    "  zero_save:v1,...,v6         保存零点标定值\n"
+    "  poseok                      解除位姿不可信闸门\n"
+    "  stall[:N:MA]                堵转阈值查看/设置\n"
+    "  alarm[:clear]               报警查看 / :clear 清除\n"
+    "\n"
+    "[总线诊断（均不动臂）]\n"
+    "  diag                        总线时延体检\n"
+    "  busrate[:N]                 485 极限速率实测\n"
+    "  pipe[:ROUNDS[:US]]          流水线批量读探针\n"
+    "  bcast                       广播帧验证\n"
+    "  accel[:ACC[,DEC]]           加减速时间读写（断电即失）\n"
+    "  drvbaud[:CODE[:BAUD]|save]  波特率读/设/固化（⚠失联风险）\n"
+    "  looptest[:N[:BAUD[:AUX]]]   转换器极限（⚠须脱离电机）\n"
+    "\n"
+    "[驱动器探针（⚠会真动臂）]\n"
+    "  curtest[:N[:DEG[:RPM]]]     电流实测（标定堵转阈值）\n"
+    "  tabtest:N[:DEG[:RPM]]       表格执行 0x00DD 试验\n"
+    "  queuetest:N[:DEG[:RPM]]     排队寄存器 0x00CE 试验\n"
+    "  chain:N[:DEG[:RPM]]         补链排队试验（段数见 help:probe）\n"
+    "\n"
+    "[系统]\n"
+    "  help[:topic]                本一览；motion/enable/state/diag/probe/all\n"
+    "  exit                        退出\n";
+
+static const char HELP_MOTION[] =
+    "【motion 运动】\n"
     "  home                  回零（全轴）\n"
     "  home:N                仅单独回零关节 N，堵转后自动到该轴配置角\n"
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节关节空间运动：轴N 至角度ANGLE(度)，\n"
@@ -727,26 +878,44 @@ static const char HELP_TEXT[] =
     "  MoveL:X,Y,Z                 笛卡尔直线（姿态恒取当前 getpos，推荐）\n"
     "  MoveL:X,Y,Z,SPD,ACC,DEC    同上 + 自定义速度（SPD=rpm，ACC/DEC=ms）\n"
     "  MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC   9 段：显式指定目标姿态（SPD/ACC/DEC 必填）\n"
-    "  MoveL:...,DEC,interp      末尾加 ,interp 走逐点插补（末端贴直线、逐段保护）\n"
+    "  MoveL:...,DEC           默认=interp 逐点插补（末端贴直线、逐段保护；段间有加减速停顿，较慢）\n"
+    "  MoveL:...,DEC,smooth    显式加 ,smooth 走流畅：终点一次 MoveJ、段间零停顿，但末端走弧、不查过流\n"
     "                          ★ 写法约定：\n"
     "                          ① 只 3/6 段时姿态沿用当前位姿，第 4 个数是速度不是 Rx；\n"
     "                             要显式给 Rx,Ry,Rz 必须写满 9 段\n"
     "                          ② 9 段若姿态与当前差太多，会警告\"拧姿态、笔尖偏离\"\n"
     "                             （实测偏 7.71mm），但仍照走；想保直线就抄 getpos 原值\n"
-    "                          ③ 模式 smooth（默认）：终点一次 IK + 一次 MoveJ ⇒ 不插补、\n"
-    "                             零段间停顿；但末端走弧（弓高 = 整段）且全程不查过流\n"
-    "                          ④ 模式 interp：按 [movel] step_mm 逐点插补、逐航点下发并\n"
-    "                             等到位 ⇒ 末端贴着直线（弓高极小）+ 每段读过流/超时保护；\n"
-    "                             代价是段间有加减速停顿，比 smooth 慢\n"
-    "                          ⑤ stream / sync 已移除，写了会被拒绝\n"
+    "                          ③ 模式 interp（默认）：按 [movel] step_mm 逐点插补、逐航点下发并等到位\n"
+    "                             ⇒ 末端贴着直线（弓高极小）+ 每段读过流/超时保护；代价是段间加减速停顿\n"
+    "                          ④ 模式 smooth（须显式加 ,smooth）：终点一次 IK + 一次 MoveJ ⇒ 零段间停顿；\n"
+    "                             但末端走弧（弓高 = 整段）且全程不查过流\n"
+    "                          ⑤ stream / sync 已移除，写了会被拒绝\n";
+
+static const char HELP_ENABLE[] =
+    "【enable 使能/泄力】\n"
     "  disable               全部失能所有关节\n"
     "  disable:N             仅单独泄力(失能)关节 N\n"
     "  enable                恢复使能所有关节\n"
-    "  enable:N              仅单独使能关节 N\n"
-    "  motor                 启动/停止电机实时监控（1S/次循环显示）\n"
+    "  enable:N              仅单独使能关节 N\n";
+
+static const char HELP_STATE[] =
+    "【state 状态/标定】\n"
     "  getpos                读取当前关节角(度)、笛卡尔坐标(X,Y,Z,RPY)与法兰倾角\n"
+    "  motor                 启动/停止电机实时监控（1S/次循环显示）\n"
     "  fk:J1,J2,J3,J4,J5,J6  离线正解预览：按 DH 表算出该组关节角对应的位姿、\n"
     "                        法兰倾角与臂形；不动臂不下发，用来和 getpos 对照\n"
+    "  stall                 显示六轴堵转阈值(mA)与各轴最新电流\n"
+    "  stall:N:MA            运行时设置关节N的堵转阈值为 MA mA（0=关闭该轴）；\n"
+    "                        只改本次运行，持久化请写 ini [stall] 的 j1..j6\n"
+    "  poseok                人工解除「位姿不可信」闸门（零点丢失时运动命令会被锁住；\n"
+    "                        确认是误判才用，否则所有位姿与运动都是错的）\n"
+    "  zero                  显示当前零点与机械角\n"
+    "  zero_save:v1,v2,v3,v4,v5,v6  保存指定的零点标定值\n"
+    "  alarm                 查看六轴驱动器报警（0x00A3：当前 + 最近三次历史）\n"
+    "  alarm:clear           清除六轴报警（0x00A4=0）；⚠️ 先排除原因，否则立刻复现\n";
+
+static const char HELP_DIAG[] =
+    "【diag 总线/时延/波特率（均不动臂，除非注明）】\n"
     "  diag                  总线时延体检：把单事务拆成 flush/write/read 三段计时，\n"
     "                        并对照\"只写不读\"，定位刷新率瓶颈；不动臂\n"
     "  busrate[:N]           总线极限速率实测（回答\"这根485最高多少Hz\"）：分档给出\n"
@@ -756,8 +925,12 @@ static const char HELP_TEXT[] =
     "                        无参数=只读显示；accel:40 或 accel:40,40 = 六轴写入并读回验证。\n"
     "                        只写 RAM（不发 0x00DC），驱动器断电即恢复，可反复试。\n"
     "                        ⚠️ 调太小会丢步/过流，从 40 起试；这是\"顿\"里唯一免改硬件的部分\n"
-    "  alarm                 查看六轴驱动器报警（0x00A3：当前 + 最近三次历史）\n"
-    "  alarm:clear           清除六轴报警（0x00A4=0）；⚠️ 先排除原因，否则立刻复现\n"
+    "  pipe[:轮数[:间隔us]]   流水线批量读探针（只读位置，不动臂）：\n"
+    "                        基线＝现状一问一答；然后先连发 6 个请求、再收 6 个响应，\n"
+    "                        扫 0/50/100/200/300/500/1000/2000 us 八档间隔，报丢帧数。\n"
+    "                        目的：把\"等响应那 1.6ms 里总线其实是空的\"这块钱榨出来。\n"
+    "                        轮数默认 20；给第三个参数只测那一档（如 pipe:30:200）\n"
+    "  bcast                 广播帧验证：地址0写速度再逐轴读回，看几轴响应广播\n"
     "  drvbaud               驱动器波特率寄存器 0x0009：只读六轴档位码/波特率/校验/停止位+固件版本\n"
     "  drvbaud:CODE          广播写 0x0009=CODE（写完驱动器立即换速率 ⇒ 当场失联，不切PC侧）\n"
     "  drvbaud:CODE:BAUD     广播写 → PC侧切 BAUD → 回读验证（推荐，一条命令走完试探）\n"
@@ -771,16 +944,13 @@ static const char HELP_TEXT[] =
     "                        ② 双模块：再插一个转换器，A-A/B-B 对接，主口发、辅口收\n"
     "                           looptest:30:0:COM5   ← AUX 写辅口名即启用②\n"
     "                        N=重复次数(默认30)，BAUD=临时切PC侧波特率(省略=不改，测完自动改回)\n"
-    "                        判读：单事务耗时看 diag（921600 下 ≈1.7ms），\n"
-    "                              它 = 线上 0.23 + 驱动器周转 ≈1.47 + USB栈 ≤0.08 ms\n"
+    "                        判读：单事务耗时看 diag（921600 下 ≈1.7ms），它 = 线上 0.23\n"
+    "                              + 驱动器周转 ≈1.47 + USB栈 ≤0.08 ms\n"
     "                              ⚠️ 回环RTT只代表本工具的往返能力，【不能】从单事务里减\n"
-    "                        ⚠️ 必须脱离电机；接电机时切BAUD会立刻失联\n"
-    "  bcast                 广播帧验证：地址0写速度再逐轴读回，看几轴响应广播\n"
-    "  pipe[:轮数[:间隔us]]   流水线批量读探针（只读位置，不动臂）：\n"
-    "                        基线＝现状一问一答；然后先连发 6 个请求、再收 6 个响应，\n"
-    "                        扫 0/50/100/200/300/500/1000/2000 us 八档间隔，报丢帧数。\n"
-    "                        目的：把\"等响应那 1.6ms 里总线其实是空的\"这块钱榨出来。\n"
-    "                        轮数默认 20；给第三个参数只测那一档（如 pipe:30:200）\n"
+    "                        ⚠️ 必须脱离电机；接电机时切BAUD会立刻失联\n";
+
+static const char HELP_PROBE[] =
+    "【probe 驱动器寄存器探针（⚠️ 会真动臂，做\"又直又顺\"判定/电流标定用）】\n"
     "  curtest               电流实测（标定堵转阈值用）：静止采样六轴保持电流，不动臂\n"
     "  curtest:N[:DEG[:RPM]] 关节N 走 +DEG 度再走回原位，全程高速采样该轴电流，\n"
     "                        输出 保持/运动 的最小·均值·最大(mA) 与建议阈值区间\n"
@@ -788,19 +958,37 @@ static const char HELP_TEXT[] =
     "                        相对位移表，让驱动器自己连续执行，全程高频读 0x00D6\n"
     "                        实时速度 ⇒ 看段间速度掉不掉 0（决定\"又直又顺\"能否成立）\n"
     "                        DEG=每段机械角(默认5,上限30)；轴会停在 +3×DEG 处，注意行程\n"
-    "  stall                 显示六轴堵转阈值(mA)与各轴最新电流\n"
-    "  stall:N:MA            运行时设置关节N的堵转阈值为 MA mA（0=关闭该轴）；\n"
-    "                        只改本次运行，持久化请写 ini [stall] 的 j1..j6\n"
-    "  poseok                人工解除「位姿不可信」闸门（零点丢失时运动命令会被锁住；\n"
-    "                        确认是误判才用，否则所有位姿与运动都是错的）\n"
-    "  zero                  显示当前零点与机械角\n"
-    "  zero_save:v1,v2,v3,v4,v5,v6  保存指定的零点标定值\n"
-    "  help                  帮助\n"
-    "  exit                  退出\n";
+    "  queuetest:N[:DEG[:RPM]] 排队寄存器 0x00CE 探针（手册§66④）：向关节N 连发 3 段\n"
+    "                        相对位移（段间不等到位），全程高频读 0x00D6 实时速度\n"
+    "                        ⇒ 看排队跑多段时段间速度掉不掉 0（掉 0=仅串行、仍卡；\n"
+    "                        不掉=驱动器会混合 ⇒ interp 改走 0x00CE 可消卡顿）\n"
+    "                        并只读采集运行模式(0x009F)/动态定位(0x00B6)当前值\n"
+    "                        DEG=每段机械角(默认5,上限30)；轴会停在 +3×DEG 处，注意行程\n"
+    "  chain:N[:DEG[:RPM[:段数[:补发点%]]]]  0x00CE 流水线补链探针：本段走到【补发点%】\n"
+    "                        才下发下一段（而不是起步就连发），全程高频读实时速度\n"
+    "                        ⇒ 判段间速度掉不掉 0：不掉 ⇒ interp 可改补链模式消卡顿；\n"
+    "                        掉 0 但段数跑齐 ⇒ 排队可行但每段仍停；段数不够 ⇒ 补发被丢弃\n"
+    "                        段数默认 4(上限8)；补发点默认 50%；轴会停在 +段数×DEG 处\n";
 
-/* 打印帮助文本（help / ?）。注意：这里的 looptest 判读文案必须与 commands.c 的实际
- * 测量口径一致，否则会把人引向错误的优化方向（曾写着已作废的 15.4ms 公式）。 */
-void cmd_print_help(void)
+/* 分级帮助打印（help / ?）。topic 为空 → 索引；all → 全展开；其余 → 单组。 */
+void cmd_print_help(const char *topic)
 {
-    fputs(HELP_TEXT, stdout);
+    if (topic == NULL || topic[0] == '\0') {
+        fputs(HELP_BRIEF, stdout);
+        return;
+    }
+    if (strcmp(topic, "all") == 0) {
+        fputs(HELP_MOTION, stdout);  fputs(HELP_ENABLE, stdout);
+        fputs(HELP_STATE, stdout);   fputs(HELP_DIAG, stdout);
+        fputs(HELP_PROBE, stdout);
+        printf("  exit                  退出\n");
+        return;
+    }
+    if (strcmp(topic, "motion") == 0) { fputs(HELP_MOTION, stdout); return; }
+    if (strcmp(topic, "enable") == 0) { fputs(HELP_ENABLE, stdout); return; }
+    if (strcmp(topic, "state")  == 0) { fputs(HELP_STATE,  stdout); return; }
+    if (strcmp(topic, "diag")   == 0) { fputs(HELP_DIAG,   stdout); return; }
+    if (strcmp(topic, "probe")  == 0) { fputs(HELP_PROBE,  stdout); return; }
+    printf("未知主题「%s」。可用：motion / enable / state / diag / probe / all\n", topic);
+    fputs(HELP_BRIEF, stdout);
 }
