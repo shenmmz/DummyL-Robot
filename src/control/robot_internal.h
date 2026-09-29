@@ -79,8 +79,16 @@ typedef struct ModbusFrame ModbusFrame;
                                        * 给定电流；0x00D6 恒为实时速度，单位 0.01rpm。 */
 #define LEESN_REG_VEL_RUN     0x00D8  /* 运行速度 (INT32, RW，0.01 rpm，默认 30000) */
 #define LEESN_REG_SAVE_CMD    0x00DC  /* 断电保存命令 (UINT16, WO：1=保存 0=恢复出厂) */
-#define LEESN_REG_REL_MOVE    0x00DE  /* 运行脉冲数 (INT32 pulses, WO，相对当前位置) */
-#define LEESN_REG_ABS_MOVE    0x00E8  /* 运行到绝对位置 (INT32 pulses, WO，运行/停止都可执行) */
+#define LEESN_REG_REL_MOVE    0x00DE  /* 运行脉冲数 (INT32 pulses, WO，相对当前位置)
+                                       * 手册§66⑤：运行时收到新指令【立即执行、当前指令强行结束】。 */
+#define LEESN_REG_REL_MOVE_Q  0x00CE  /* 运行脉冲数-排队型 (INT32 pulses, WO，相对【停止状态】当前位置)
+                                       * 手册§66④："运行结束才响应下一条指令" ⇒ 会排队。
+                                       * 是否段间不减速（混合）手册未明说，是消卡顿的关键待验证点。 */
+#define LEESN_REG_ABS_MOVE    0x00E8  /* 运行到绝对位置 (INT32 pulses, WO，运行/停止都可执行)
+                                       * 手册§66⑦：运行时收到该指令【立即执行、当前指令强行结束】。 */
+#define LEESN_REG_RUN_MODE    0x009F  /* 运行模式设定 (UINT16, RW，出厂 3) —— 探针只读采集，不写 */
+#define LEESN_REG_DYN_POS     0x00B6  /* 设置动态定位 (UINT16, RW，出厂 0) —— 名字疑似"运行中改目标/混合"开关，
+                                       * 手册未给位定义；探针只读采集当前值 */
 #define LEESN_REG_TORQUE_CFG  0x009E  /* 力矩模式设定 (UINT16, RW，记忆)
                                        * BIT15~8：模式(1碰撞回原点/2抓取/3恒力矩运行/4恒力矩保持)
                                        * BIT7~0：力矩等级 0~255（0 最小，255 最大） */
@@ -144,9 +152,7 @@ const char *leesn_alarm_text(int code);
 /* 发送 Modbus 请求并等待响应：返回解析结果（ERR_NONE 成功 / 对应错误码） */
 ErrCode robot_request(Robot *r, const uint8_t *frame, size_t len, ModbusFrame *out);
 
-/* 发送 Modbus 请求但【不等从站响应】。与 robot_request 共用同一把总线锁：
- * 半双工总线上任何发送都必须串行，否则会与并发线程撞车/冲掉对方响应。
- * 调用方必须自行保证下一帧发出前上一帧的响应已发完。 */
+/* 发送 Modbus 请求但不等从站响应。 */
 ErrCode robot_request_noread(Robot *r, const uint8_t *frame, size_t len);
 
 /* 关节号 -> Modbus 从站地址查表 */
