@@ -15,8 +15,8 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 
 代码运行在 Windows PC 上，通过 USB 转 RS485 以 Modbus RTU 协议直接驱动立三（LEESN）闭环步进电机（六轴机械臂），不再依赖单片机固件。运动学、轨迹规划、电机控制逻辑全部在 PC 端完成，算法实现保持纯 C、无重量级依赖，可随时移植回单片机。
 
-> **协议基线**：全项目一律使用立三（LEESN）485 协议，
-> 寄存器表见 [docs/protocol.md](docs/protocol.md) 与 `src/control/robot_internal.h`。
+> **协议基线**：全项目一律使用立三（LEESN）485 协议，寄存器来源见
+> `external/485通讯手册_sv126.1.md`（V126）与代码宏表 `src/control/robot_internal.h`。
 
 ---
 
@@ -25,138 +25,157 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 | 项 | 方案 |
 |---|---|
 | 语言标准 | C11 |
-| 编译器 | MinGW-w64 GCC 13.10（`C:\Qt\Tools\mingw1310_64\bin`，Qt 自带） |
-| 构建系统 | CMake 4.4.2 + Ninja 1.13.2 |
-| 串口通信 | Windows API 直接封装（CreateFile / SetCommState / ReadFile / WriteFile），零第三方依赖 |
-| 单元测试 | CTest + 轻量断言（不引第三方框架） |
+| 编译器 | **当前主用 Visual Studio 2026（MSVC cl.exe）**；亦支持 MinGW-w64 GCC（`C:\Qt\Tools\mingw1310_64\bin`） |
+| 构建系统 | CMake 3.16+，生成器二选一：Visual Studio（默认，产物落 `build\bin\Debug\`）或 Ninja + MinGW（产物落 `build\bin\`） |
+| 串口通信 | Windows API 直接封装（CreateFile / SetCommState / ReadFile / WriteFile），零第三方依赖；CRC16（0xA001）内联在 `modbus_rtu.c` |
+| 单元测试 | CTest + 轻量断言（不引第三方框架）；`tests/` 目录当前不在工作区，CMake 按文件存在与否自动跳过对应目标 |
 | 配置管理 | 头文件宏（静态参数）+ ini 文本（运行时可调参数） |
+| 遥测 | `utils/telemetry.c` 以 UDP 回环（ini `[telemetry] port=9900`）把位姿发给 3D 镜像程序 |
 
 ## 2. 项目架构
 
 ### 2.1 可视化架构图
 
-完整可视化架构图见 [docs/architecture.html](docs/architecture.html)（浏览器打开可查看交互式架构图，支持深色模式）。
+完整交互式架构图见 `docs/architecture.html`（本地文件，浏览器打开，支持深色模式）。
 
 ### 2.2 分层架构图
 
 ```
-┌─────────────────────────── PC 软件 (Windows / MinGW) ───────────────────────────┐
-│                                                                                 │
-│                          ┌──────────┐                                           │
-│                          │  main.c  │  命令行入口                              │
-│                          └────┬─────┘                                           │
-│                               │                                                 │
-│  ┌──┐  ┌──────────────────────┼──────────────────────┐  ┌────────────┐          │
-│  │utils│ │       控制层 (control)                     │  │  算法库    │          │
-│  │     │ │  robot.c   home.c   monitor.c              │  │ mat3.c     │          │
-│  │logger│ │  使能/运动  堵转回零  状态监控              │  │ dh.c       │          │
-│  │cmd  │ │             ┌─────┐                       │  │ ik.c       │          │
-│  │err  │ │             │核心 │                       │  ├────────────┤          │
-│  └──┬──┘ └─────────────┴─────┴───────────────────────┘  │ planner.c  │          │
-│     │                    │                               └─────┬──────┘          │
-│     │              ┌─────┘                                     │                │
-│  ┌──┴──────┐  ┌────▼────────────────────────┐                 │                │
-│  │ config  │  │     通信层 (comm)            │                 │                │
-│  │ config.h│  │ serial_win  modbus_rtu  crc16│                 │                │
-│  │ config  │  │ Win32串口   RTU主站    CRC校验 │                 │                │
-│  │ .ini    │  └─────────────┬───────────────┘                 │                │
-│  └─────────┘                │                                  │                │
-│                             │                                  │                │
-└─────────────────────────────┼──────────────────────────────────┘                │
-                              │                                                   │
-                    ┌─────────▼───────────────────┐                                │
-                    │  USB-RS485 → 6轴步进电机    │                                │
-                    │  立三 LEESN · Modbus RTU    │                                │
-                    │  115200 8N1                │                                │
-                    └───────────────────────────┘                                │
+              main.c  命令行入口 + 交互循环
+                          │
+                          ▼
+   ┌────────────────  cli (commands.c)  ────────────────┐
+   │  命令分发：home/movej/movel/enable/getpos/探针…     │
+   └───────────────────────┬─────────────────────────────┘
+                           ▼
+   ┌────────────────  control  ─────────────────────────┐
+   │  robot.c 高层接口   home.c 堵转回零   monitor.c 监控 │
+   └──────┬───────────────────────────────┬─────────────┘
+          │ 调用                           │ 调用
+          ▼                               ▼
+   ┌── kinematics ──┐  ┌── trajectory ──┐  ┌── api (motor_reg) ──┐
+   │ dh / fk / ik   │  │  line.c 直线插补│  │ 寄存器读写封装       │
+   │   / zero       │  │ (moveL 逐点 IK) │  │ (motor_write/read…) │
+   └────────────────┘  └────────────────┘  └──────────┬──────────┘
+                                                      ▼
+   ┌────────────────  comm  ───────────────────────────────┐
+   │  serial_win.c Win32串口   modbus_rtu.c RTU主站+CRC16    │
+   │  comm_if.h CommOps 抽象（可注入假串口做单测）           │
+   └───────────────────────────┬────────────────────────────┘
+                               ▼
+              USB-RS485 → 6 轴立三 LEESN 步进电机
+              Modbus RTU · 921600 8N1 · 10000 脉冲/转
+
+   横向支撑：utils (cmd_parser / err / ini_rw / telemetry)、config (robot_config.h / .ini)
 ```
 
 ### 2.3 层级说明
 
 | 层 | 目录 | 模块 | 职责 |
 |---|---|---|---|
-| 应用层 | `src/main.c` | CLI | 命令行入口，解析用户输入，调用控制层 |
-| 控制层 | `src/control/` | robot.c / home.c / monitor.c | 使能/运动/状态/屏蔽、堵转回零、状态监控 |
-| 通信层 | `src/comm/` | serial_win.c / modbus_rtu.c / crc16.c | Win32串口、Modbus RTU主站、CRC16校验 |
-| 算法库 | `src/kinematics/` `src/trajectory/` | mat3.c / dh.c / ik.c / planner.c | 矩阵运算、DH建模、逆运动学、轨迹规划 |
-| 工具层 | `src/utils/` | logger / cmd_parser / err | 中文日志、命令解析、统一错误码 |
-| 配置层 | `config/` | robot_config.h / .ini | 编译期参数（宏）+ 运行时参数（ini） |
+| 应用层 | `src/main.c` | — | 初始化 + CLI 交互循环 |
+| 命令层 | `src/cli/` | commands.c | 各命令实现与分发（运动、标定、诊断、探针） |
+| 控制层 | `src/control/` | robot.c / home.c / monitor.c | 使能/运动/状态、堵转回零、监控 |
+| 电机 API | `src/api/` | motor_reg.c | 寄存器读写封装（供 control/cli 调用） |
+| 通信层 | `src/comm/` | serial_win.c / modbus_rtu.c / comm_if.h | Win32 串口、Modbus RTU 主站、CRC16 |
+| 算法库 | `src/kinematics/` `src/trajectory/` | dh / fk / ik / zero / line | DH 建模、正解、球腕解耦逆解、零点换算、直线插补 |
+| 工具层 | `src/utils/` | cmd_parser / err / ini_rw / telemetry | 命令解析、错误码、ini 读写、UDP 遥测 |
+| 配置层 | `src/config/` | robot_config.h / robot_config.ini | 编译期参数（宏）+ 运行时参数（ini） |
 
 ### 2.4 关键设计
 
 - **通信抽象**：`comm_if.h` 定义 `CommOps` 函数指针表，控制层不直接依赖串口实现，可注入假串口做单测
-- **内部共享**：`robot_internal.h` 暴露寄存器定义和 `robot_request()` 给 home.c，不对外公开
-- **产物**：主控台 `dummyrobot.exe` + 10 个离线单元测试（`ctest --test-dir build`，当前 10/10）。
-  早期附带的独立工具（`scan_motors.exe`、`servo_calib.exe`）已删除
+- **内部共享**：`robot_internal.h` 暴露寄存器定义和 `robot_request()`，不对外公开
+- **构建模块化**：7 个静态库（comm / kinematics / trajectory / api / control / utils / cli）+ 主程序 `dummyrobot`
+- **产物**：主控台 `dummyrobot.exe`；离线单测与诊断工具登记在 CMake（`tests/` 缺文件时自动跳过）
 
 ### 2.5 数据流向
 
 ```
-用户命令 → main.c → control层 → comm层 → RS485 → 电机
-                     ↑    ↑
-              utils  ↑    ↑  algorithm (kinematics/trajectory)
-              config ↑
+用户命令 → main.c → cli → control → api → comm → RS485 → 电机
+                        ↑        ↘ kinematics/trajectory（IK/插补）
+                        ↘ utils(cmd_parser/ini)   ↗
+                     config(.h/.ini)
 ```
 
 ### 2.6 目录结构
 
 ```
 DummyL-Robot/
-├── CMakeLists.txt              # 主构建：7 静态库（comm/kinematics/trajectory/api/control/utils/cli）+ app
+├── CMakeLists.txt              # 7 静态库（comm/kinematics/trajectory/api/control/utils/cli）+ app + tests/tools
 ├── README.md                   # 本文件
 ├── src/
 │   ├── main.c                  # 入口 + CLI 交互循环
+│   ├── api/
+│   │   └── motor_reg.c/h       # 电机寄存器读写 API（motor_write_u16 / motor_read_position / …）
+│   ├── cli/
+│   │   └── commands.c/h        # 命令实现与分发（home/movel/探针/诊断…）
 │   ├── config/
-│   │   ├── robot_config.h      # 电机ID/减速比/堵转电流/限位（宏定义）
-│   │   └── robot_config.ini    # 运行时可调参数（串口端口、波特率、默认速度）
+│   │   ├── robot_config.h      # 减速比/编码器脉冲/零点/限位（宏定义）
+│   │   └── robot_config.ini    # 运行时可调参数（串口端口/波特率、[movel]、[stall]、[tool]…）
 │   ├── comm/
-│   │   ├── comm_if.h           # CommOps 接口层（串口帧收发统一接口抽象）
+│   │   ├── comm_if.h           # CommOps 接口层（串口帧收发统一抽象）
 │   │   ├── serial_win.c/h      # Windows 串口封装（实现 CommOps）
-│   │   ├── crc16.c/h           # CRC16 0xA001
-│   │   └── modbus_rtu.c/h      # Modbus RTU 主站：03H/06H/10H/04H 帧构造与解析
+│   │   └── modbus_rtu.c/h      # Modbus RTU 主站：03H/06H/10H 帧构造与解析（含 CRC16 0xA001）
 │   ├── kinematics/
-│   │   ├── dh.c/h              # 建模：DH 参数表 + d6 工具长度标定
+│   │   ├── dh.c/h              # DH 参数表 + d6 工具长度标定
 │   │   ├── fk.c/h              # 正解 FK：单关节变换 / 六轴正解 / 位姿→XYZ+RPY
 │   │   ├── ik.c/h              # 球腕解耦解析 IK（8 组解）+ 限位筛选/最优解选择
-│   │   └── joint_zero.c/h      # 编码器读数 → 机械角（零点/方向标定）
+│   │   └── zero.c/h            # 编码器读数 → 机械角（零点/方向换算）
 │   ├── trajectory/
-│   │   └── line.c/h            # 笛卡尔直线插补（moveL 逐点 IK）
+│   │   └── line.c/h            # 笛卡尔直线插补（moveL 逐点 IK + 分段时间表）
 │   ├── control/
 │   │   ├── robot.c/h           # 高层接口：movej / enable / disable / 状态查询
 │   │   ├── home.c/h            # 回零流程：顶限位→电流判堵转→急停→清零→就位
 │   │   ├── monitor.c/h         # 状态轮询：在线检测、堵转报警
-│   │   └── robot_internal.h    # 立三（LEESN）寄存器宏表 + DWORD 字节序契约
+│   │   └── robot_internal.h    # 立三（LEESN）寄存器宏表 + 字节序契约
 │   └── utils/
-│       ├── logger.c/h          # 精简中文日志
+│       ├── cmd_parser.c/h      # 命令行解析 + 分级帮助文本
 │       ├── err.c/h             # ErrCode 统一错误码 + err_str() 中文提示
-│       └── cmd_parser.c/h      # 命令行解析（movej:1:45 / home / status）
-└── docs/
-    └── output/                 # 产物输出目录
+│       ├── ini_rw.c/h          # ini 读取
+│       └── telemetry.c/h       # UDP 位姿遥测（供 3D 镜像）
+├── external/                   # 电机驱动资料（485 手册 md/pdf、参考照片）
+├── docs/                       # 本地文档/架构图（不推云端，见 .gitignore）
+└── second/                     # 参考实现（本地保留，不推云端）
 ```
 
 ## 3. 构建与运行
 
+**当前主用 Visual Studio 2026（MSVC）生成器：**
+
 ```bash
-# 首次构建
+# 首次配置（默认走本机 Visual Studio 生成器）
+cmake -B build
+# 编译
+cmake --build build --config Debug
+# 运行（VS 生成器产物带 Debug 子目录）
+build\bin\Debug\dummyrobot.exe
+```
+
+**可选：MinGW-w64 + Ninja：**
+
+```bash
 cmake -G Ninja -B build -DCMAKE_C_COMPILER=C:/Qt/Tools/mingw1310_64/bin/gcc.exe
-ninja -C build
-
-# 运行
+cmake --build build
 build\bin\dummyrobot.exe
+```
 
-# 运行单元测试
+**单元测试**（仅当 `tests/` 目录存在时才会配置）：
+
+```bash
 ctest --test-dir build
 ```
 
-构建产物：`build\bin\dummyrobot.exe`。
+> ⚠️ 若同时设了 `HTTP_PROXY` 与 `http_proxy`（仅大小写不同），MSBuild 会因字典键冲突报
+> `MSB6001` ⇒ 先取消小写那个：`Remove-Item Env:\http_proxy`。
 
 ## 4. 硬件与通信协议
 
 ### 4.1 硬件配置
 
 - 6× 立三（LEESN）闭环步进电机（RS485 总线），USB 转 485 连接 PC
-- 波特率 115200，8 数据位 / 无校验 / 1 停止位（115200 8N1）
-- 每台电机 4096 线编码器，单圈 16384 步
+- 波特率 **921600**，8 数据位 / 无校验 / 1 停止位（921600 8N1；六轴驱动器 `0x0009` 已固化为档位 15）
+- 每转脉冲数（细分）**10000**（`0x0024`，出厂 4000，启动时写后读回比对并对齐到 10000）
 
 | 关节 | 电机型号 | 减速比 |
 |---|---|---|
@@ -167,13 +186,12 @@ ctest --test-dir build
 | 5 | 35（IP35ET） | 50:1 |
 | 6 | 28（IP28ET） | 50:1 |
 
-**步数换算**：`步数 = 角度° × 减速比 ÷ 360 × 16384`
+**步数换算**（`ENCODER_STEPS_PER_REV = 10000`）：`步数 = 角度° × 减速比 ÷ 360 × 10000`
 
 ### 4.2 立三（LEESN）寄存器表（Modbus RTU）
 
-> 来源：`external/485通讯手册_sv126.1.pdf`（V126）。完整寄存器表见 [docs/protocol.md](docs/protocol.md)；
-> 代码宏定义见 `src/control/robot_internal.h`。功能码 03H=读、06H=写单寄存器、10H=写多寄存器；
-> CRC16 多项式 0xA001。
+> 来源：`external/485通讯手册_sv126.1.md`（V126）；代码宏定义见 `src/control/robot_internal.h`。
+> 功能码 03H=读、06H=写单寄存器、10H=写多寄存器；CRC16 多项式 0xA001。
 
 #### 状态与信息区
 | 地址 | 功能码 | 内容 | 初始值 |
@@ -189,9 +207,9 @@ ctest --test-dir build
 |---|---|---|---|
 | 0x00C8 | 06H | 运行/停止：写 0 减速停、1 正转、256 急停、257 反转 | -- |
 | 0x00C9 | 06H | 回原点：触发电机回机械原点（速度取 0x00D8~0x00D9） | -- |
-| 0x00D8 / 0x00D9 | 10H | 运行速度（INT32，单位 0.01 rpm，默认 30000=300rpm） | 30000 |
-| 0x0098 / 0x0099 | 06H | 加/减速时间（UINT16 ms，出厂默认 120ms） | 120 |
-| 0x00E8 / 0x00E9 | 10H | 运行到绝对位置（INT32 脉冲，相对原点，运行/停止均可执行） | -- |
+| 0x00D8 / 0x00D9 | 10H | 运行速度（INT32，单位 0.01 rpm） | 30000 |
+| 0x0098 / 0x0099 | 06H | 加/减速时间（UINT16 ms，出厂 120ms；上位机按 ini `[movel] acc_floor_ms` 抬高下限） | 120 |
+| 0x00E8 / 0x00E9 | 10H | 运行到绝对位置（INT32 脉冲，相对原点） | -- |
 | 0x00D2 / 0x00D3 | 10H | 设置当前电机位置（只改位置寄存器值，物理不动，回零清零用） | -- |
 
 #### 使能与地址区
@@ -199,89 +217,105 @@ ctest --test-dir build
 |---|---|---|---|
 | 0x00D4 | 06H | 脱机/使能/驱动重启：**写 0 使能、写 1 释放马达**；0x0100 驱动重启 | -- |
 | 0x0008 | 06H | 串口超时（UINT16，单位 10ms，写 0 取消超时） | -- |
-| 0x0009 | 06H | 通讯参数（低 8 位波特率码，出厂 12=115200） | 12 |
-| 0x0024 | 10H | 细分（每转脉冲数，UINT32，出厂默认 4000） | 4000 |
+| 0x0009 | 06H | 通讯参数（低 8 位波特率码，出厂 12=115200；**当前六轴固化为 15=921600**） | 12 |
+| 0x0024 | 10H | 细分（每转脉冲数，UINT32，出厂 4000；**启动对齐到 10000**） | 4000 |
 | 0x0066 | 06H | 驱动器基地址（默认 1，多轴需逐台设置并写 0x00DC=1 保存） | 1 |
 | 0x0067 | 06H | 驱动器地址源（默认 0） | 0 |
 | 0x00DC | 06H | 断电保存命令：写 1 保存参数、写 0 恢复出厂 | -- |
 
 ### 4.3 回零流程与参数
 
-回零分两阶段：
+堵转回零（无传感器归零）分阶段：
 
-1. **找零**：组 0 = {1,2,3,5,6} 并行回零 → 组 1 = {4} 回零。立三无归零/堵转专用寄存器，
-   流程为：0x00C8 速度模式顶硬限位 → 上位机读 0x001A 实时电流超阈值判定堵转 →
-   急停（0x00C8=0x0100）→ 清零位置（0x00D2~0x00D3=0）；
-2. **就位**：全部找零完成后，运动到机械原点位姿 `HOME_POSE_DEG`。
+1. **找零**：堵转组 `{2, 3, 5, 1}` 并行启动（进恒力矩模式顶硬限位 → 上位机读 `0x001A` 实时电流超阈值判堵转 → 急停 → `0x00D2` 清零）；
+   **J4 特殊**：等 J3 撞停后才启动（避免与 J3 打架）；**J6 用传感器法**（光电/限位找原点，非堵转）。
+2. **就位**：各轴清零后退让到配置的机械角，全部完成后运动到机械原点位姿 `ROBOT_HOME_MECH_DEG = {0, 0, 90, 0, 0, 0}`。
 
-- 各关节归零方向 `HOME_DIR[6] = {+1, -1, +1, -1, -1, +1}`（决定 0x00C8 写 1 正转还是 257 反转）
-- 回零堵转电流阈值 `HOME_STALL_CURRENT_MA[7] = {0, 500, 500, 800, 500, 500, 0} mA`（实机标定，
-  下标 0 不用；立三无 0x00E1 类堵转电流寄存器，判定由上位机电流轮询完成）
-- 堵转检测电流余量 `HOME_STALL_MARGIN_MA = 400 mA`
-- 回零速度 `HOME_SPEED_RPM = 100 rpm`（写 0x00D8~0x00D9 运行速度寄存器，与 robot_movej 一致；
-  0x009A 为 SV113 以下固件 UINT16 速度寄存器，不再使用）
-- 机械原点位姿 `HOME_POSE_DEG[6]`：6 关节目标角度（度），待用户设置
+- 各关节归零方向 `HOME_DIR[6] = {+1, -1, +1, -1, -1, +1}`
+- 堵转电流阈值来自 ini `[stall]`（j1..j6，单位 mA，`0`=该轴不启用）；判定由上位机电流轮询完成（立三无专用堵转寄存器）
+- J6 传感器回零速度 `HOME_J6_ZERO_RPM = 100 rpm`
+- 回零清零后偶见「位置非 0」警告：`0x00D2` 是 RAM 无记忆寄存器 + 齿轮回程间隙回弹所致，属固有残留，本次已改用相对位移保证行程
 
 ## 5. CLI 命令
 
-命令名**大小写不敏感**（`movel` / `MoveL` 都行）。下表按 `src/utils/cmd_parser.c`
-实际识别的命令列出 —— 以代码为准，不以本文档为准。
+命令名**大小写不敏感**（`movel` / `MoveL` 都行），参数分隔符用**冒号 `:`**（不是分号）。
+下表与程序内 `help` 一致 —— **以 `src/utils/cmd_parser.c` 实际解析为准**。输入 `help` 看速查索引，
+`help:motion / enable / state / diag / probe / all` 看分组详解。
+
+### 运动
 
 | 命令 | 格式 | 作用 | 示例 |
 |---|---|---|---|
-| `home` | `home` / `home:N` | 回零：组0={1,2,3,5,6}并行→组1={4}→机械原点位姿；`:N` 只回零第 N 轴 | `home:3` |
-| `MoveJ` | `MoveJ:N:ANGLE[:SPD][:r\|a]` | 单关节运动到 ANGLE 度；末段 `r`=相对当前位置、`a`=绝对（默认）。省略 SPD 时 60 rpm | `MoveJ:1:45` |
-| `MoveJ` | `MoveJ:A1,A2,A3,A4,A5,A6,SPD,ACC,DEC` | 六轴同步关节空间运动，按行程比例分配转速（同起同停） | `MoveJ:0,0,90,0,20,0,60,100,100` |
-| `MoveL` | `MoveL:X,Y,Z,Rx,Ry,Rz[,SPD,ACC,DEC][,MODE]` | 笛卡尔**直线**：位置线性插值 + 姿态四元数 SLERP，逐点 IK 且选解连续。默认 60 rpm / 80 ms / 90 ms；`MODE`=`sync`（默认，按弓高预算分段+逐航点等到位）/ `step` / `stream` / `smooth`（流畅优先，不分段） | `MoveL:241.5,52,236,-90,90,-90` |
-| `enable` | `enable` / `enable:N` | 恢复使能（全部或单轴） | `enable:1` |
-| `disable` | `disable` / `disable:N` | 泄力失能（全部或单轴） | `disable` |
-| `motor` | `motor` | 启动/停止电机实时监控（约 1 s/次循环显示） | `motor` |
-| `getpos` | `getpos` | 读当前关节角(度)、笛卡尔坐标(X,Y,Z,RPY)与法兰倾角 | `getpos` |
-| `fk` | `fk:J1,...,J6` | 离线正解预览：算该组关节角的位姿，**不动臂不下发**，用来和 `getpos` 对照 | `fk:0,0,90,0,0,0` |
-| `diag` | `diag` | 总线时延体检：把单事务拆成 flush/write/read 三段计时，不动臂 | `diag` |
-| `bcast` | `bcast` | 广播帧验证（地址 0 写速度再逐轴读回），定位刷新率瓶颈，不动臂 | `bcast` |
-| `curtest` | `curtest` / `curtest:N[:DEG[:RPM]]` | 电流实测（标定堵转阈值用）。无参数=静止采样六轴保持电流；带参数=关节 N 走 +DEG 度再回原位并全程采样。默认摆幅 2°、30 rpm | `curtest:5:2:30` |
-| `stall` | `stall` / `stall:N:MA` | 查看/运行时设置逐轴堵转阈值(mA)，`0`=该轴不启用。只改本次运行，持久化写 ini `[stall]` | `stall:1:1000` |
-| `poseok` | `poseok` | 人工解除「位姿不可信」闸门（零点丢失时运动命令会被锁住；确认是误判才用） | `poseok` |
-| `zero` | `zero` | 显示当前零点与机械角 | `zero` |
-| `zero_save` | `zero_save:v1,...,v6` | 保存指定的零点标定值（6 个电机角，度） | `zero_save:-176.66,74.58,-180.03,4.27,115.44,84.89` |
-| `help` | `help` 或 `?` | 打印命令帮助 | `help` |
-| `exit` | `exit` 或 `quit` | 退出程序 | `exit` |
+| `home` | `home` / `home:N` | 回零；`:N` 仅回零第 N 轴 | `home:3` |
+| `MoveJ` | `MoveJ:N:ANGLE[:SPD][:r\|a]` | 单关节运动到 ANGLE 度；`r`=相对、`a`=绝对(默认)；省略 SPD=60rpm | `MoveJ:1:45` |
+| `MoveJ` | `MoveJ:a1,a2,a3,a4,a5,a6,SPD,ACC,DEC` | 六轴同步关节空间运动，按行程比例分配转速（同起同停） | `MoveJ:0,0,90,0,90,0,70,80,90` |
+| `MoveL` | `MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC[,smooth]` | 笛卡尔**直线**：**必须写满 9 段（含显式姿态 Rx,Ry,Rz）**，3/6 段简写与 `keep`/`stream`/`sync` 均已移除。默认 **interp**（按偏差预算反推步长、逐航点等到位、每段过读回/超时急停保护，末端贴直线但段间有加减速停顿）；显式 `,smooth` = 终点一次 MoveJ、零段间停顿但末端走弧 | `MoveL:150,0,120,-180,0,-180,70,80,90` |
 
-> 关节号 N 范围 1..6。
-> **已移除的命令**（文档别再写）：`status`、`mask`/`unmask`、`scan`、`calib`，
-> 以及独立可执行程序 `scan_motors.exe` / `servo_calib.exe` —— 均已随工具清理删除。
-> 另有未列入帮助的调试命令 `nrtest`（连发帧间延迟实测），不常用。
+### 使能 / 状态 / 标定（均不动臂或只读）
 
-> **⚠️ 下发前的安全闸门**（2026-09-18/19 两次事故后加的，命令被拒时看这里的提示）：
-> 目标角 NaN/Inf、目标越该轴软限位、单次位移 > ini `[safety] max_step_deg`、
-> 目标步数 \|steps\| > 1e8、MoveL 规划路径单段关节跳变 > ini `[safety] max_jump_deg`
-> —— 任一命中即拒绝下发，一动不动。详见 `未完成任务清单.md` 的 #12 / #13 / #14。
+| 命令 | 格式 | 作用 |
+|---|---|---|
+| `enable` | `enable` / `enable:N` | 恢复使能（全部或单轴） |
+| `disable` | `disable` / `disable:N` | 泄力失能（全部或单轴） |
+| `getpos` | `getpos` | 读当前关节角、笛卡尔位姿(X,Y,Z,R,P,Y)与法兰倾角 |
+| `motor` | `motor` | 启/停电机实时监控（约 1s/次循环显示） |
+| `fk` | `fk:J1,J2,J3,J4,J5,J6` | 离线正解预览：算该组关节角位姿，**不动臂不下发**，与 `getpos` 对照 |
+| `zero` | `zero` | 显示当前零点与机械角 |
+| `zero_save` | `zero_save:v1,...,v6` | 保存零点标定值（6 个电机角，度） |
+| `poseok` | `poseok` | 人工解除「位姿不可信」闸门（零点丢失时运动命令被锁，确认误判才用） |
+| `stall` | `stall` / `stall:N:MA` | 查看/运行时设逐轴堵转阈值(mA)，`0`=关闭该轴；持久化写 ini `[stall]` |
+| `alarm` | `alarm` / `alarm:clear` | 报警查看 / 清除 |
+
+### 总线诊断（均不动臂）
+
+`diag`（时延体检）、`busrate`（485 极限速率）、`pipe`（流水线批量读探针）、
+`progread:N`（编程区只读转储）、`bcast`（广播帧验证）、`accel`（加减速时间读写，断电即失）、
+`drvbaud`（波特率读/设/固化 ⚠失联风险）、`looptest`（转换器极限 ⚠须脱离电机）。
+
+### 驱动器探针（⚠ 会真动臂）
+
+`curtest`（电流实测，标定堵转阈值）、`tabtest`（表格执行 0x00DD 试验）、
+`trigtest`（表格重复触发试验）、`queuetest`（排队寄存器 0x00CE 试验）、`chain`（补链排队试验）。
+
+### 系统
+
+`help[:topic]`（分级帮助）、`exit` / `quit`（退出）。
+
+> **已移除的命令**（文档别再写）：`status`、`mask`/`unmask`、`scan`、`calib`，独立程序
+> `scan_motors.exe` / `servo_calib.exe`，`stream` 模式，MoveL 的 3/6 段简写与 `keep` 后缀。
+
+> **⚠️ 下发前的安全闸门**（命令被拒时看这里）：目标角 NaN/Inf、目标越该轴软限位、
+> 单次位移 > ini `[safety] max_step_deg`、目标步数 \|steps\| > `ROBOT_ABS_MOVE_STEPS_LIMIT`
+> (1e8)、MoveL 单段关节跳变 > ini `[safety] max_jump_deg` —— 任一命中即拒绝下发、一动不动。
 
 ## 6. 设计原则
 
-1. **三层分离 + CommOps 接口抽象**：`comm/`（帧收发，serial_win 实现 CommOps 函数指针表）→ `control/`（业务指令，仅依赖 `comm_if.h` 接口）→ `main.c`（交互），换总线/换电机不动控制层
+1. **三层分离 + CommOps 接口抽象**：`comm/`（帧收发）→ `control/`（业务指令）→ `cli`/`main`（交互），换总线/换电机不动控制层
 2. **可移植**：运动学与轨迹规划为纯 C，无平台依赖，可整体搬回单片机固件
-3. **配置外置**：电机减速比、DH 参数、限位集中在 `config/`，换机型不碰业务代码
-4. **离线可测**：CRC / Modbus 帧 / IK / 轨迹全部可单测，不接硬件也能验证逻辑
+3. **配置外置**：减速比、DH 参数、限位、加减速/偏差预算集中在 `config/`，换机型不碰业务代码
+4. **离线可测**：CRC / Modbus 帧 / IK / 轨迹 / 解析均可单测，不接硬件也能验证逻辑
 5. **输出精简**：串口打印全中文，过程性/调试性打印无必要即删
 
 ## 7. 开发提示词
 
 > **项目**：DummyL-Robot — PC 端六轴机械臂控制台（C 语言，脱离单片机）
-> **架构**：C11 + MinGW GCC + CMake/Ninja；`comm/` 走 RS485 Modbus RTU 直驱立三（LEESN）闭环步进电机；`control/robot.c` 提供 movej/home 等高层接口；`kinematics/` 纯 C 正逆解（球腕解耦 + 限位筛选/最优解）
-> **协议**：立三（LEESN）寄存器（地址 0x0066、使能 0x00D4（写0使能/写1释放）、实时位置 0x0004/5、速度 0x00D8/9（0.01rpm）、绝对位置 0x00E8/9、状态 0x0006/7、电流 0x001A、报警 0x00A3/清 0x00A4、回零位置清零 0x00D2/3）；Modbus RTU 03H/06H/10H；CRC16 0xA001；115200 8N1；脉冲 = 角度° × 减速比 ÷ 360 × 16384
-> **硬件**：6× 立三闭环步进电机（1~3号 42 机座，减速比 50:1/100:1/50:1；4/5号 35 机座 IP35ET，50:1；6号 28 机座 IP28ET，50:1），4096 线编码器单圈 16384 步，USB 转 485；1~6 号全部在线
-> **约束**：① 只本地 git commit，禁止 push；② 架构/接口改动先讨论再动手；③ 串口打印精简中文；④ 单位：角度用度、长度用毫米；⑤ 优先可移植到单片机的纯 C 实现，不引入重量级依赖；⑥ 运动学/轨迹/通信逻辑保持离线可单测（不接硬件）；⑦ 新模块先调研 GitHub 开源项目确认方案再写代码；⑧ 产物输出到 docs\output\
+> **架构**：C11 + CMake；生成器当前用 Visual Studio（MSVC），亦支持 MinGW/Ninja；`comm/` 走 RS485 Modbus RTU 直驱立三（LEESN）闭环步进；`control/robot.c` 提供 movej/home 高层接口；`cli/commands.c` 命令分发；`kinematics/` 纯 C 正逆解（球腕解耦 + 限位筛选/最优解）；`trajectory/line.c` 直线插补
+> **协议**：立三（LEESN）寄存器（使能 0x00D4 写0使能/写1释放、实时位置 0x0004/5、速度 0x00D8/9（0.01rpm）、绝对位置 0x00E8/9、状态 0x0006/7、电流 0x001A、报警 0x00A3/清 0x00A4、回零清零 0x00D2/3、加减速 0x0098/99）；Modbus RTU 03H/06H/10H；CRC16 0xA001；**921600 8N1**；**脉冲 = 角度° × 减速比 ÷ 360 × 10000**
+> **硬件**：6× 立三闭环步进（1~3 号 42 机座，减速比 50:1/100:1/50:1；4/5 号 35 机座 IP35ET，50:1；6 号 28 机座 IP28ET，50:1），每转 10000 脉冲（0x0024），USB 转 485；1~6 号全部在线
+> **约束**：① 本地 commit 后按用户指示推送 origin（Gitee）；② 架构/接口改动先讨论再动手；③ 串口打印精简中文；④ 单位：角度用度、长度用毫米；⑤ 优先可移植到单片机的纯 C，不引重量级依赖；⑥ 运动学/轨迹/通信逻辑保持离线可单测；⑦ 新模块先调研开源方案确认再写；⑧ `docs/`、`second/` 仅本地保留、不推云端
 > **开发原则**：comm/control/ui 三层分离；配置头文件 + ini；离线可单测；先方案后代码
 
 ## 8. 路线图
 
-- [x] 串口层（serial_win.c）联调验证：打开 COM 口、收发帧
+- [x] 串口层（serial_win.c）联调：打开 COM 口、收发帧
 - [x] Modbus RTU 主站：读状态/写使能/写位置，单关节验证
-- [x] 六轴高层接口：movej / home / status
-- [x] 运动学库：DH/FK/IK + 单测闭环
-- [x] 轨迹规划：梯形/S 曲线插补
-- [ ] 笛卡尔空间运动（moveL）
-- [ ] 3D 可视化验证（可选）
-*（内容由AI生成，仅供参考）*
+- [x] 六轴高层接口：movej / home / enable / getpos
+- [x] 运动学库：DH / FK / IK + 零点换算 + 离线单测
+- [x] 轨迹规划：直线插补（line.c）+ 驱动器内部加减速
+- [x] 笛卡尔空间运动（MoveL）：interp 逐点插补 + smooth 流畅，偏差预算控航点密度
+- [x] 高速进巡航护栏：段耗时 < 加速窗时按直线度红线拉长步长、减航点
+- [x] UDP 遥测镜像 3D
+- [ ] 段间卡顿根治（受固件「段末减速到 0」限制，软件已探明并缓解，待厂商/进一步验证）
+- [ ] 3D 可视化完善（可选）
+
+*（内容由 AI 生成，仅供参考；寄存器与算法细节以代码和 485 手册为准。）*
