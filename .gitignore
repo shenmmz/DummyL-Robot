@@ -7,22 +7,25 @@
 # 文档目录（不推送云端，仅保留本地）
 docs/
 
-# ����Ŀ¼
+# second 参考实现整个目录（不推送云端，仅保留本地）
+second/
+
+# ����Ŀ¼
 .workbuddy/
 
-# ���Գ��򱾵ر������
+# ���Գ��򱾵ر������
 tests/*.exe
 
-# WorkBuddy ����Ŀ¼�������� .bak ����ֻ�����أ������
+# WorkBuddy ����Ŀ¼�������� .bak ����ֻ�����أ������
 .workbuddy-ai/snapshots/
 .workbuddy-ai/plugins/
 .workbuddy-ai/binaries/
 
-# 仿真虚拟环境�?200MB+，不入库�?
+# 仿真虚拟环境�?200MB+，不入库�?
 sim/.venv/
 
-# second的构建产�?
+# second的构建产�?
 second/build/
 
-# second 的仿真虚拟环境�\88469MB，不入库�?
+# second 的仿真虚拟环境�\88469MB，不入库�?
 second/sim/.venv/
