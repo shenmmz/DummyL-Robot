@@ -951,7 +951,7 @@ static const char HELP_MOTION[] =
     "                             （实测偏 7.71mm），但仍照走；想保直线就抄 getpos 原值\n"
     "                          ③ 模式 interp（默认）：按 ini [movel] max_bow_mm（偏差预算）反推步长、逐航点下发并等到位\n"
     "                             ⇒ 末端贴着直线 + 每段读过流/超时保护；代价是段间加减速停顿\n"
-    "                             想减航点/减停顿：把 [movel] max_bow_mm 调大（如 0.8、1.5），直线度会相应下降\n"
+    "                             预算 = [movel] min_bow_mm~max_bow_mm 的【弓高中点】(折中)；想减航点/减停顿就把两值整体抬高\n"
     "                          ④ 模式 smooth（须显式加 ,smooth）：终点一次 IK + 一次 MoveJ ⇒ 零段间停顿；\n"
     "                             但末端走弧（弓高 = 整段）且全程不查过流\n"
     "                          ⑤ stream / sync 已移除，写了会被拒绝\n";

@@ -1342,20 +1342,35 @@ static double movl_step_mm(void)
     return MOVL_STEP_MM_DEFAULT;
 }
 
-/* 由偏差预算(ini [movel] max_bow_mm, mm)反推 interp 步长(mm)：
- *   弓高 = MOVL_BOW_K × 步长²  ⇒  步长 = sqrt(预算 / MOVL_BOW_K)
- * 预算越大 ⇒ 步长越大 ⇒ 航点越少、段间停顿越少（拿直线度换流畅度）。
- * 未配 max_bow_mm / 非正 ⇒ 返回 0，调用方退回 step_mm 老路。结果夹到
- * [MOVL_STEP_MIN_MM, MOVL_STEP_MAX_MM]。 */
+/* 由偏差预算反推 interp 步长(mm)：弓高 = MOVL_BOW_K × 步长² ⇒ 步长 = sqrt(预算/K)。
+ * ini [movel] 给 max_bow_mm（最差可接受弓高）；若另给 min_bow_mm（最好），则取二者
+ * 【弓高中点】(min+max)/2 作折中预算。预算越大⇒步长越大⇒航点越少越不顿（拿直线度换
+ * 流畅）。只配 max_bow_mm ⇒ 直接用上限（旧行为）；两者都未配 ⇒ 返回 0 退回 step_mm。
+ * 结果夹 [MOVL_STEP_MIN_MM, MOVL_STEP_MAX_MM]。 */
 static double movl_step_from_bow_budget(void)
 {
-    double tol, step;
-    if (!ini_read_positive_double(INI_PATH, "movel", "max_bow_mm", &tol) || tol <= 0.0)
+    double lo, hi, tol, step;
+    if (!ini_read_positive_double(INI_PATH, "movel", "max_bow_mm", &hi) || hi <= 0.0)
         return 0.0;
+    tol = hi;   /* 只配 max_bow_mm ⇒ 直接用上限 */
+    if (ini_read_positive_double(INI_PATH, "movel", "min_bow_mm", &lo) &&
+        lo > 0.0 && lo <= hi) {
+        tol = (lo + hi) * 0.5;   /* 折中：取弓高区间中点 */
+    }
     step = sqrt(tol / MOVL_BOW_K);
     if (step < MOVL_STEP_MIN_MM) step = MOVL_STEP_MIN_MM;
     if (step > MOVL_STEP_MAX_MM) step = MOVL_STEP_MAX_MM;
     return step;
+}
+
+/* max_bow_mm（最差可接受弓高）对应的步长上限(mm)——巡航拉长时不许越过这条直线度红线。
+ * 未配 max_bow_mm 返回 0（表示不约束）。 */
+static double movl_bow_max_ceiling(void)
+{
+    double hi;
+    if (!ini_read_positive_double(INI_PATH, "movel", "max_bow_mm", &hi) || hi <= 0.0)
+        return 0.0;
+    return sqrt(hi / MOVL_BOW_K);
 }
 
 /* 两个角度之差，归一到 (-180, 180]。用于姿态比较，避免 359°/-1° 被判成差 360°。 */
@@ -1551,6 +1566,38 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                    fail_idx, fail_reason);
         }
         return;
+    }
+
+    /* 选项①「保证进巡航」护栏：若单段预计耗时连【加速 ramp】都撑不满
+     * （mean_seg_dt < acc_s），驱动器根本爬不到设定转速就又要减速 ⇒ 高转速白费。
+     * 此时在直线度上限(max_bow_mm 对应步长)容许范围内把步长拉长到刚好进巡航
+     * ⇒ 航点随转速升高自动减少。段已够长（正常参数）则不触发。 */
+    if (cmd->movl_mode == MOVL_MODE_INTERP && count > 2) {
+        double acc_s = acc / 1000.0;
+        double mean_seg_dt = total_dt / (count - 1);
+        if (acc_s > 1e-9 && mean_seg_dt < acc_s) {          /* 段耗时连加速都撑不满 */
+            double ceiling = movl_bow_max_ceiling();        /* max_bow_mm 允许的最粗步长 */
+            double want = plan_step * (acc_s / mean_seg_dt);/* 等比拉长到刚好进巡航所需步长 */
+            double cap = (ceiling > 0.0 && ceiling < MOVL_STEP_MAX_MM) ? ceiling : MOVL_STEP_MAX_MM;
+            double news = (want > cap) ? cap : want;
+            if (news > plan_step + 1e-6) {
+                plan_step = news;
+                rc = movl_plan(start_pose, end_pose, q_start, limits, dist,
+                               plan_step, vmax, q_seq, seg_dt, &count, &total_dt,
+                               &fail_idx, fail_reason);
+                if (rc != 0) {
+                    if (rc != -4)
+                        printf("[错误] 巡航重规划第 %d 点逆解失败/越软限位：%s\n",
+                               fail_idx, fail_reason);
+                    return;
+                }
+                mean_seg_dt = total_dt / (count - 1);
+                printf("[提速巡航] 段耗时曾 < 加速 %dms 进不了巡航 ⇒ 步长按直线度上限拉长到"
+                       " %.1fmm ⇒ %d 航点\n", acc, plan_step, count);
+                if (mean_seg_dt < acc_s)
+                    printf("        已到 max_bow_mm 上限仍未能全段进巡航：想更快请降速或放宽 max_bow_mm\n");
+            }
+        }
     }
 
     dev_reset();
