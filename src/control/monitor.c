@@ -10,14 +10,21 @@
 #include <windows.h>
 #endif
 
+/**
+ * @struct SnapJoint
+ * @brief  单轴快照：巡检线程写入，外部通过 monitor_snapshot 无锁读取。
+ */
 typedef struct {
-    int      online;
-    int      masked;
-    uint32_t status;
-    int      current_ma;
-    int      alarm_code;
+    int      online;      /* 1=在线 0=掉线 -1=未知/已屏蔽 */
+    int      masked;      /* 1=该轴被屏蔽，快照不刷新 */
+    uint32_t status;      /* 状态字 0x0006（仅在线时更新） */
+    int      current_ma;  /* 实时电流 mA，-1=读失败 */
+    int      alarm_code;  /* 报警码 0x00A3，0=正常 -1=未读/读失败 */
 } SnapJoint;
 
+/**
+ * @struct Monitor
+ * @brief  后台巡检实例：封装监控线程、事件、快照与上一轮 latch 状态。对外为 opaque 指针。*/
 struct Monitor {
     Robot *robot;
     int stall_threshold_ma[ROBOT_JOINT_COUNT];
@@ -43,7 +50,12 @@ struct Monitor {
 
 static Monitor *g_active_monitor = NULL;
 
-/* 堵转判据：电流 > 阈值。阈值 <=0（未配置）或电流 <0（读失败）一律不算堵转。 */
+/**
+ * @brief 堵转判据：电流 > 阈值。
+ * @param cur_ma       实测电流 mA（<0 = 读失败）
+ * @param threshold_ma 阈值 mA（<=0 = 未配置）
+ * @return 1=命中堵转 / 0=未命中或无数据
+ */
 int monitor_stall_hit(int cur_ma, int threshold_ma)
 {
     if (threshold_ma <= 0) return 0;
@@ -51,7 +63,12 @@ int monitor_stall_hit(int cur_ma, int threshold_ma)
     return (cur_ma > threshold_ma) ? 1 : 0;
 }
 
-/* 设置某轴堵转阈值（mA）。传 <=0 表示禁用该轴堵转判断。 */
+/**
+ * @brief 设置某轴堵转阈值（mA），传 <=0 则禁用该轴判断。
+ * @param m     Monitor 实例（NULL 安全）
+ * @param joint 关节号 1~6
+ * @param ma    新阈值 mA
+ */
 void monitor_set_stall_threshold(Monitor *m, int joint, int ma)
 {
     if (m == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) return;
@@ -61,14 +78,22 @@ void monitor_set_stall_threshold(Monitor *m, int joint, int ma)
     LeaveCriticalSection(&m->snap_lock);
 }
 
-/* 取某轴堵转阈值。 */
+/**
+ * @brief 取某轴当前堵转阈值。
+ * @return 阈值 mA；实例 NULL 或关节号非法时返回 0
+ */
 int monitor_get_stall_threshold(const Monitor *m, int joint)
 {
     if (m == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) return 0;
     return m->stall_threshold_ma[joint - 1];
 }
 
-/* 创建监控对象（快照锁 + 两个自动复位事件）。 */
+/**
+ * @brief 创建监控对象（建快照锁 + 两个自动复位事件，不启动线程）。
+ * @param robot              已初始化的 Robot 实例
+ * @param stall_threshold_ma 六轴堵转电流阈值数组（NULL ⇒ 全 0，不判堵转）
+ * @return Monitor 指针；失败时 NULL
+ */
 Monitor *monitor_create(Robot *robot, const int stall_threshold_ma[6])
 {
     Monitor *m;
@@ -112,7 +137,10 @@ Monitor *monitor_create(Robot *robot, const int stall_threshold_ma[6])
     return m;
 }
 
-/* 停止线程、关闭两个事件、销毁临界区。 */
+/**
+ * @brief 停监控线程 + 关闭事件 + 销毁临界区 + 释放。
+ * @param m Monitor 实例（NULL 安全）
+ */
 void monitor_destroy(Monitor *m)
 {
     if (m == NULL) {
@@ -126,7 +154,11 @@ void monitor_destroy(Monitor *m)
     free(m);
 }
 
-/* 巡检单轴，仅在跳变时报一次（掉线/恢复、报警、超差、软限位、堵转）。 */
+/**
+ * @brief 巡检单轴，仅在状态发生跳变时报一次（掉线/恢复、报警、超差、软限位、堵转）。
+ * @param m Monitor 实例
+ * @param j 关节号 1~6
+ */
 static void monitor_scan_joint(Monitor *m, int j)
 {
     ErrCode rc;
@@ -227,7 +259,10 @@ static void monitor_scan_joint(Monitor *m, int j)
     }
 }
 
-/* 巡检一轮（6 个关节），返回在线轴数。 */
+/**
+ * @brief 巡检一轮（六轴），写快照 + 报跳变事件。
+ * @return 本轮在线轴数（不包含被屏蔽的轴）
+ */
 int monitor_poll(Monitor *m)
 {
     int j;
@@ -252,34 +287,10 @@ int monitor_poll(Monitor *m)
 }
 
 
-/* 立即查某轴是否堵转（不等下一个巡检周期）。 */
-int monitor_check_stall(Monitor *m, int joint)
-{
-    int cur;
-
-    if (m == NULL || m->robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return 0;
-    }
-    if (m->stall_threshold_ma[joint - 1] <= 0) {
-        return 0;
-    }
-    cur = robot_read_current_ma(m->robot, joint);
-    if (!monitor_stall_hit(cur, m->stall_threshold_ma[joint - 1])) {
-        return 0;
-    }
-    printf("[错误] 关节%d 堵转报警：电流 %d mA 超阈值 %d mA\n",
-              joint, cur, m->stall_threshold_ma[joint - 1]);
-    return 1;
-}
-
-/* 取最近一轮巡检的在线轴数。 */
-int monitor_online_count(const Monitor *m)
-{
-    return (m != NULL) ? m->online_count : 0;
-}
-
-
-/* 监控线程主循环（事件等待 + 挂起让总线）。 */
+/**
+ * @brief 监控线程主循环：周期唤醒，paused=0 时跑 monitor_poll，paused=1 时置 parked 并发事件。
+ * @return 线程退出码（固定 0）
+ */
 static DWORD WINAPI monitor_thread_main(LPVOID arg)
 {
     Monitor *m = (Monitor *)arg;
@@ -307,7 +318,10 @@ static DWORD WINAPI monitor_thread_main(LPVOID arg)
     return 0;
 }
 
-/* 置/清挂起标志，并唤醒线程让它立刻看到这个变化。 */
+/**
+ * @brief 置/清挂起标志，并 SetEvent(wake_ev) 唤醒线程让它立刻看到变化。
+ * @note  不等待实际停住，需要确认时用 monitor_park。
+ */
 void monitor_pause(Monitor *m, int on)
 {
     if (m == NULL) return;
@@ -317,13 +331,19 @@ void monitor_pause(Monitor *m, int on)
     }
 }
 
-/* 对全局活动监控对象置/清挂起标志。 */
+/**
+ * @brief 对全局当前活动 Monitor 实例置/清挂起标志（典型场景：CLI 开运动前临时让总线）。
+ */
 void monitor_pause_active(int on)
 {
     monitor_pause(g_active_monitor, on);
 }
 
-/* 等后台巡检真正停住，返回 1=已停 / 0=超时。 */
+/**
+ * @brief 等后台巡检真正停住（需先已 pause）。
+ * @param timeout_ms 等待上限；<=0 时使用 MONITOR_PARK_TIMEOUT_MS
+ * @return 1=已停住 / 0=超时（可能卡在读总线）
+ */
 int monitor_park_wait(int timeout_ms)
 {
     Monitor *m = g_active_monitor;
@@ -351,14 +371,19 @@ int monitor_park_wait(int timeout_ms)
     }
 }
 
-/* 挂起监控 + 等后台真停住。 */
+/**
+ * @brief 挂起后台巡检 + 等它真正停住（一次性接口，默认超时 MONITOR_PARK_TIMEOUT_MS）。
+ */
 void monitor_park(void)
 {
     monitor_pause_active(1);
     monitor_park_wait(0);
 }
 
-/* 返回已完成巡检的轮数。 */
+/**
+ * @brief 返回已完成巡检的轮数（可用于判断监控是否停摆）。
+ * @return 轮数；无活动实例时 -1
+ */
 long monitor_poll_count(void)
 {
     Monitor *m = g_active_monitor;
@@ -369,7 +394,11 @@ long monitor_poll_count(void)
     return (long)InterlockedCompareExchange(&m->poll_count, 0, 0);
 }
 
-/* 起监控线程。 */
+/**
+ * @brief 启动巡检线程（先复位 paused/parked/running）。
+ * @param interval_ms 巡检周期；<=0 时使用 MONITOR_DEFAULT_INTERVAL_MS
+ * @return 1=启动成功 / 0=实例无效或已在跑或 CreateThread 失败
+ */
 int monitor_start(Monitor *m, int interval_ms)
 {
     if (m == NULL || m->robot == NULL) {
@@ -391,7 +420,10 @@ int monitor_start(Monitor *m, int interval_ms)
     return 1;
 }
 
-/* 停监控线程并等它退出。先 SetEvent(wake_ev) 唤醒它，不必干等 2 秒超时。 */
+/**
+ * @brief 停监控线程并 join。
+ * @note  先置 running=0 再 SetEvent(wake_ev) 把循环从 Sleep 里拉出来，避免干等 2 秒超时。
+ */
 void monitor_stop(Monitor *m)
 {
     if (m == NULL) {
@@ -408,13 +440,13 @@ void monitor_stop(Monitor *m)
     }
 }
 
-/* 监控线程是否在跑。 */
-int monitor_is_running(const Monitor *m)
-{
-    return (m != NULL && m->thread != NULL) ? 1 : 0;
-}
-
-/* 取某轴的快照（在线 / 状态字 / 电流 / 报警码），加锁读。 */
+/**
+ * @brief 取某轴上一轮巡检的快照（不占用总线）。
+ * @param m     Monitor 实例
+ * @param joint 关节号 1~6
+ * @param out   写入目标
+ * @return ERR_NONE / ERR_ARG
+ */
 ErrCode monitor_snapshot(Monitor *m, int joint, MonitorSnapshot *out)
 {
     int idx;

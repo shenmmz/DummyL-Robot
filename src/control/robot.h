@@ -29,14 +29,8 @@ int robot_readback_anomaly(const double deg[6], const int ok[6],
                            double big_margin_deg,
                            int *bad_joint, double *bad_excess);
 
-/* 某轴是否在线（读一次状态字探测）。 */
-int robot_is_online(Robot *robot, int joint);
-
 /* 读状态字 0x0006。 */
 ErrCode robot_read_status(Robot *robot, int joint, uint32_t *status);
-
-/* 读 32 位状态字（0x0006 起 2 个寄存器）。 */
-ErrCode robot_read_status32(Robot *robot, int joint, uint32_t *status);
 
 /* 读位置（脉冲）。ok 出参：0 = 读失败，返回值无意义。 */
 int32_t robot_read_position_steps(Robot *robot, int joint, int *ok);
@@ -59,12 +53,7 @@ void robot_apply_subdivision(Robot *robot);
 /* 某轴细分是否已对齐。 */
 int robot_subdivision_ok(const Robot *robot, int joint);
 
-/* 屏蔽某轴（后续读写直接跳过，不占总线）。 */
-ErrCode robot_mask(Robot *robot, int joint);
-/* 解除屏蔽。 */
-ErrCode robot_unmask(Robot *robot, int joint);
-
-/* 某轴是否被屏蔽。 */
+/* 某轴是否被屏蔽（屏蔽表启动时由 ini 与 JOINT_MASK_DEFAULT 初始）。 */
 int robot_is_masked(const Robot *robot, int joint);
 
 #endif

@@ -217,29 +217,7 @@ void robot_close(Robot *robot)
     free(robot);
 }
 
-/* 屏蔽某轴：后续所有读写都跳过它（用于某轴故障但还要用其余轴）。 */
-ErrCode robot_mask(Robot *robot, int joint)
-{
-    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return ERR_ARG;
-    }
-    robot->masked[joint - 1] = 1;
-    printf("关节%d 已屏蔽\n", joint);
-    return ERR_NONE;
-}
-
-/* 解除某轴的屏蔽。 */
-ErrCode robot_unmask(Robot *robot, int joint)
-{
-    if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
-        return ERR_ARG;
-    }
-    robot->masked[joint - 1] = 0;
-    printf("关节%d 已恢复\n", joint);
-    return ERR_NONE;
-}
-
-/* 某轴是否被屏蔽。 */
+/* 某轴是否被屏蔽（屏蔽表启动时由 ini 与 JOINT_MASK_DEFAULT 初始）。 */
 int robot_is_masked(const Robot *robot, int joint)
 {
     if (robot == NULL || joint < 1 || joint > ROBOT_JOINT_COUNT) {
@@ -396,20 +374,6 @@ ErrCode robot_read_status(Robot *robot, int joint, uint32_t *status)
         robot->online[joint - 1] = 1;
     }
     return rc;
-}
-
-/* 读 32 位状态字。 */
-ErrCode robot_read_status32(Robot *robot, int joint, uint32_t *status)
-{
-    return robot_read_status(robot, joint, status);
-}
-
-/* 状态读成功即在位。 */
-int robot_is_online(Robot *robot, int joint)
-{
-    uint32_t st;
-    ErrCode rc = robot_read_status(robot, joint, &st);
-    return (rc == ERR_NONE) ? 1 : 0;
 }
 
 /* 读位置（步），ok 出参表示是否成功。 */

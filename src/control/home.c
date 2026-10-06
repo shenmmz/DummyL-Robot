@@ -20,13 +20,11 @@ typedef struct {
     int    torque_level;
 } StallHome;
 
-/* 0x009E 恒力矩模式（手冊第 49 条）。高 8 位 = 模式，低 8 位 = 力矩等级 0~255。 */
-#define TORQUE_MODE_HOME  1        /* 碰撞回原点（唯一在用：堵转回零 / robot_torque_probe） */
-#define TORQUE_MODE_GRAB  2        /* 抓取物体（未使用） */
-#define TORQUE_MODE_HOLD_RUN 3     /* 恒力矩运行（未使用） */
-#define TORQUE_MODE_HOLD_KEEP 4    /* 恒力矩保持（未使用） */
-/* 堵转清零后「位置是否算回到 0」的容差，单位=电机侧脉冲；上电首次回零必然超差（清的是原点偏移，不清计数器）*/
-#define HOME_ZERO_TOL_STEPS    500
+/* 0x009E 恒力矩模式（手册第 49 条）。高 8 位=模式，低 8 位=力矩等级 0~255。 */
+#define TORQUE_MODE_HOME     1      /* 碰撞回原点：堵转回零用 */
+
+/* 堵转清零后判定"回到 0"的容差（电机侧脉冲）。清的是原点偏移，不清计数器，残余常有。 */
+#define HOME_ZERO_TOL_STEPS  500
  static StallHome stall[7] = {
      [1] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200, .dir = +1, .stall_current = 480, .torque_level = 120 },
      [2] = { .speed_rpm = 100,  .accel_ms = 150, .decel_ms = 200,  .dir = -1, .stall_current = 500, .torque_level = 120 },
@@ -329,79 +327,6 @@ static void home_stall_forward(Robot *robot, int joint)
         printf("[警告] 关节%d 退让 %.1f° 报警/异常\n", joint, fdeg);
     }
 }
-
-/* 力矩碰撞回零诊断：给定力矩等级跑一次，每 200ms 打一行。 */
-ErrCode robot_torque_probe(Robot *robot, int joint, int level)
-{
-    uint32_t st;
-    int cur, cur_ok, pos_ok;
-    int32_t pos;
-    uint32_t start_ms, now_ms;
-    int seen_homed = 0, seen_stop = 0;
-    StallHome *p = &stall[joint];
-
-    if (robot == NULL) return ERR_ARG;
-    if (joint < 1 || joint > 6) return ERR_ARG;
-    if (level < 0 || level > 255) return ERR_ARG;
-
-    printf("=== 力矩碰撞回原点诊断：关节%d 等级=%d 方向=%+d ===\n", joint, level, p->dir);
-
-    if (home_arm(robot, joint) != ERR_NONE) {
-        printf("[警告] 关节%d arm 失败\n", joint);
-        return ERR_PORT;
-    }
-    motor_set_pos_err_prewarn(robot, joint, STALL_PREWARN_STEPS);
-    motor_disable_pos_err_alarm(robot, joint);
-    if (motor_set_torque_mode(robot, joint, TORQUE_MODE_HOME, level) != ERR_NONE) {
-        printf("[警告] 关节%d 设力矩模式失败\n", joint);
-        home_restore(robot, joint);
-        return ERR_PORT;
-    }
-    Sleep(20);
-    if (motor_torque_run(robot, joint, p->dir, 0, 1) != ERR_NONE) {
-        printf("[警告] 关节%d 启动力矩碰撞失败\n", joint);
-        motor_set_torque_mode(robot, joint, 0, 0);
-        home_restore(robot, joint);
-        return ERR_PORT;
-    }
-
-    start_ms = GetTickCount();
-    printf("T+ms 状态字 电流mA 位置 备注\n");
-    while ((now_ms = GetTickCount()) - start_ms < 15000) {
-        uint32_t elaps = now_ms - start_ms;
-        cur = motor_read_current(robot, joint);
-        cur_ok = (cur >= 0 && cur <= 3000);
-        pos_ok = (motor_read_pos_status(robot, joint, &pos, &st) == ERR_NONE);
-        if (!pos_ok) {
-            printf("%ums ? ? ? [读失败]\n", elaps);
-            Sleep(200); continue;
-        }
-        {
-            const char *tag = "";
-            if (st & LEESN_STAT_ALARM)        tag = " [报警]";
-            else if (st & LEESN_STAT_OVERRUN) tag = " [超差]";
-            else if (st & LEESN_STAT_HOMED)  { tag = " [HOMED]"; seen_homed = 1; }
-            else if ((st & LEESN_STAT_RUN_MASK) != LEESN_STAT_RUN_ACTIVE) { tag = " [退出RUN]"; seen_stop = 1; }
-            printf("%ums 0x%08X %dmA %d%s%s\n", elaps, (unsigned)st,
-                     cur_ok ? cur : -1, (int)pos, tag,
-                     (st & LEESN_STAT_RUN_ACTIVE) ? " RUN" : "");
-            if (seen_homed || seen_stop) {
-                printf("关节%d 检测到到位信号（%s），停止力矩并退出诊断\n",
-                         joint, seen_homed ? "bit15 HOMED" : "退出 RUN_ACTIVE");
-                break;
-            }
-        }
-        Sleep(200);
-    }
-
-    motor_torque_run(robot, joint, 0, 0, 0);
-    motor_set_torque_mode(robot, joint, 0, 0);
-    home_restore(robot, joint);
-    printf("=== 力矩碰撞诊断结束：关节%d 等级=%d（HOMED=%d 退出RUN=%d）===\n",
-             joint, level, seen_homed, seen_stop);
-    return ERR_NONE;
-}
-
 
 typedef struct {
     SensorPhase ph;
@@ -858,71 +783,4 @@ ErrCode robot_home_single(Robot *robot, int joint)
     home_restore(robot, joint);
     printf("关节%d 单轴回零完成（目标 %.1f°）\n", joint, home_forward_deg(joint));
     return ERR_NONE;
-}
-
-/* ⚠️ 死代码：`src/` 内没有任何调用者（已在 memory 记录，未获放行前不改）。
- * 另有一处真 bug：速度取 `stall[joint].speed_rpm`，关节 6 时为 0 ⇒ 会干等 20s。
- * 正确写法见同文件 home_forward_rpm()。 */
-ErrCode robot_home_joint(Robot *robot, int joint, double angle_deg, double speed_rpm)
-{
-    int saved[6];
-    int j;
-    ErrCode rc = ERR_NONE;
-
-    if (robot == NULL) return ERR_ARG;
-    if (joint < 1 || joint > 6) return ERR_ARG;
-    if (robot_is_masked(robot, joint)) return ERR_MASKED;
-
-    printf("单轴回零：关节%d 回零后自动运动到 %.1f° ...\n", joint, angle_deg);
-
-    for (j = 1; j <= 6; j++) {
-        saved[j - 1] = robot_is_masked(robot, j);
-        if (j != joint) {
-            robot_mask(robot, j);
-        }
-    }
-
-    rc = robot_home(robot);
-
-    if (rc == ERR_NONE) {
-        double spd = (speed_rpm > 0.0) ? speed_rpm : (double)stall[joint].speed_rpm;
-
-        rc = robot_movej(robot, joint, angle_deg, spd);
-        if (rc != ERR_NONE) {
-            printf("[错误] 关节%d 自动运动到 %.1f° 失败：%s\n",
-                      joint, angle_deg, err_str(rc));
-        } else {
-            printf("关节%d 自动运动到 %.1f° ...\n", joint, angle_deg);
-            {
-                const uint16_t reductions[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
-                double mech[6] = {0}, motor[6] = {0};
-                int32_t target;
-                mech[joint - 1] = angle_deg;
-                zero_mech_to_motor(mech, motor);
-                target = DEG2STEPS(motor[joint - 1], reductions[joint - 1]);
-                int wr = home_wait_inpos(robot, joint, target, home_timeout_ms);
-                if (wr == 1) {
-                    printf("关节%d 到位（%.1f°）\n", joint, angle_deg);
-                } else if (wr == 0) {
-                    printf("[警告] 关节%d 运动到 %.1f° 超时\n", joint, angle_deg);
-                    rc = ERR_TIMEOUT;
-                } else {
-                    printf("[警告] 关节%d 运动到 %.1f° 报警/异常\n", joint, angle_deg);
-                    rc = ERR_ALARM;
-                }
-            }
-        }
-    }
-
-    for (j = 1; j <= 6; j++) {
-        if (saved[j - 1]) {
-            robot_mask(robot, j);
-        } else {
-            robot_unmask(robot, j);
-        }
-    }
-
-    printf("关节%d 回零并运动到 %.1f°：%s\n",
-             joint, angle_deg, rc == ERR_NONE ? "完成" : err_str(rc));
-    return rc;
 }

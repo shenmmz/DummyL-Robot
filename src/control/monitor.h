@@ -31,9 +31,6 @@ int monitor_start(Monitor *m, int interval_ms);
 /* 停巡检线程（join）。 */
 void monitor_stop(Monitor *m);
 
-/* 线程是否在跑。 */
-int monitor_is_running(const Monitor *m);
-
 /* 挂起/恢复指定实例（只置标志，不等待）。 */
 void monitor_pause(Monitor *m, int on);
 /* 对全局当前实例挂起/恢复。 */
@@ -49,12 +46,6 @@ long monitor_poll_count(void);
 
 /* 跑一轮巡检（六轴各读位置+电流，有报警再查），返回本轮在线轴数。 */
 int monitor_poll(Monitor *m);
-
-/* 查某轴是否堵转（含启动掩码期与报警排除）。 */
-int monitor_check_stall(Monitor *m, int joint);
-
-/* 上一轮在线的轴数。 */
-int monitor_online_count(const Monitor *m);
 
 typedef struct MonitorSnapshot {
     int      online;
