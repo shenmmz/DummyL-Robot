@@ -1,14 +1,3 @@
----
-AIGC:
-    Label: "1"
-    ContentProducer: 001191440300708461136T1XGW3
-    ProduceID: 7fd4f4eb60674eb6db7e422f0766d751_f27cb0c19c3811f19467525400287e28
-    ReservedCode1: OcSOClTzdyPqhxI07H5Dvxci8RPt0VHAX/NqveMucO2dWcviT8qHN+LtIvFWTgT2Qb1DG47/m2kqzFsInOAXhkBhS33vkTEJQ/lqYZtwwsr7AjxGRSRJgjkltHK00h3ED/fyxyEFMRTXpSMF3/rpl6atgs15stPa4S6EjsJXbFpkxmNiMFWtYmN6Loo=
-    ContentPropagator: 001191440300708461136T1XGW3
-    PropagateID: 7fd4f4eb60674eb6db7e422f0766d751_f27cb0c19c3811f19467525400287e28
-    ReservedCode2: OcSOClTzdyPqhxI07H5Dvxci8RPt0VHAX/NqveMucO2dWcviT8qHN+LtIvFWTgT2Qb1DG47/m2kqzFsInOAXhkBhS33vkTEJQ/lqYZtwwsr7AjxGRSRJgjkltHK00h3ED/fyxyEFMRTXpSMF3/rpl6atgs15stPa4S6EjsJXbFpkxmNiMFWtYmN6Loo=
----
-
 # DummyL-Robot
 
 PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
@@ -54,8 +43,8 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
           │ 调用                           │ 调用
           ▼                               ▼
    ┌── kinematics ──┐  ┌── trajectory ──┐  ┌── api (motor_reg) ──┐
-   │ dh / fk / ik   │  │  line.c 直线插补│  │ 寄存器读写封装       │
-   │   / zero       │  │ (moveL 逐点 IK) │  │ (motor_write/read…) │
+   │ dh / fk / ik   │  │ line.c 直线插补 │  │ 寄存器读写封装       │
+   │   / zero       │  │ arc.c 圆弧插补  │  │ (motor_write/read…) │
    └────────────────┘  └────────────────┘  └──────────┬──────────┘
                                                       ▼
    ┌────────────────  comm  ───────────────────────────────┐
@@ -78,7 +67,7 @@ PC 端六轴机械臂控制台（C 语言，脱离单片机部署）
 | 控制层 | `src/control/` | robot.c / home.c / monitor.c | 使能/运动/状态、堵转回零、监控 |
 | 电机 API | `src/api/` | motor_reg.c | 寄存器读写封装（供 control/cli 调用） |
 | 通信层 | `src/comm/` | serial_win.c / modbus_rtu.c / comm_if.h | Win32 串口、Modbus RTU 主站、CRC16 |
-| 算法库 | `src/kinematics/` `src/trajectory/` | dh / fk / ik / zero / line | DH 建模、正解、球腕解耦逆解、零点换算、直线插补 |
+| 算法库 | `src/kinematics/` `src/trajectory/` | dh / fk / ik / zero / line / arc | DH 建模、正解、球腕解耦逆解、零点换算、直线插补、三点圆弧插补 |
 | 工具层 | `src/utils/` | cmd_parser / err / ini_rw / telemetry | 命令解析、错误码、ini 读写、UDP 遥测 |
 | 配置层 | `src/config/` | robot_config.h / robot_config.ini | 编译期参数（宏）+ 运行时参数（ini） |
 
@@ -123,7 +112,8 @@ DummyL-Robot/
 │   │   ├── ik.c/h              # 球腕解耦解析 IK（8 组解）+ 限位筛选/最优解选择
 │   │   └── zero.c/h            # 编码器读数 → 机械角（零点/方向换算）
 │   ├── trajectory/
-│   │   └── line.c/h            # 笛卡尔直线插补（moveL 逐点 IK + 分段时间表）
+│   │   ├── line.c/h            # 笛卡尔直线插补（moveL 逐点 IK + 分段时间表）
+│   │   └── arc.c/h             # 三点式空间圆弧插补（MoveC 定圆 + 等步长采样 + 近共线退化）
 │   ├── control/
 │   │   ├── robot.c/h           # 高层接口：movej / enable / disable / 状态查询
 │   │   ├── home.c/h            # 回零流程：顶限位→电流判堵转→急停→清零→就位
@@ -134,6 +124,7 @@ DummyL-Robot/
 │       ├── err.c/h             # ErrCode 统一错误码 + err_str() 中文提示
 │       ├── ini_rw.c/h          # ini 读取
 │       └── telemetry.c/h       # UDP 位姿遥测（供 3D 镜像）
+├── tasks/                      # .rbt 轨迹脚本存放目录
 ├── external/                   # 电机驱动资料（485 手册 md/pdf、参考照片）
 ├── docs/                       # 本地文档/架构图（不推云端，见 .gitignore）
 └── second/                     # 参考实现（本地保留，不推云端）
@@ -250,6 +241,11 @@ ctest --test-dir build
 | `MoveJ` | `MoveJ:N:ANGLE[:SPD][:r\|a]` | 单关节运动到 ANGLE 度；`r`=相对、`a`=绝对(默认)；省略 SPD=60rpm | `MoveJ:1:45` |
 | `MoveJ` | `MoveJ:a1,a2,a3,a4,a5,a6,SPD,ACC,DEC` | 六轴同步关节空间运动，按行程比例分配转速（同起同停） | `MoveJ:0,0,90,0,90,0,70,80,90` |
 | `MoveL` | `MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC[,smooth]` | 笛卡尔**直线**：**必须写满 9 段（含显式姿态 Rx,Ry,Rz）**，3/6 段简写与 `keep`/`stream`/`sync` 均已移除。默认 **interp**（按偏差预算反推步长、逐航点等到位、每段过读回/超时急停保护，末端贴直线但段间有加减速停顿）；显式 `,smooth` = 终点一次 MoveJ、零段间停顿但末端走弧 | `MoveL:150,0,120,-180,0,-180,70,80,90` |
+| `MoveC` | `MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC` | 三点式空间**圆弧**：起点=当前位姿，toPoint=(X..Rz)，viaPoint=(VX,VY,VZ) 定凸向；恒 interp | `MoveC:100,0,80,-180,0,-180,50,50,90,60,80,90` |
+| `MoveC` | `MoveC:<起点名>,<via名>,<终点名>[,SPD,ACC,DEC]` | 具名三点式（三个点须为 X 笛卡尔点位） | `MoveC:arc_start,arc_mid,arc_end` |
+| `Run` | `run:<文件>` / `run <文件>` | 执行 .rbt 轨迹脚本（自动补 tasks/ 路径与 .rbt 后缀） | `run test` |
+| `TARGET` | `TARGET <名>={J1:v ...}` | 定义命名点位（关节型或笛卡尔型） | `TARGET P1={J1:0 J2:0 J3:90 J4:0 J5:0 J6:0}` |
+| `cd` / `save` | `cd:<文件>` / `save` | 进入/退出 .rbt 示教录制模式；`getpos:j/x` 追加点位 | `cd mypath` |
 
 ### 使能 / 状态 / 标定（均不动臂或只读）
 
@@ -299,7 +295,7 @@ ctest --test-dir build
 ## 7. 开发提示词
 
 > **项目**：DummyL-Robot — PC 端六轴机械臂控制台（C 语言，脱离单片机）
-> **架构**：C11 + CMake；生成器当前用 Visual Studio（MSVC），亦支持 MinGW/Ninja；`comm/` 走 RS485 Modbus RTU 直驱立三（LEESN）闭环步进；`control/robot.c` 提供 movej/home 高层接口；`cli/commands.c` 命令分发；`kinematics/` 纯 C 正逆解（球腕解耦 + 限位筛选/最优解）；`trajectory/line.c` 直线插补
+> **架构**：C11 + CMake；生成器当前用 Visual Studio（MSVC），亦支持 MinGW/Ninja；`comm/` 走 RS485 Modbus RTU 直驱立三（LEESN）闭环步进；`control/robot.c` 提供 movej/home 高层接口；`cli/commands.c` 命令分发；`kinematics/` 纯 C 正逆解（球腕解耦 + 限位筛选/最优解）；`trajectory/` 直线插补 (line.c) + 三点圆弧插补 (arc.c)；`.rbt` 轨迹脚本 + 示教录制
 > **协议**：立三（LEESN）寄存器（使能 0x00D4 写0使能/写1释放、实时位置 0x0004/5、速度 0x00D8/9（0.01rpm）、绝对位置 0x00E8/9、状态 0x0006/7、电流 0x001A、报警 0x00A3/清 0x00A4、回零清零 0x00D2/3、加减速 0x0098/99）；Modbus RTU 03H/06H/10H；CRC16 0xA001；**921600 8N1**；**脉冲 = 角度° × 减速比 ÷ 360 × 10000**
 > **硬件**：6× 立三闭环步进（1~3 号 42 机座，减速比 50:1/100:1/50:1；4/5 号 35 机座 IP35ET，50:1；6 号 28 机座 IP28ET，50:1），每转 10000 脉冲（0x0024），USB 转 485；1~6 号全部在线
 > **约束**：① 本地 commit 后按用户指示推送 origin（Gitee）；② 架构/接口改动先讨论再动手；③ 串口打印精简中文；④ 单位：角度用度、长度用毫米；⑤ 优先可移植到单片机的纯 C，不引重量级依赖；⑥ 运动学/轨迹/通信逻辑保持离线可单测；⑦ 新模块先调研开源方案确认再写；⑧ `docs/`、`second/` 仅本地保留、不推云端
@@ -307,15 +303,22 @@ ctest --test-dir build
 
 ## 8. 路线图
 
-- [x] 串口层（serial_win.c）联调：打开 COM 口、收发帧
-- [x] Modbus RTU 主站：读状态/写使能/写位置，单关节验证
-- [x] 六轴高层接口：movej / home / enable / getpos
-- [x] 运动学库：DH / FK / IK + 零点换算 + 离线单测
-- [x] 轨迹规划：直线插补（line.c）+ 驱动器内部加减速
-- [x] 笛卡尔空间运动（MoveL）：interp 逐点插补 + smooth 流畅，偏差预算控航点密度
-- [x] 高速进巡航护栏：段耗时 < 加速窗时按直线度红线拉长步长、减航点
-- [x] UDP 遥测镜像 3D
-- [ ] 段间卡顿根治（受固件「段末减速到 0」限制，软件已探明并缓解，待厂商/进一步验证）
-- [ ] 3D 可视化完善（可选）
+### 已完成
 
-*（内容由 AI 生成，仅供参考；寄存器与算法细节以代码和 485 手册为准。）*
+- [x] 串口层（serial_win.c）联调：打开 COM 口、精确读/写帧、避开 15.6ms 节拍坑
+- [x] Modbus RTU 主站：03H/06H/10H 帧构造、CRC16、逐事务耗时统计
+- [x] 六轴高层接口：movej / home / enable / disable / getpos
+- [x] 回零双机制：堵转法(轴1-5) + 传感器法(轴6) + 退让就位 0-0-90
+- [x] 运动学库：DH 建模 / FK 正解 / 球腕解耦解析 IK（8 组解 + 限位筛选 + 连续选解）/ 零点换算
+- [x] 轨迹规划：直线插补（line.c）+ 三点圆弧插补（arc.c）+ 驱动器内部加减速
+- [x] 笛卡尔空间运动（MoveL）：interp 逐点插补 + smooth 流畅，偏差预算控航点密度
+- [x] 空间圆弧运动（MoveC）：三点定圆、半径自适应加密、偏差遥测量到真实弧线
+- [x] .rbt 轨迹脚本：命名点位(TARGET) + 示教录制(cd/save/getpos:j/x) + run 执行器
+- [x] 安全闸门体系：NaN/Inf + 软限位 + 单步位移 + 步数量级 + 关节跳变 五重检查
+- [x] 堵转检测与碰撞保护：实时电流轮询 + ini [stall] 各轴阈值 + 急停
+- [x] 高速进巡航护栏：段耗时 < 加速窗时按直线度红线拉长步长、减航点
+- [x] UDP 遥测镜像 3D（telemetry.c + second/sim/live_mirror.py）
+- [x] 驱动器探针工具集：curtest/tabtest/trigtest/queuetest/chain/busrate/pipe/diag 等 15+ 诊断命令
+- [x] CLI 分级帮助 + 命令解析体系（冒号分隔、大小写不敏、命名点位自动分流）
+- [x] second/ 对照框架：Hg_Robot_Arm 运动学移植 + A/B 测试
+*仅供参考；寄存器与算法细节以代码和 485 手册为准。）*
