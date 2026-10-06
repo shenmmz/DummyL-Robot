@@ -15,6 +15,7 @@
 #include "kinematics/fk.h"
 #include "kinematics/ik.h"
 #include "trajectory/line.h"
+#include "trajectory/arc.h"
 #include "config/robot_config.h"
 
 #include <stdio.h>
@@ -165,6 +166,53 @@ static double movl_point_dev_mm(const double x[3], const double a[3], const doub
         d2 += e * e;
     }
     return sqrt(d2);
+}
+
+/* 三点定圆：过 P0/Pv/P2 的圆心 C、半径 R、单位法向 n（与 arc.c 同一几何，
+ * 结果一致）。三点重合/近共线（圆退化）时返回 -1。仅用于 MoveC 偏差遥测，
+ * 让"实测最大偏差"量到真实圆弧而非其弦，避免把设计内弓高（可达十几 mm）误当误差。 */
+static int arc_circle_3pt(const double P0[3], const double Pv[3], const double P2[3],
+                          double C[3], double *out_R, double n[3])
+{
+    double a[3], b[3], cross[3], r0[3];
+    double an, bn, cn, aa, ab, bb, D, u, v, R;
+    int i;
+    for (i = 0; i < 3; i++) { a[i] = Pv[i] - P0[i]; b[i] = P2[i] - P0[i]; }
+    an = sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
+    bn = sqrt(b[0]*b[0]+b[1]*b[1]+b[2]*b[2]);
+    if (an < 1e-9 || bn < 1e-9) return -1;
+    cross[0] = a[1]*b[2]-a[2]*b[1];
+    cross[1] = a[2]*b[0]-a[0]*b[2];
+    cross[2] = a[0]*b[1]-a[1]*b[0];
+    cn = sqrt(cross[0]*cross[0]+cross[1]*cross[1]+cross[2]*cross[2]);
+    if (cn / (an * bn) < 1e-4) return -1;   /* 近共线 ⇒ 圆退化 */
+    aa = a[0]*a[0]+a[1]*a[1]+a[2]*a[2];
+    ab = a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+    bb = b[0]*b[0]+b[1]*b[1]+b[2]*b[2];
+    D  = aa * bb - ab * ab;
+    u  = ((aa * 0.5) * bb - (bb * 0.5) * ab) / D;
+    v  = (aa * (bb * 0.5) - ab * (aa * 0.5)) / D;
+    for (i = 0; i < 3; i++) C[i] = P0[i] + u * a[i] + v * b[i];
+    for (i = 0; i < 3; i++) r0[i] = P0[i] - C[i];
+    R = sqrt(r0[0]*r0[0]+r0[1]*r0[1]+r0[2]*r0[2]);
+    if (R < 1e-9) return -1;
+    for (i = 0; i < 3; i++) n[i] = cross[i] / cn;
+    *out_R = R;
+    return 0;
+}
+
+/* 点 x 到空间圆（圆心 C、半径 R、单位法向 n）曲线的最短距离（mm）：
+ * 去掉法向分量后取面内半径差，再合成法向外溢量。贴弧走时≈真实跟踪误差。 */
+static double arc_point_dev_mm(const double x[3], const double C[3],
+                               double R, const double n[3])
+{
+    double w[3], rin2 = 0.0, h, q[3], dr;
+    int i;
+    for (i = 0; i < 3; i++) w[i] = x[i] - C[i];
+    h = w[0]*n[0] + w[1]*n[1] + w[2]*n[2];
+    for (i = 0; i < 3; i++) { q[i] = w[i] - h * n[i]; rin2 += q[i] * q[i]; }
+    dr = sqrt(rin2) - R;
+    return sqrt(dr * dr + h * h);
 }
 
 
@@ -594,6 +642,310 @@ void cmd_pose_unlock(Robot *robot)
 }
 
 
+/* 解析并打开脚本文件：依次尝试 原样 → tasks/<p> →（p 无扩展名时）<p>与 tasks/<p> 各补 .rbt/.task/.txt。
+ * 命中即返回 FILE*，并把实际使用的路径写进 used_out。这样 `run:test` 会自动打开 `tasks/test.rbt`。 */
+static FILE *open_task_file(const char *p, char *used_out, size_t used_sz)
+{
+    static const char *const exts[] = { ".rbt", ".task", ".txt" };
+    char cand[512];
+    const char *base = p;
+    const char *slash;
+    FILE *fp;
+    size_t k;
+    int has_ext = 0;
+
+    for (slash = p; *slash; slash++) {
+        if (*slash == '/' || *slash == '\\') {
+            base = slash + 1;
+        }
+    }
+    if (strchr(base, '.')) {
+        has_ext = 1;
+    }
+
+    fp = fopen(p, "r");
+    if (fp != NULL) {
+        snprintf(used_out, used_sz, "%s", p);
+        return fp;
+    }
+    snprintf(cand, sizeof(cand), "tasks/%s", p);
+    fp = fopen(cand, "r");
+    if (fp != NULL) {
+        snprintf(used_out, used_sz, "%s", cand);
+        return fp;
+    }
+    if (!has_ext) {
+        for (k = 0; k < sizeof(exts) / sizeof(exts[0]); k++) {
+            snprintf(cand, sizeof(cand), "%s%s", p, exts[k]);
+            fp = fopen(cand, "r");
+            if (fp != NULL) {
+                snprintf(used_out, used_sz, "%s", cand);
+                return fp;
+            }
+            snprintf(cand, sizeof(cand), "tasks/%s%s", p, exts[k]);
+            fp = fopen(cand, "r");
+            if (fp != NULL) {
+                snprintf(used_out, used_sz, "%s", cand);
+                return fp;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* `run:<脚本>`：轨迹脚本执行器。逐行读文件 → 回显 → cmd_parse → cmd_dispatch。
+ * 空行静默跳过；注释行（# 或 ; 开头）原样回显不执行；遇 exit 结束脚本（不退出程序）；
+ * 递归深度上限防“脚本来回 run 自己”死循环。运动失败仍逐行跑完（本版不做遇错中断）。
+ * 路径：支持绝对/相对；裸名（如 `run:test`）自动到 tasks/ 找并补 .rbt/.task/.txt。 */
+void cmd_run(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
+{
+    static int depth = 0;
+    FILE *fp;
+    char used[512];
+    char line[256];
+    int lineno = 0;
+    int executed = 0;
+
+    if (depth >= 4) {
+        printf("[错误] run 嵌套过深（>4 层），疑似脚本相互引用，已中止\n");
+        return;
+    }
+
+    fp = open_task_file(cmd->run_path, used, sizeof(used));
+    if (fp == NULL) {
+        printf("[错误] 打不开脚本文件: %s\n", cmd->run_path);
+        printf("       也试过了 tasks/ 下的 <名>.rbt/.task/.txt。请确认文件在 tasks/ 或给出正确路径。\n");
+        return;
+    }
+
+    depth++;
+    printf("==== run: %s ====\n", used);
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        ParsedCmd sub;
+        char *p;
+        lineno++;
+        if (cmd_parse(line, &sub) == CMD_EMPTY) {
+            p = line;
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+            if (*p == '#' || *p == ';') {
+                printf("  [%3d] %s", lineno, line);   /* line 自带换行 */
+            }
+            continue;
+        }
+        if (sub.type == CMD_EXIT) {
+            printf("  [%3d] exit ⇒ 脚本结束（程序继续）\n", lineno);
+            break;
+        }
+        printf("  [%3d] >> %s\n", lineno, sub.raw);
+        executed++;
+        cmd_dispatch(robot, mon, &sub);
+    }
+    fclose(fp);
+    depth--;
+    printf("==== run 结束：%s（执行 %d 条）====\n", used, executed);
+}
+
+/* ---- 命名点位表（.rbt 脚本用：P:名:J/X:... 定义，movej/movel:名: 引用）---- */
+#define PT_MAX_POINTS 128
+#define PT_NAME_LEN   32
+typedef struct {
+    char   name[PT_NAME_LEN];
+    int    kind;              /* 0=关节(J,度) 1=笛卡尔(X,mm/度) */
+    double v[6];
+} PointDef;
+static PointDef g_points[PT_MAX_POINTS];
+static int      g_npoints;
+
+/* 重名则覆盖，否则追加；表满返回 -1。 */
+static int pt_define(const char *name, int kind, const double v[6])
+{
+    int i;
+    for (i = 0; i < g_npoints; i++) {
+        if (strcmp(g_points[i].name, name) == 0) {
+            g_points[i].kind = kind;
+            memcpy(g_points[i].v, v, 6 * sizeof(double));
+            return 0;
+        }
+    }
+    if (g_npoints >= PT_MAX_POINTS) return -1;
+    snprintf(g_points[g_npoints].name, PT_NAME_LEN, "%s", name);
+    g_points[g_npoints].kind = kind;
+    memcpy(g_points[g_npoints].v, v, 6 * sizeof(double));
+    g_npoints++;
+    return 0;
+}
+
+static const PointDef *pt_find(const char *name)
+{
+    int i;
+    for (i = 0; i < g_npoints; i++)
+        if (strcmp(g_points[i].name, name) == 0) return &g_points[i];
+    return NULL;
+}
+
+/* ---- .rbt 示教录制（cd 进入，getpos:j/x 把当前位姿追加点位写回文件）---- */
+static int  g_rbt_on;
+static char g_rbt_path[256];
+static int  g_rbt_next = 1;
+
+static int rbt_file_exists(const char *p)
+{
+    FILE *f = fopen(p, "r");
+    if (f) { fclose(f); return 1; }
+    return 0;
+}
+
+/* 解析录制目标路径（沿用 run 的查找顺序），命中已有返回 1，否则以新建路径返回 0。 */
+static int rbt_resolve_path(const char *in, char *out, size_t osz)
+{
+    static const char *const exts[] = { ".rbt", ".task", ".txt" };
+    char cand[512];
+    const char *base = in, *slash;
+    int has_ext = 0;
+    size_t k;
+
+    for (slash = in; *slash; slash++)
+        if (*slash == '/' || *slash == '\\') base = slash + 1;
+    if (strchr(base, '.')) has_ext = 1;
+
+    if (rbt_file_exists(in)) { snprintf(out, osz, "%s", in); return 1; }
+    snprintf(cand, sizeof(cand), "tasks/%s", in);
+    if (rbt_file_exists(cand)) { snprintf(out, osz, "%s", cand); return 1; }
+    if (!has_ext) {
+        for (k = 0; k < sizeof(exts) / sizeof(exts[0]); k++) {
+            snprintf(cand, sizeof(cand), "%s%s", in, exts[k]);
+            if (rbt_file_exists(cand)) { snprintf(out, osz, "%s", cand); return 1; }
+            snprintf(cand, sizeof(cand), "tasks/%s%s", in, exts[k]);
+            if (rbt_file_exists(cand)) { snprintf(out, osz, "%s", cand); return 1; }
+        }
+        snprintf(out, osz, "tasks/%s.rbt", in);   /* 默认新建到 tasks/ */
+        return 0;
+    }
+    snprintf(out, osz, "%s", in);                  /* 带后缀但不存在：原样新建 */
+    return 0;
+}
+
+/* 扫描文件里 P:P<n>: 形式的最大 n，返回 n+1（无则 1）。 */
+static int rbt_scan_next(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int maxn = 0;
+    if (!f) return 1;
+    while (fgets(line, sizeof(line), f)) {
+        ParsedCmd c;
+        if (cmd_parse(line, &c) == CMD_DEFPOINT) {
+            const char *n = c.def_name;
+            if (n[0] == 'P' && n[1] >= '0' && n[1] <= '9') {
+                int v = atoi(n + 1);
+                if (v > maxn) maxn = v;
+            }
+        }
+    }
+    fclose(f);
+    return maxn + 1;
+}
+
+/* 扫描录制文件里是否已有同名点位（def_name == name）。 */
+static int rbt_name_exists(const char *path, const char *name)
+{
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int found = 0;
+    if (!f) return 0;
+    while (fgets(line, sizeof(line), f)) {
+        ParsedCmd c;
+        if (cmd_parse(line, &c) == CMD_DEFPOINT && strcmp(c.def_name, name) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static void cmd_cd(const ParsedCmd *cmd)
+{
+    const char *p = cmd->run_path;
+    char full[256];
+    int existed;
+    if (p[0] == '\0') {                       /* 裸 cd = 退出 */
+        if (g_rbt_on) printf("[cd] 已退出录制：%s\n", g_rbt_path);
+        else printf("[cd] 当前不在录制模式\n");
+        g_rbt_on = 0;
+        return;
+    }
+    existed = rbt_resolve_path(p, full, sizeof(full));
+    snprintf(g_rbt_path, sizeof(g_rbt_path), "%s", full);
+    g_rbt_next = rbt_scan_next(full);
+    g_rbt_on = 1;
+    printf("[cd] 进入录制：%s%s（下一个点位号 P%d）\n",
+           full, existed ? "" : "（新建）", g_rbt_next);
+    printf("     getpos:j [名字] 记关节点 / getpos:x [名字] 记笛卡尔点；不写名字则自动 P<n>；save 退出。\n");
+}
+
+static void cmd_save(void)
+{
+    if (!g_rbt_on) { printf("[save] 当前不在录制模式\n"); return; }
+    printf("[save] 已退出录制：%s（最后编到 P%d）\n", g_rbt_path, g_rbt_next - 1);
+    g_rbt_on = 0;
+}
+
+/* getpos:j / getpos:x —— 读当前位姿，追加一行点位到录制文件。
+ * name 非空 → 用该名字（已存在则报冲突拒绝）；为空 → 自动取未被占用的 P<n>。 */
+static void rbt_teach(Robot *robot, int kind, const char *name)
+{
+    static const double RAD2DEG = 180.0 / 3.14159265358979323846;
+    double q[6], pose[4][4], xyz[3], rpy[3];
+    int ok[6], all_ok = 1, i, is_auto;
+    char nm[32];
+    FILE *f;
+
+    if (!g_rbt_on) {
+        printf("[提示] 未进入 .rbt 录制；先 cd <文件> 再 getpos:%s。\n",
+               kind == 1 ? "j" : "x");
+        return;
+    }
+
+    /* 先定名（不读硬件就能判冲突） */
+    is_auto = (name == NULL || name[0] == '\0');
+    if (!is_auto) {
+        if (rbt_name_exists(g_rbt_path, name)) {
+            printf("[冲突] 点位名已存在：%s（不能重复）\n", name);
+            return;
+        }
+        snprintf(nm, sizeof(nm), "%s", name);
+    } else {
+        for (;;) {
+            snprintf(nm, sizeof(nm), "P%d", g_rbt_next);
+            if (!rbt_name_exists(g_rbt_path, nm)) break;
+            g_rbt_next++;                 /* P<n> 已被占，递增避开 */
+        }
+    }
+
+    for (i = 0; i < 6; i++) {
+        q[i] = robot_read_position_deg(robot, i + 1, &ok[i]);
+        if (!ok[i]) all_ok = 0;
+    }
+    if (!all_ok) { printf("[错误] 有关节读取失败（可能是失联假数），取消记录。\n"); return; }
+
+    dh_forward(DH_TABLE, q, pose);
+    dh_pose_to_xyz_rpy(pose, xyz, rpy);
+
+    f = fopen(g_rbt_path, "a");
+    if (!f) { printf("[错误] 打开录制文件失败：%s\n", g_rbt_path); return; }
+    if (kind == 1)
+        fprintf(f, "TARGET %s={J1:%.3f J2:%.3f J3:%.3f J4:%.3f J5:%.3f J6:%.3f}\n",
+                nm, q[0], q[1], q[2], q[3], q[4], q[5]);
+    else
+        fprintf(f, "TARGET %s={x:%.3f y:%.3f z:%.3f a:%.3f b:%.3f c:%.3f}\n",
+                nm, xyz[0], xyz[1], xyz[2],
+                rpy[0] * RAD2DEG, rpy[1] * RAD2DEG, rpy[2] * RAD2DEG);
+    fclose(f);
+    printf("[记录] 已写入 %s  →  %s (%s)\n", g_rbt_path, nm, kind == 1 ? "J" : "X");
+    if (is_auto) g_rbt_next++;            /* 仅自动编号时推进计数器 */
+}
+
 /* 命令总入口：先过位姿闸门，再按 cmd->type 分发到各 cmd_* 实现；返回 1 = 请求退出。 */
 int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
 {
@@ -604,6 +956,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     if (g_pose_invalid &&
         (cmd->type == CMD_MOVEJ ||
          cmd->type == CMD_MOVEL ||
+         cmd->type == CMD_MOVEC ||
          (cmd->type == CMD_CURTEST && cmd->joint != 0) ||
          cmd->type == CMD_TABTEST ||
          cmd->type == CMD_QUEUETEST ||
@@ -630,6 +983,27 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     }
     case CMD_MOVEJ: {
         monitor_park();
+        if (cmd->use_point) {
+            /* MoveJ:<关节点位名> —— 展开为 6 关节同步。 */
+            const PointDef *p = pt_find(cmd->point_name);
+            ParsedCmd eff;
+            int i;
+            if (p == NULL) {
+                printf("[错误] 未定义点位：%s（先用 P:%s:J:... 定义）\n",
+                       cmd->point_name, cmd->point_name);
+            } else if (p->kind != 0) {
+                printf("[错误] MoveJ 需关节(J)点位，但 %s 是笛卡尔(X)点位。\n", cmd->point_name);
+            } else {
+                eff = *cmd;
+                eff.use_point  = 0;
+                eff.num_joints = 6;
+                for (i = 0; i < 6; i++) { eff.joints[i] = i + 1; eff.angles[i] = p->v[i]; }
+                if (eff.speeds[0] <= 0.0) eff.speeds[0] = 60.0;
+                movej_multi(robot, &eff);
+            }
+            monitor_pause_active(0);
+            break;
+        }
         if (cmd->num_joints > 1) {
             movej_multi(robot, cmd);
         } else {
@@ -669,10 +1043,87 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
     }
     case CMD_MOVEL: {
         monitor_park();
-        cmd_movel(robot, cmd);
+        if (cmd->use_point) {
+            /* MoveL:<笛卡尔点位名> —— 以该位姿为目标走逐点直线插补。 */
+            const PointDef *p = pt_find(cmd->point_name);
+            ParsedCmd eff;
+            int i;
+            if (p == NULL) {
+                printf("[错误] 未定义点位：%s（先用 P:%s:X:... 定义）\n",
+                       cmd->point_name, cmd->point_name);
+            } else if (p->kind != 1) {
+                printf("[错误] MoveL 需笛卡尔(X)点位，但 %s 是关节(J)点位。\n", cmd->point_name);
+            } else {
+                eff = *cmd;
+                eff.use_point = 0;
+                for (i = 0; i < 6; i++) eff.cartesian[i] = p->v[i];
+                eff.movl_mode = MOVL_MODE_INTERP;
+                cmd_movel(robot, &eff);
+            }
+        } else {
+            cmd_movel(robot, cmd);
+        }
         monitor_pause_active(0);
         break;
     }
+    case CMD_MOVEC: {
+        monitor_park();
+        if (cmd->use_point) {
+            /* MoveC:<起点名>,<via名>,<终点名>：先直线移到起点，再以当前位姿作弧起点画弧。 */
+            const PointDef *ps = pt_find(cmd->mc_start);
+            const PointDef *pv = pt_find(cmd->mc_via);
+            const PointDef *pe = pt_find(cmd->mc_to);
+            const PointDef *three[3] = { ps, pv, pe };
+            const char *nm3[3] = { cmd->mc_start, cmd->mc_via, cmd->mc_to };
+            ParsedCmd eff;
+            int i, bad = 0;
+            for (i = 0; i < 3; i++) {
+                if (three[i] == NULL) {
+                    printf("[错误] 未定义点位：%s\n", nm3[i]); bad = 1;
+                } else if (three[i]->kind != 1) {
+                    printf("[错误] MoveC 需笛卡尔(X)点位，但 %s 是关节(J)点位。\n", nm3[i]); bad = 1;
+                }
+            }
+            if (!bad) {
+                eff = *cmd;                       /* 1) 直线到起点 */
+                eff.use_point = 0;
+                for (i = 0; i < 6; i++) eff.cartesian[i] = ps->v[i];
+                eff.movl_mode = MOVL_MODE_INTERP;
+                cmd_movel(robot, &eff);
+                eff = *cmd;                       /* 2) 当前位姿(=起点) → 经 pv → 到 pe */
+                eff.use_point = 0;
+                for (i = 0; i < 6; i++) eff.cartesian[i] = pe->v[i];
+                for (i = 0; i < 3; i++) eff.via[i] = pv->v[i];
+                eff.movl_mode = MOVL_MODE_INTERP;
+                cmd_movec(robot, &eff);
+            }
+        } else {
+            cmd_movec(robot, cmd);
+        }
+        monitor_pause_active(0);
+        break;
+    }
+    case CMD_RUN:
+        cmd_run(robot, mon, cmd);   /* 脚本内每条命令再走一次 cmd_dispatch（各自 park/保护） */
+        break;
+    case CMD_DEFPOINT: {
+        int i;
+        if (pt_define(cmd->def_name, cmd->def_kind, cmd->def_vals) != 0) {
+            printf("[错误] 点位表已满（最多 %d 个）\n", PT_MAX_POINTS);
+        } else {
+            printf("  [点位] %s = %s:", cmd->def_name,
+                   cmd->def_kind == 0 ? "J" : "X");
+            for (i = 0; i < 6; i++) printf("%s%.3f", i ? "," : "", cmd->def_vals[i]);
+            printf("\n");
+        }
+        break;
+    }
+    case CMD_CD:
+        cmd_cd(cmd);            /* cd:<文件> 进入录制；裸 cd 退出 */
+        break;
+    case CMD_SAVE:
+        cmd_save();             /* 退出当前 .rbt 录制 */
+        break;
     case CMD_DISABLE: {
         motor_monitor_stop(g_motor_mon);
         if (cmd->joint >= 1) {
@@ -732,6 +1183,7 @@ int cmd_dispatch(Robot *robot, Monitor *mon, const ParsedCmd *cmd)
         break;
     case CMD_GETPOS:
         cmd_getpos(robot);
+        if (cmd->rec_mode) rbt_teach(robot, cmd->rec_mode, cmd->tp_name);   /* getpos:j/x 录制追加点位（可选名字） */
         break;
     case CMD_FK:
         cmd_fk(cmd);
@@ -1048,12 +1500,14 @@ static void status_clear(void)
  *   ② 【读回异常检测】连续 3 轮有轴读回越软限位 ⇒ 判定为总线/读回异常
  *      （2026-09-19 实测：六轴读回同时变越限值、末端偏差冻结 258.92mm）
  *      ⇒ 不等超时，立即急停并提示先查 USB-RS485 与驱动器供电；
- *   ③ 有 line_a/line_b 时顺便算末端到理想直线的偏差峰值，并发 telemetry。
+ *   ③ 有 line_a/line_b 时顺便算末端到理想直线的偏差峰值；MoveC 传 arc_c/arc_n/arc_r
+ *      （非空）时改为量到真实圆弧的距离，两者都发 telemetry。
  * 超时则逐轴急停并打印"还差多少度/多少步"。
  * 返回：1=全部到位；0=超时/异常急停中止（interp 据此跳过剩余航点）。 */
 static int movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
                       uint8_t pend[7], int remain,
-                      const double *line_a, const double *line_b)
+                      const double *line_a, const double *line_b,
+                      const double *arc_c, const double *arc_n, double arc_r)
 {
     const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
     uint32_t start_ms = GetTickCount();
@@ -1064,6 +1518,7 @@ static int movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
     int32_t pos[7] = {0};
     int      ok[7] = {0};
     int      anom_n = 0;
+    int      has_ref = (arc_c != NULL) || (line_a != NULL && line_b != NULL);
 
     (void)joints;
     while (remain > 0) {
@@ -1137,11 +1592,12 @@ static int movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
             }
         }
 
-        if (line_a != NULL && line_b != NULL) {
+        if (has_ref) {
             double m[4][4], xyz[3];
             dh_forward(DH_TABLE, mech, m);
             for (j = 0; j < 3; j++) xyz[j] = m[j][3];
-            dev = movl_point_dev_mm(xyz, line_a, line_b);
+            dev = (arc_c != NULL) ? arc_point_dev_mm(xyz, arc_c, arc_r, arc_n)
+                                  : movl_point_dev_mm(xyz, line_a, line_b);
             if (!g_dev_seen || dev > g_dev_peak) g_dev_peak = dev;
             g_dev_seen = 1;
         }
@@ -1154,7 +1610,7 @@ static int movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
         }
         if ((GetTickCount() - last_print) >= MOVEJ_STATUS_MS || remain == 0) {
             last_print = GetTickCount();
-            if (line_a != NULL && line_b != NULL)
+            if (has_ref)
                 status_line("J1=%6.2f J2=%6.2f J3=%6.2f J4=%6.2f J5=%6.2f J6=%6.2f  偏差%6.2f mm",
                             mech[0], mech[1], mech[2], mech[3], mech[4], mech[5], dev);
             else
@@ -1178,7 +1634,7 @@ static void movej_joints(Robot *robot, int num_joints, const int joints[6],
     int remain = movej_issue(robot, num_joints, joints, angles, NULL,
                              speed, accel_ms, decel_ms, 1, tgt, pend);
     if (remain <= 0) return;
-    movej_wait(robot, joints, tgt, pend, remain, line_a, line_b);
+    movej_wait(robot, joints, tgt, pend, remain, line_a, line_b, NULL, NULL, 0.0);
 }
 
 /* 取 ini [movel] acc_floor_ms，缺键兜底 MOVL_ACC_FLOOR_MS(60ms)。
@@ -1215,7 +1671,11 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
                  cmd->speeds[0], acc, dec, NULL, NULL);
 }
 
-/* 直线规划：笛卡尔插补 → 逐点 IK → 时间表；再做两道安全闸。
+/* 笛卡尔路径规划（直线或三点圆弧）：几何插补 → 逐点 IK → 时间表；再做两道安全闸。
+ * via==NULL 走直线(line_plan)；via!=NULL 走三点圆弧(arc_plan_3pt)，dist_mm 仍传
+ *   起终点弦长（供"是否已在目标"判断与退化直线用），实际航点数由弧长内部决定。
+ * out_path_len_mm 出参回带路径长度（直线=弦长，圆弧=弧长），可 NULL。
+ * out_fell_back_line 出参：圆弧三点近共线退化成直线时置 1（否则 0），可 NULL。
  * 返回 0 成功 / -1 插补失败 / -2 IK 失败或越软限位 / -3 时间表失败 /
  *      -4 单段跳变超上限（整条 MoveL 不下发）。
  * ★ 跳变闸：> max_jump_deg(30°) 直接拒绝；> MOVL_JUMP_WARN_DEG(15°) 只警告。
@@ -1228,13 +1688,28 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
                      double dist_mm, double step_mm, const double vmax[6],
                      double q_seq[LINE_MAX_POINTS][6], double seg_dt[LINE_MAX_SEGS],
                      int *out_count, double *out_total_dt, int *out_fail_idx,
-                     char *fail_reason)
+                     char *fail_reason, const double *via,
+                     double *out_path_len_mm, int *out_fell_back_line)
 {
     LinePath path;
-    int count = line_count_for_distance(dist_mm, step_mm);
+    int count;
     int i;
+    int rc;
 
-    if (line_plan(start_pose, end_pose, count, &path) != 0) return -1;
+    if (out_fell_back_line) *out_fell_back_line = 0;
+    if (via != NULL) {
+        double alen = 0.0;
+        rc = arc_plan_3pt(start_pose, via, end_pose, step_mm, &path, &alen);
+        if (rc == 1 && out_fell_back_line) *out_fell_back_line = 1;
+        if (out_path_len_mm) *out_path_len_mm = alen;
+    } else {
+        count = line_count_for_distance(dist_mm, step_mm);
+        rc = line_plan(start_pose, end_pose, count, &path);
+        if (out_path_len_mm) *out_path_len_mm = dist_mm;
+    }
+    if (rc < 0) return -1;
+    count = path.count;
+
     if (line_solve(&path, DH_TABLE, limits, q_start, q_seq, out_fail_idx, fail_reason) != 0) return -2;
     if (line_time_table(q_seq, count, vmax, seg_dt, out_total_dt) != 0) return -3;
     *out_count = count;
@@ -1559,7 +2034,8 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
     }
 
     rc = movl_plan(start_pose, end_pose, q_start, limits, dist, plan_step, vmax,
-                   q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason);
+                   q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason,
+                   NULL, NULL, NULL);
     if (rc != 0) {
         if (rc != -4) {
             printf("[错误] MoveL 第 %d 个插补点逆解失败/越软限位：%s\n",
@@ -1584,7 +2060,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
                 plan_step = news;
                 rc = movl_plan(start_pose, end_pose, q_start, limits, dist,
                                plan_step, vmax, q_seq, seg_dt, &count, &total_dt,
-                               &fail_idx, fail_reason);
+                               &fail_idx, fail_reason, NULL, NULL, NULL);
                 if (rc != 0) {
                     if (rc != -4)
                         printf("[错误] 巡航重规划第 %d 点逆解失败/越软限位：%s\n",
@@ -1679,7 +2155,7 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
             QueryPerformanceCounter(&qb);
             if (remain > 0) {
                 if (!movej_wait(robot, joints, tgt, pend, remain,
-                                start_pose, end_pose)) {
+                                start_pose, end_pose, NULL, NULL, 0.0)) {
                     printf("  [中止] 第 %d 段超时/读回异常已急停，跳过剩余 %d 段\n",
                            seg, count - 1 - seg);
                     break;
@@ -1698,6 +2174,188 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
         printf("  开销分解：下发共 %.0f ms（%.0f ms/段）+ 等待共 %.0f ms（%.0f ms/段）\n",
                sum_issue, count > 1 ? sum_issue / (count - 1) : 0.0,
                sum_wait, count > 1 ? sum_wait / (count - 1) : 0.0);
+        movl_finish(t0, total_dt);
+        return;
+    }
+}
+
+/* `MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC` 主流程：三点式空间圆弧（对齐 ABB MoveC）。
+ * 起点=当前位姿（FK 得到），toPoint=(X..Rz)（姿态显式，同 movel），viaPoint=(VX,VY,VZ)
+ * 定弧的凸向/半径。恒 interp：沿真实圆弧逐点 IK + 逐航点下发等到位，几何与安全
+ * 判据全走 movl_plan（via 非空即进圆弧分支）——跳变闸/腕部奇异预警/巡航护栏同直线。 */
+void cmd_movec(Robot *robot, const ParsedCmd *cmd)
+{
+    const double RAD2DEG = 180.0 / 3.14159265358979323846;
+    double q_start[6];
+    double start_pose[6];
+    double end_pose[6];
+    double via[3];
+    double q_seq[LINE_MAX_POINTS][6];
+    double seg_dt[LINE_MAX_SEGS];
+    double vmax[6];
+    JointLimit limits[ROBOT_JOINT_COUNT];
+    int joints[6] = {1, 2, 3, 4, 5, 6};
+    int count, fail_idx = -1, j;
+    char fail_reason[64] = {0};
+    double total_dt = 0.0;
+    double arc_len = 0.0;
+    int fell_back = 0;
+    double base_rpm = (cmd->speeds[0] > 0) ? cmd->speeds[0] : 60.0;
+    double speed_rpm = base_rpm;
+    int acc, dec;
+    {
+        int floor_ms = movl_acc_floor_ms();
+        acc = (cmd->accel_ms[0] >= floor_ms) ? cmd->accel_ms[0] : floor_ms;
+        dec = (cmd->decel_ms[0] >= floor_ms) ? cmd->decel_ms[0] : floor_ms;
+        if ((cmd->accel_ms[0] > 0 && cmd->accel_ms[0] < floor_ms) ||
+            (cmd->decel_ms[0] > 0 && cmd->decel_ms[0] < floor_ms))
+            printf("[提示] 加/减速 %d/%d ms 低于安全下限 %d，已抬到 %d/%d ms\n",
+                   cmd->accel_ms[0], cmd->decel_ms[0], floor_ms, acc, dec);
+    }
+    for (j = 0; j < 6; j++) q_start[j] = robot_read_position_deg(robot, j + 1, NULL);
+    {
+        double m[4][4], rpy[3];
+        dh_forward(DH_TABLE, q_start, m);
+        dh_pose_to_xyz_rpy(m, start_pose, rpy);
+        start_pose[3] = rpy[0] * RAD2DEG;
+        start_pose[4] = rpy[1] * RAD2DEG;
+        start_pose[5] = rpy[2] * RAD2DEG;
+    }
+    for (j = 0; j < 6; j++) end_pose[j] = cmd->cartesian[j];
+    for (j = 0; j < 3; j++) via[j] = cmd->via[j];
+
+    double dx = end_pose[0] - start_pose[0];
+    double dy = end_pose[1] - start_pose[1];
+    double dz = end_pose[2] - start_pose[2];
+    double dist = sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (dist < MOVL_EPS_MM &&
+        fabs(ang_delta_deg(end_pose[3], start_pose[3])) < MOVL_EPS_DEG &&
+        fabs(ang_delta_deg(end_pose[4], start_pose[4])) < MOVL_EPS_DEG &&
+        fabs(ang_delta_deg(end_pose[5], start_pose[5])) < MOVL_EPS_DEG) {
+        printf("MoveC: 已在目标位姿（位移 %.2f mm），无需运动\n", dist);
+        return;
+    }
+
+    movl_pose_warn(start_pose, end_pose);
+
+    {
+        const double lmin[6] = ROBOT_JOINT_LIMIT_MIN_DEG;
+        const double lmax[6] = ROBOT_JOINT_LIMIT_MAX_DEG;
+        for (j = 0; j < 6; j++) {
+            limits[j].min_deg = lmin[j];
+            limits[j].max_deg = lmax[j];
+        }
+    }
+    {
+        const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+        for (j = 0; j < 6; j++) vmax[j] = speed_rpm * 6.0 / (double)red[j];
+    }
+
+    int rc = 0;
+
+    /* 三点定圆（与 arc.c 同一几何）：既供“沿真实圆弧量偏差”，也据半径自适应加密航点。
+     * 折线贴圆的棱角误差 ≈ 步长²/(8R)；令它≤直线同一弓高预算(=K·步长²) ⇒ 圆弧步长
+     * 上限 = 步长·sqrt(8·R·K)。R 大（近直线）时不生效，R 小则多切几段使其更圆。
+     * 近共线定不出圆 ⇒ use_arc=0，按直线处理（偏差改量弦）。 */
+    double arcC[3], arcN[3], arcR = 0.0, arc_step_cap = 0.0;
+    int    use_arc = 0;
+    double plan_step = movl_step_from_bow_budget();
+    if (plan_step <= 0.0) plan_step = movl_step_mm();
+    if (arc_circle_3pt(start_pose, via, end_pose, arcC, &arcR, arcN) == 0) {
+        use_arc = 1;
+        arc_step_cap = plan_step * sqrt(8.0 * arcR * MOVL_BOW_K);
+        if (arc_step_cap < MOVL_STEP_MIN_MM) arc_step_cap = MOVL_STEP_MIN_MM;
+        if (arc_step_cap < plan_step) plan_step = arc_step_cap;
+    }
+
+    rc = movl_plan(start_pose, end_pose, q_start, limits, dist, plan_step, vmax,
+                   q_seq, seg_dt, &count, &total_dt, &fail_idx, fail_reason,
+                   via, &arc_len, &fell_back);
+    if (rc != 0) {
+        if (rc != -4)
+            printf("[错误] MoveC 第 %d 个插补点逆解失败/越软限位：%s\n", fail_idx, fail_reason);
+        return;
+    }
+    if (fell_back)
+        printf("[提示] 三点近共线 ⇒ 圆弧退化为直线，已按直线走。\n");
+
+    /* 巡航护栏（同 movel）：段耗时连加速 ramp 都撑不满 ⇒ 在 max_bow_mm 红线内拉长步长。 */
+    if (count > 2) {
+        double acc_s = acc / 1000.0;
+        double mean_seg_dt = total_dt / (count - 1);
+        if (acc_s > 1e-9 && mean_seg_dt < acc_s) {
+            double ceiling = movl_bow_max_ceiling();
+            double want = plan_step * (acc_s / mean_seg_dt);
+            double cap = (ceiling > 0.0 && ceiling < MOVL_STEP_MAX_MM) ? ceiling : MOVL_STEP_MAX_MM;
+            if (arc_step_cap > 0.0 && arc_step_cap < cap) cap = arc_step_cap;   /* 圆弧：巡航拉长不得越过半径约束，否则又切成多边形 */
+            double news = (want > cap) ? cap : want;
+            if (news > plan_step + 1e-6) {
+                plan_step = news;
+                rc = movl_plan(start_pose, end_pose, q_start, limits, dist,
+                               plan_step, vmax, q_seq, seg_dt, &count, &total_dt,
+                               &fail_idx, fail_reason, via, &arc_len, &fell_back);
+                if (rc != 0) {
+                    if (rc != -4)
+                        printf("[错误] MoveC 巡航重规划第 %d 点逆解失败/越软限位：%s\n", fail_idx, fail_reason);
+                    return;
+                }
+                mean_seg_dt = total_dt / (count - 1);
+                printf("[提速巡航] 段耗时曾 < 加速 %dms 进不了巡航 ⇒ 步长按直线度上限拉长到"
+                       " %.1fmm ⇒ %d 航点\n", acc, plan_step, count);
+                if (mean_seg_dt < acc_s)
+                    printf("        已到 max_bow_mm 上限仍未能全段进巡航：想更快请降速或放宽 max_bow_mm\n");
+            }
+        }
+    }
+
+    dev_reset();
+
+    /* interp：沿圆弧逐航点下发。q_seq[0]≈当前位，从 seg=1 起逐点 movej 并等到位。
+     * 偏差量到"真实圆弧"：arcC/arcR/arcN 与 use_arc 已在规划前由三点定圆算好（兼作自适应
+     * 加密依据）；近共线退化成直线时 use_arc=0，movej_wait 自动改量弦。 */
+    {
+        const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
+        uint32_t t0 = GetTickCount();
+        int seg;
+
+        printf("MoveC: 逐点插补(沿圆弧), 弦长 %.1f mm, 弧长 %.1f mm, %d 航点(步长~%.1fmm), 速度 %.1f rpm\n"
+               "        末端贴着圆弧走，每段过读回异常/超时急停保护\n"
+               "        代价：航点间有加减速停顿（下方偏差=相对真实圆弧，非弦）\n",
+               dist, arc_len, count, plan_step, base_rpm);
+
+        for (j = 1; j <= 6; j++) {
+            if (motor_set_profile(robot, j, acc, dec) != ERR_NONE)
+                printf("[警告] 关节%d 加减速设置失败\n", j);
+        }
+
+        for (seg = 1; seg < count; seg++) {
+            double dmax = 0.0, seg_rpm;
+            int32_t tgt[7] = {0};
+            uint8_t pend[7] = {0};
+            int remain;
+            for (j = 0; j < 6; j++) {
+                double d = fabs(q_seq[seg][j] - q_seq[seg - 1][j]) * (double)red[j];
+                if (d > dmax) dmax = d;
+            }
+            seg_rpm = (seg_dt[seg - 1] > 1e-6) ? (dmax / seg_dt[seg - 1] / 6.0) : base_rpm;
+            if (seg_rpm > base_rpm) seg_rpm = base_rpm;
+            if (seg_rpm < 1.0) seg_rpm = 1.0;
+
+            remain = movej_issue(robot, 6, joints, q_seq[seg], q_seq[seg - 1],
+                                 seg_rpm, acc, dec, 2, tgt, pend);
+            if (remain > 0) {
+                if (!movej_wait(robot, joints, tgt, pend, remain,
+                                use_arc ? NULL : start_pose,
+                                use_arc ? NULL : end_pose,
+                                use_arc ? arcC : NULL,
+                                use_arc ? arcN : NULL, arcR)) {
+                    printf("  [中止] 第 %d 段超时/读回异常已急停，跳过剩余 %d 段\n",
+                           seg, count - 1 - seg);
+                    break;
+                }
+            }
+        }
         movl_finish(t0, total_dt);
         return;
     }

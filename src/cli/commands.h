@@ -43,4 +43,10 @@ void cmd_pipe(Robot *robot, const ParsedCmd *cmd);
 /* `movel`：笛卡尔直线。默认 interp（贴直线+逐段保护）；显式加 ,smooth 走流畅（不插补）。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd);
 
+/* `movec`：三点式空间圆弧（对齐 ABB MoveC：起点=当前位姿+viaPoint+toPoint）。沿真实圆弧逐点插补（恒 interp）。 */
+void cmd_movec(Robot *robot, const ParsedCmd *cmd);
+
+/* `run:<文件>`：轨迹脚本执行器——逐行读文件并回显后分发（空行/注释跳过）。需 mon 以供嵌套下发。 */
+void cmd_run(Robot *robot, Monitor *mon, const ParsedCmd *cmd);
+
 #endif

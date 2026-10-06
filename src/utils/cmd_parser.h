@@ -35,6 +35,11 @@
 #define CMD_CHAINTEST 29    /* chain         补链排队试验（0x00CE 流水线） */
 #define CMD_TRIGTEST  30    /* trigtest      表格重复触发试验（0x00DD 指针自增） */
 #define CMD_PROGREAD  31    /* progread      编程区只读转储（反推指令格式） */
+#define CMD_MOVEC     32    /* movec         三点式空间圆弧（对齐 ABB MoveC，画弧/圆） */
+#define CMD_RUN       33    /* run:<脚本>    轨迹脚本执行器：逐行读文件并执行（默认 tasks/<名>.rbt） */
+#define CMD_DEFPOINT  34    /* P:<名>:J/X:<6数>  定义命名点位（关节 J 或笛卡尔 X） */
+#define CMD_CD        35    /* cd:<文件>   进入 .rbt 录制（getpos:j/x 追加点位）；裸 cd 退出 */
+#define CMD_SAVE      36    /* save          退出当前 .rbt 录制
 
 /* movel 模式：两种。
  * interp（默认）= 真正的笛卡尔逐点插补：按 [movel] step_mm 生成多个航点 → 逐点 IK
@@ -65,9 +70,23 @@ typedef struct {
     int      accel_ms[6];
     int      decel_ms[6];
     double   cartesian[6];
+    double   via[3];            /* movec: 圆弧 viaPoint（仅位置 mm） */
     int      movl_mode;
     double   param;
     char     help_topic[16];
+    char     run_path[192];     /* run: 脚本名/路径（从原始行取第一个冒号后整段，允许含冒号/空格；裸名会自动到 tasks/ 找）*/
+
+    /* ---- 命名点位（.rbt 脚本用）---- */
+    int      use_point;         /* movej/movel：1 = 参数是点位名（非数字） */
+    int      rec_mode;          /* getpos：0=只打印 1=录关节点(j) 2=录笛卡尔点(x) */
+    char     tp_name[32];       /* getpos:j/x 后可选点位名；空=自动编号 P<n> */
+    char     point_name[32];    /* 引用点位名 */
+    char     mc_start[32];      /* MoveC 具名：起点 */
+    char     mc_via[32];        /* MoveC 具名：中间点 via（定弧凸向） */
+    char     mc_to[32];         /* MoveC 具名：终点 toPoint */
+    char     def_name[32];      /* CMD_DEFPOINT：定义的点位名 */
+    int      def_kind;          /* CMD_DEFPOINT：0=关节(J) 1=笛卡尔(X) */
+    double   def_vals[6];       /* CMD_DEFPOINT：6 个数值 */
     char     raw[128];
 } ParsedCmd;
 

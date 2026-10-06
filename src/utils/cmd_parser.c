@@ -43,6 +43,169 @@ static int parse_full_number(const char *s, double *out)
     return 1;
 }
 
+/* .rbt 命名点位辅助：
+ * split_first_field：从 s 取第一个字段（截到 ':' / ',' / 行尾），去首尾空格写入 name。
+ *   返回 1 = 该字段非空且不是纯数字（⇒ 当作点位名），同时把 *after 指向字段后的分隔符；
+ *   返回 0 = 空或纯数字（⇒ 不是点位名，走原有内联数字解析）。 */
+static int split_first_field(const char *s, char *name, size_t nsz, const char **after)
+{
+    size_t b = 0, e = 0, i;
+    double tmp;
+
+    if (s == NULL) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    for (i = 0; s[i] != '\0'; i++)
+        if (s[i] == ':' || s[i] == ',') break;
+    e = i;
+    while (e > 0 && (s[e - 1] == ' ' || s[e - 1] == '\t')) e--;  /* 去尾部空格 */
+    if (after) *after = s + i;
+    if (e == 0) return 0;                       /* 空字段 */
+    if ((size_t)(e - b) >= nsz) e = nsz - 1;
+    memcpy(name, s, e);
+    name[e] = '\0';
+    if (parse_full_number(name, &tmp)) return 0; /* 是纯数字 ⇒ 不是点位名 */
+    return 1;
+}
+
+/* 从 p 起按 delim 解析恰好 want 个数字到 v[]；全为数字且无多余则返回 1，否则 0。 */
+static int parse_exact_nums(char *p, const char *delim, double *v, int want)
+{
+    char *ctx = NULL;
+    char *tok = strtok_r(p, delim, &ctx);
+    int n = 0;
+    while (tok != NULL) {
+        if (n >= want) return 0;                 /* 多余 */
+        if (!parse_full_number(tok, &v[n])) return 0;
+        n++;
+        tok = strtok_r(NULL, delim, &ctx);
+    }
+    return (n == want) ? 1 : 0;
+}
+
+/* 从 after（点位名后的分隔符位置）取可选的 SPD,ACC,DEC（':' 或 ',' 分隔，≤ 3 个）。
+ * 缺省或不足则对应输出置 0（下游按默认值处理）。返回 0 = 解析失败。 */
+static int parse_opt_sad(char *after, double *spd, double *acc, double *dec)
+{
+    char *ctx = NULL;
+    char *tok;
+    int n = 0;
+    double v[3] = { 0.0, 0.0, 0.0 };
+    if (after == NULL) { *spd = *acc = *dec = 0.0; return 1; }
+    while (*after == ':' || *after == ',' || *after == ' ' || *after == '\t') after++;
+    if (*after == '\0') { *spd = *acc = *dec = 0.0; return 1; }
+    tok = strtok_r(after, ":,", &ctx);
+    while (tok != NULL) {
+        if (n >= 3) return 0;
+        if (!parse_full_number(tok, &v[n])) return 0;
+        n++;
+        tok = strtok_r(NULL, ":,", &ctx);
+    }
+    *spd = v[0]; *acc = v[1]; *dec = v[2];
+    return 1;
+}
+
+/* 就地去掉首尾空白，返回指向首个非空白字符的指针（NULL 安全）。 */
+static char *strim(char *s)
+{
+    char *e;
+    if (s == NULL) return NULL;
+    while (*s == ' ' || *s == '\t') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *e = '\0';
+    return s;
+}
+
+/* 从原始行取“命令词之后的参数区”：跳过命令词，遇到第一个 ':' 或空格
+ * 就当分隔符，返回其后（去前导空格）的整段。用于 run/cd 这类路径参数，
+ * 同时支持 `run:test` 与 `run test`，且保留 Windows 盘符里的冒号与路径中的空格。 */
+static const char *arg_after_first_delim(const char *raw)
+{
+    const char *d = raw;
+    while (*d != '\0' && *d != ':' && *d != ' ' && *d != '\t') d++;
+    if (*d == '\0') return "";      /* 无参数 */
+    d++;
+    while (*d == ' ' || *d == '\t') d++;
+    return d;
+}
+
+/* 示教器风格命名点位：
+ *   TARGET <名>={J1:v J2:v J3:v J4:v J5:v J6:v}   （关节，kind=0）
+ *   TARGET <名>={x:v y:v z:v a:v b:v c:v}   （笛卡尔，kind=1）
+ * 命中且合法返回 1（已填 def_name/def_kind/def_vals）；是 TARGET 行但不合格返回 -1（已打印错误）；
+ * 首词不是 target 返回 0（交回常规解析）。 */
+static int try_parse_target(const char *s, ParsedCmd *out)
+{
+    const char *ws, *ns, *lb, *rb, *ne;
+    char  first[8];
+    size_t fi, ni;
+    char  body[224];
+    char *ctx, *tk;
+    double vals[6];
+    int  nv = 0, kind = -1, i;
+
+    ws = s;
+    while (*ws != '\0' && *ws != ' ' && *ws != '\t' && *ws != '=') ws++;
+    fi = (size_t)(ws - s);
+    if (fi == 0 || fi >= sizeof(first)) return 0;
+    memcpy(first, s, fi);
+    first[fi] = '\0';
+    if (ci_strcmp(first, "target") != 0) return 0;
+
+    ns = ws;
+    while (*ns == ' ' || *ns == '\t') ns++;
+    lb = strchr(ns, '{');
+    rb = (lb != NULL) ? strrchr(lb, '}') : NULL;
+    if (lb == NULL || rb == NULL || rb <= lb) {
+        printf("[警告] 用法: TARGET <名>={J1:v J2:v J3:v J4:v J5:v J6:v}  或  {x:v y:v z:v a:v b:v c:v}\n");
+        return -1;
+    }
+    /* 名字 = [ns, lb) 去尾部空格与一个 '=' */
+    ne = lb;
+    while (ne > ns && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
+    if (ne > ns && ne[-1] == '=') {
+        ne--;
+        while (ne > ns && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
+    }
+    ni = (size_t)(ne - ns);
+    if (ni == 0 || ni >= sizeof(out->def_name)) {
+        printf("[警告] TARGET 点位名不合法（1..31 字符）\n");
+        return -1;
+    }
+    memcpy(out->def_name, ns, ni);
+    out->def_name[ni] = '\0';
+
+    {
+        size_t bl = (size_t)(rb - (lb + 1));
+        if (bl >= sizeof(body)) { printf("[警告] TARGET 内容过长\n"); return -1; }
+        memcpy(body, lb + 1, bl);
+        body[bl] = '\0';
+    }
+
+    for (tk = strtok_r(body, " \t", &ctx); tk != NULL; tk = strtok_r(NULL, " \t", &ctx)) {
+        char *colon = strchr(tk, ':');
+        char *rest, *endp;
+        double v;
+        if (colon == NULL) { printf("[警告] TARGET 内每一项须为 键:值 ：%s\n", tk); return -1; }
+        *colon = '\0';
+        if (nv == 0) {                       /* 首项据键名定类型 */
+            if (tk[0] == 'J' || tk[0] == 'j')      kind = 0;
+            else if (tk[0] == 'x' || tk[0] == 'X') kind = 1;
+            else { printf("[警告] TARGET 首键须为 J1(关节) 或 x(笛卡尔)：%s\n", tk); return -1; }
+        }
+        rest = colon + 1;
+        v = strtod(rest, &endp);
+        if (endp == rest || *endp != '\0') { printf("[警告] TARGET 值非数字：%s\n", rest); return -1; }
+        if (nv >= 6) { printf("[警告] TARGET 需要恰好 6 个值\n"); return -1; }
+        vals[nv++] = v;
+    }
+    if (nv != 6) { printf("[警告] TARGET 需要恰好 6 个值（当前 %d）\n", nv); return -1; }
+
+    for (i = 0; i < 6; i++) out->def_vals[i] = vals[i];
+    out->def_kind = kind;
+    return 1;
+}
+
 /* 把一行文本解析成 ParsedCmd。 */
 int cmd_parse(const char *line, ParsedCmd *out)
 {
@@ -90,11 +253,40 @@ int cmd_parse(const char *line, ParsedCmd *out)
     memset(out, 0, sizeof(*out));
     snprintf(out->raw, sizeof(out->raw), "%s", buf);
 
+    if (buf[0] == '#' || buf[0] == ';') {   /* 脚本注释行：静默跳过（方便 run:<文件> 与管道复用）*/
+        out->type = CMD_EMPTY;
+        out->raw[0] = '\0';
+        return CMD_EMPTY;
+    }
+
+    {   /* TARGET <名>={...} 命名点位（早于 ':' 分词，因内容里自带冒号） */
+        int tgt = try_parse_target(buf, out);
+        if (tgt != 0) {
+            if (tgt < 0) { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            out->type = CMD_DEFPOINT;
+            return CMD_DEFPOINT;
+        }
+    }
+
     tok = strtok_r(buf, ":", &save);
     if (tok == NULL) {
         { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
     }
     snprintf(cmd, sizeof(cmd), "%s", tok);
+
+    /* 兼容空格分隔：命令词与参数之间用空格（如 `cd test.rbt`、`getpos movej`）。
+     * 若第一个 ':' 分出的词里含空格，就把首个空格前当命令、其后整段设为参数区（覆盖 save），
+     * 使各分支的 strtok_r(NULL, ":", &save) 能取到它。含 ':' 的传统写法不受影响。 */
+    {
+        char *sp = strchr(cmd, ' ');
+        if (sp != NULL) {
+            size_t off = (size_t)(sp - cmd);
+            char  *argp = tok + off + 1;
+            *sp = '\0';
+            while (*argp == ' ' || *argp == '\t') argp++;
+            save = argp;
+        }
+    }
 
     if (strcmp(cmd, "home") == 0) {
         char *j = strtok_r(NULL, ":", &save);
@@ -111,6 +303,29 @@ int cmd_parse(const char *line, ParsedCmd *out)
         }
     } else if (ci_strcmp(cmd, "MoveJ") == 0) {
         char *rest = save;
+        /* 引用命名关节点位：MoveJ:<点位名>[:SPD,ACC,DEC]。首字段非纯数字即视为点位名。 */
+        {
+            char nm[32];
+            const char *after = NULL;
+            if (split_first_field(rest, nm, sizeof nm, &after)) {
+                double spd = 0.0, acc = 0.0, dec = 0.0;
+                if (strlen(nm) >= sizeof(out->point_name)) {
+                    printf("[警告] MoveJ 点位名过长（≤31 字符）：%s\n", nm);
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                if (!parse_opt_sad((char *)after, &spd, &acc, &dec)) {
+                    printf("[警告] MoveJ:点位名 后只可跟 SPD,ACC,DEC 三个数字\n");
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                out->use_point = 1;
+                snprintf(out->point_name, sizeof(out->point_name), "%s", nm);
+                out->speeds[0]   = spd;
+                out->accel_ms[0] = (int)acc;
+                out->decel_ms[0] = (int)dec;
+                out->type = CMD_MOVEJ;
+                return CMD_MOVEJ;
+            }
+        }
         if (rest != NULL && strchr(rest, ',') != NULL) {
             char *token_ctx = NULL;
             char *toks[16];
@@ -232,6 +447,30 @@ int cmd_parse(const char *line, ParsedCmd *out)
         }
     } else if (ci_strcmp(cmd, "MoveL") == 0) {
         char *rest = save;
+        /* 引用命名笛卡尔点位：MoveL:<点位名>[:SPD,ACC,DEC[,smooth|interp]]。 */
+        {
+            char nm[32];
+            const char *after = NULL;
+            if (split_first_field(rest, nm, sizeof nm, &after)) {
+                double spd = 0.0, acc = 0.0, dec = 0.0;
+                if (strlen(nm) >= sizeof(out->point_name)) {
+                    printf("[警告] MoveL 点位名过长（≤31 字符）：%s\n", nm);
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                if (!parse_opt_sad((char *)after, &spd, &acc, &dec)) {
+                    printf("[警告] MoveL:点位名 后只可跟 SPD,ACC,DEC 三个数字\n");
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                out->use_point   = 1;
+                snprintf(out->point_name, sizeof(out->point_name), "%s", nm);
+                out->movl_mode   = MOVL_MODE_INTERP;
+                out->speeds[0]   = spd;
+                out->accel_ms[0] = (int)acc;
+                out->decel_ms[0] = (int)dec;
+                out->type = CMD_MOVEL;
+                return CMD_MOVEL;
+            }
+        }
         char *ctx = NULL;
         char *tok = strtok_r(rest, ",", &ctx);
         double v[9];
@@ -286,6 +525,162 @@ int cmd_parse(const char *line, ParsedCmd *out)
                 { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
             }
         }
+    } else if (ci_strcmp(cmd, "MoveC") == 0) {
+        /* `MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC[,interp]`：三点式空间圆弧（对齐 ABB RAPID MoveC）。
+         * 起点=当前位姿；toPoint=(X,Y,Z,Rx,Ry,Rz)（与 movel 同格式、姿态显式）；
+         * viaPoint=(VX,VY,VZ) 决定弧的凸向与半径（参数顺序：toPoint→viaPoint→速度）。
+         * 圆弧本就靠逐点插补才画得出来，故只支持 interp 模式
+         * （smooth 会退化成一次 MoveJ ⇒ 画不出弧，拒绝）。整圆请连发两段 MoveC。 */
+        char *rest = save;
+        /* 具名三点式：MoveC:<起点名>,<via名>,<终点名>[,SPD,ACC,DEC]。
+         * 首字段非数字即走此支；否则进下面 12 数字路径。 */
+        if (rest != NULL) {
+            char *qq = rest;
+            while (*qq == ' ' || *qq == '\t') qq++;
+            if (*qq != '\0' && !(*qq == '-' || *qq == '+' || (*qq >= '0' && *qq <= '9'))) {
+                char  *ctx2 = NULL;
+                char  *tn[6];
+                int    k, bad = 0;
+                double sad[3] = { 0.0, 0.0, 0.0 };
+                char  *extra;
+                tn[0] = strtok_r(qq, ",", &ctx2);
+                for (k = 1; k < 6; k++) tn[k] = strtok_r(NULL, ",", &ctx2);
+                extra = strtok_r(NULL, ",", &ctx2);
+                if (extra != NULL) {
+                    printf("[警告] MoveC 具名参数过多：MoveC:<起点>,<via>,<终点>[,SPD,ACC,DEC]\n");
+                    bad = 1;
+                }
+                if (!bad && (tn[0] == NULL || tn[1] == NULL || tn[2] == NULL)) {
+                    printf("[警告] 用法: MoveC:<起点名>,<via名>,<终点名>[,SPD,ACC,DEC]\n");
+                    bad = 1;
+                }
+                if (!bad) {
+                    for (k = 0; k < 3; k++) {
+                        tn[k] = strim(tn[k]);
+                        if (tn[k][0] == '\0') {
+                            printf("[警告] MoveC 点位名为空\n"); bad = 1;
+                        } else if (strlen(tn[k]) >= sizeof(out->mc_start)) {
+                            printf("[警告] MoveC 点位名过长：%s\n", tn[k]); bad = 1;
+                        }
+                    }
+                }
+                if (!bad) {
+                    for (k = 3; k < 6; k++) {
+                        char *s;
+                        if (tn[k] == NULL) continue;
+                        s = strim(tn[k]);
+                        if (!parse_full_number(s, &sad[k - 3])) {
+                            if (strcmp(s, "interp") == 0 || strcmp(s, "step") == 0) {
+                                /* 与默认一致，忽略 */
+                            } else {
+                                printf("[警告] MoveC 具名后只可跟 SPD,ACC,DEC 三个数字：%s\n", s);
+                                bad = 1;
+                            }
+                        }
+                    }
+                }
+                if (bad) { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                snprintf(out->mc_start, sizeof(out->mc_start), "%s", tn[0]);
+                snprintf(out->mc_via,   sizeof(out->mc_via),   "%s", tn[1]);
+                snprintf(out->mc_to,    sizeof(out->mc_to),    "%s", tn[2]);
+                out->use_point   = 1;
+                out->movl_mode   = MOVL_MODE_INTERP;
+                out->speeds[0]   = sad[0];
+                out->accel_ms[0] = (int)sad[1];
+                out->decel_ms[0] = (int)sad[2];
+                out->type = CMD_MOVEC;
+                return CMD_MOVEC;
+            }
+        }
+        char *ctx = NULL;
+        char *tok = strtok_r(rest, ",", &ctx);
+        double v[12];
+        int n = 0, i;
+        while (tok != NULL && n < 12) {
+            if (!parse_full_number(tok, &v[n])) {
+                break;
+            }
+            n++;
+            tok = strtok_r(NULL, ",", &ctx);
+        }
+        if (n != 12) {
+            printf("[警告] 用法: MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC\n"
+                   "       必须写满 12 段（toPoint 6 + viaPoint 3 + SPD/ACC/DEC 3）。\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        if (v[9] <= 0.0) {
+            printf("[警告] MoveC 速度须大于 0 rpm（收到 %.2f）\n", v[9]);
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        if (v[10] <= 0.0 || v[11] <= 0.0) {
+            printf("[警告] MoveC 加减速时间须大于 0 ms\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        out->type = CMD_MOVEC;
+        out->movl_mode = MOVL_MODE_INTERP;   /* 圆弧恒为逐点插补 */
+        for (i = 0; i < 6; i++) out->cartesian[i] = v[i];      /* toPoint */
+        for (i = 0; i < 3; i++) out->via[i] = v[6 + i];        /* viaPoint */
+        out->speeds[0]   = v[9];
+        out->accel_ms[0] = (int)v[10];
+        out->decel_ms[0] = (int)v[11];
+
+        if (tok != NULL) {
+            if (strcmp(tok, "interp") == 0 || strcmp(tok, "step") == 0) {
+                /* 与默认一致，忽略 */
+            } else if (strcmp(tok, "smooth") == 0 || strcmp(tok, "stream") == 0 ||
+                       strcmp(tok, "sync") == 0) {
+                printf("[警告] MoveC 只支持逐点插补（画弧本身就要分段），无 smooth/stream/sync。\n");
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            } else {
+                printf("[警告] MoveC 参数过多，用法: MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC\n");
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            tok = strtok_r(NULL, ",", &ctx);
+            if (tok != NULL) {
+                printf("[警告] MoveC 参数过多，用法: MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC\n");
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+        }
+    } else if (ci_strcmp(cmd, "Run") == 0) {
+        /* run:<文件> 或 run <文件>：轨迹脚本执行器。路径从原始行取，保留盘符冒号/空格。 */
+        const char *p = arg_after_first_delim(out->raw);
+        if (p[0] == '\0') {
+            printf("[警告] 用法: run <脚本名或路径>  或  run:<脚本>   例 run test（自动找 tasks/test.rbt）\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        snprintf(out->run_path, sizeof(out->run_path), "%s", p);
+        out->type = CMD_RUN;
+    } else if (ci_strcmp(cmd, "P") == 0 || ci_strcmp(cmd, "POINT") == 0) {
+        /* `P:<名>:J:a1,a2,a3,a4,a5,a6`（关节） 或 `P:<名>:X:x,y,z,a,b,c`（笛卡尔）。
+         * 6 个数固定用逗号分隔；kind 取 J/X（大小写不敏）。 */
+        char *s2 = NULL;
+        char *name  = strim(strtok_r(save, ":", &s2));
+        char *kindt = strim(strtok_r(NULL, ":", &s2));
+        char *nums  = strim(strtok_r(NULL, ":", &s2));
+        char *extra = strim(strtok_r(NULL, ":", &s2));
+        int   kind;
+        if (name == NULL || kindt == NULL || nums == NULL || extra != NULL ||
+            kindt[0] == '\0' || kindt[1] != '\0') {
+            printf("[警告] 用法: P:<名>:J:a1,a2,a3,a4,a5,a6  或  P:<名>:X:x,y,z,A,B,C\n");
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        if (strlen(name) >= sizeof(out->def_name)) {
+            printf("[警告] 点位名过长（≤31 字符）：%s\n", name);
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        if (kindt[0] == 'J' || kindt[0] == 'j')      kind = 0;
+        else if (kindt[0] == 'X' || kindt[0] == 'x') kind = 1;
+        else {
+            printf("[警告] 点位类型须为 J(关节) 或 X(笛卡尔)：%s\n", kindt);
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        if (!parse_exact_nums(nums, ",", out->def_vals, 6)) {
+            printf("[警告] 点位需恰好 6 个逗号分隔的数字：%s\n", nums);
+            { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+        }
+        snprintf(out->def_name, sizeof(out->def_name), "%s", name);
+        out->def_kind = kind;
+        out->type = CMD_DEFPOINT;
     } else if (strcmp(cmd, "disable") == 0) {
         char *j = strtok_r(NULL, ":", &save);
         out->type = CMD_DISABLE;
@@ -316,7 +711,47 @@ int cmd_parse(const char *line, ParsedCmd *out)
     } else if (strcmp(cmd, "motor") == 0) {
         out->type = CMD_MOTOR;
     } else if (strcmp(cmd, "getpos") == 0) {
+        /* getpos（只打印）/ getpos:j|movej[ 名字]（录关节点）/ getpos:x|movel[ 名字]（录笛卡尔点）。
+         * 名字可选，写在模式之后（空格或冒号分隔）；不写则自动编号 P<n>。 */
+        const char *rest = arg_after_first_delim(out->raw);
+        char mode[16];
+        size_t mi = 0;
         out->type = CMD_GETPOS;
+        out->rec_mode = 0;
+        if (rest[0] != '\0') {
+            while (rest[0] != '\0' && rest[0] != ' ' && rest[0] != '\t' &&
+                   rest[0] != ':' && mi + 1 < sizeof(mode)) {
+                mode[mi++] = *rest++;
+            }
+            mode[mi] = '\0';
+            while (*rest == ' ' || *rest == '\t' || *rest == ':') rest++;
+            if (ci_strcmp(mode, "j") == 0 || ci_strcmp(mode, "movej") == 0 ||
+                ci_strcmp(mode, "joint") == 0) {
+                out->rec_mode = 1;
+            } else if (ci_strcmp(mode, "x") == 0 || ci_strcmp(mode, "movel") == 0 ||
+                       ci_strcmp(mode, "cart") == 0) {
+                out->rec_mode = 2;
+            } else {
+                printf("[警告] 用法: getpos | getpos:j[ 名字] | getpos:x[ 名字]\n");
+                { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+            }
+            if (*rest != '\0') {                  /* 名字 = 模式之后整段（去首尾空白）*/
+                char *np = strim((char *)rest);
+                if (strlen(np) >= sizeof(out->tp_name)) {
+                    printf("[警告] 点位名过长（≤31 字符）：%s\n", np);
+                    { out->type = CMD_UNKNOWN; return CMD_UNKNOWN; }
+                }
+                snprintf(out->tp_name, sizeof(out->tp_name), "%s", np);
+            }
+        }
+    } else if (strcmp(cmd, "cd") == 0) {
+        /* 进入 .rbt 录制：cd:<文件> 或 cd <文件>；裸 cd = 退出。
+         * 路径从原始行取，保留 Windows 盘符的冒号与路径中的空格。 */
+        out->type = CMD_CD;
+        snprintf(out->run_path, sizeof(out->run_path), "%s",
+                 arg_after_first_delim(out->raw));
+    } else if (strcmp(cmd, "save") == 0) {
+        out->type = CMD_SAVE;
     } else if (strcmp(cmd, "fk") == 0) {
         char *arg = strtok_r(NULL, ":", &save);
         if (arg == NULL) {
@@ -900,6 +1335,11 @@ static const char HELP_BRIEF[] =
     "  MoveJ:N:ANGLE[:SPD][:r|a]   单关节运动（r=相对 a=绝对）\n"
     "  MoveJ:a1,...,a6,SPD,ACC,DEC 多关节同步（6角+3参数）\n"
     "  MoveL:X,Y,Z,Rx,Ry,Rz,...    直线（9段必填姿态，默认 interp）\n"
+    "  MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC 三点式圆弧（toPoint+viaPoint+速度）\n"
+    "  MoveC:<起点名>,<via名>,<终点名>[,SPD,ACC,DEC]  具名三点圆弧（需三个 X 点）\n"
+    "  Run:<脚本>                    执行 tasks/<名>.rbt 轨迹脚本（# ; 注释；空行忽略）\n"
+    "  TARGET <名>={J1..J6 | x,y,z,a,b,c}  定义命名点位；MoveJ:<名>/MoveL:<名> 引用\n"
+    "  cd:<文件>  /  save        进入/退出 .rbt 录制；getpos:j / getpos:x 追加当前位姿为点位\n"
     "\n"
     "[使能 / 状态]\n"
     "  enable[:N]                  使能（全轴 / 关节N）\n"
@@ -954,7 +1394,30 @@ static const char HELP_MOTION[] =
     "                             预算 = [movel] min_bow_mm~max_bow_mm 的【弓高中点】(折中)；想减航点/减停顿就把两值整体抬高\n"
     "                          ④ 模式 smooth（须显式加 ,smooth）：终点一次 IK + 一次 MoveJ ⇒ 零段间停顿；\n"
     "                             但末端走弧（弓高 = 整段）且全程不查过流\n"
-    "                          ⑤ stream / sync 已移除，写了会被拒绝\n";
+    "                          ⑤ stream / sync 已移除，写了会被拒绝\n"
+    "  MoveC:X,Y,Z,Rx,Ry,Rz,VX,VY,VZ,SPD,ACC,DEC   三点式空间圆弧（对齐 ABB MoveC）\n"
+    "                          起点=当前位姿；toPoint=(X,Y,Z,Rx,Ry,Rz)（同 MoveL，姿态显式）；\n"
+    "                          viaPoint=(VX,VY,VZ) 决定弧的凸向与半径（参数顺序：toPoint→viaPoint→速度）\n"
+    "                          ⇒ 过三点定圆、沿真实圆弧逐点 IK+逐段下发（同 interp 直线那套保护/护栏）\n"
+    "                          恒为 interp（圆弧本就靠分段才画得出）；无 smooth/stream/sync，写了会被拒绝\n"
+    "                          三点近共线时自动退化为直线（会提示）；步长/弓高预算沿用 [movel] 配置\n"
+    "                          画整圆：连发两段 MoveC（各翻半圈，第一段的 toPoint 作中间接缝点）\n"
+    "\n"
+    "【命名点位（.rbt 轨迹脚本）】\n"
+    "  TARGET <名>={J1:v J2:v J3:v J4:v J5:v J6:v}   定义关节点位（6 个机械角/度）\n"
+    "  TARGET <名>={x:v y:v z:v a:v b:v c:v}    定义笛卡尔点位（mm + 姿态角）\n"
+    "  MoveJ:<名>[:SPD,ACC,DEC]     运动到关节点位（只能引 J 点；SPD 缺省 60rpm）\n"
+    "  MoveL:<名>[:SPD,ACC,DEC]     直线到笛卡尔点位（只能引 X 点；起点=当前位姿）\n"
+    "                          点位只在当前进程/脚本内有效（重名则覆盖）；配合 Run:<名> 跑整段\n"
+    "\n"
+    "【.rbt 示教录制（把当前位姿写进文件）】\n"
+    "  cd:<文件>              进入录制（如 cd:test → tasks/test.rbt；不存在则新建）\n"
+    "  getpos:j [名字]      读当前六轴机械角，追加 TARGET <名字>={J1:.. J6:..}（不写名字自动 P<n>）\n"
+    "  getpos:x [名字]      读当前末端位姿，追加 TARGET <名字>={x:.. y:.. z:.. a:.. b:.. c:..}\n"
+    "                          名字不能与已有点位重名（重名报冲突）；自动编号也会避开已用 P<n>\n"
+    "  save                   退出录制（裸 cd 也可退出）\n"
+    "                          点位号从文件已有 P<数字> 的最大值+1 继续；引用用 MoveJ:P1 / MoveL:P2\n"
+    "                          分隔符 ':' 与空格都可：`cd test` / `getpos movej` / `run test`\n";
 
 static const char HELP_ENABLE[] =
     "【enable 使能/泄力】\n"

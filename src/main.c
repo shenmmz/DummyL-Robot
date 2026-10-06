@@ -79,6 +79,7 @@ int main(int argc, char **argv)
     int running = 1;
 
 #ifdef _WIN32
+    SetConsoleCP(65001);         /* 输入按 UTF-8 读：否则手敲的中文点位名会以 GBK 字节落入 .rbt 成乱码 */
     SetConsoleOutputCP(65001);
     timeBeginPeriod(1);
 #endif

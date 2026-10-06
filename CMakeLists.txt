@@ -41,6 +41,13 @@ else()
     set(WARN_FLAGS -Wall -Wextra)
 endif()
 
+# 数学库：MinGW/Unix 需显式链 m；MSVC 的 libm 已在 CRT 里，链 m.lib 会 LNK1104。
+if(MSVC)
+    set(MATH_LIB "")
+else()
+    set(MATH_LIB m)
+endif()
+
 # ---------- 静态库: comm ----------
 # Windows 串口封装 + Modbus RTU（含 CRC16）
 add_library(comm STATIC
@@ -58,13 +65,14 @@ add_library(kinematics STATIC
 )
 
 # ---------- 静态库: trajectory ----------
-# 笛卡尔直线插补（moveL）。
+# 笛卡尔直线插补（moveL）+ 三点式空间圆弧插补（arc）。
 # 原另有 planner.c（单关节梯形/S 曲线）已于 2026-09-18 删除：全项目零引用，
 # 现行 moveL 走 line.c + 驱动器内部加减速，没用到它。需要时可从 git 取回
 #   git show HEAD:src/trajectory/planner.c > src/trajectory/planner.c
 #   git show HEAD:src/trajectory/planner.h > src/trajectory/planner.h
 add_library(trajectory STATIC
     src/trajectory/line.c
+    src/trajectory/arc.c
 )
 
 # ---------- 静态库: api ----------
@@ -181,6 +189,16 @@ target_include_directories(test_line_nan PRIVATE src ${CMAKE_SOURCE_DIR})
 target_compile_options(test_line_nan PRIVATE ${WARN_FLAGS})
 target_link_libraries(test_line_nan PRIVATE kinematics trajectory m)
 add_test(NAME line_nan COMMAND test_line_nan)
+endif()
+
+# 三点式空间圆弧插补离线自检：纯几何（圆心/半径/扫角/退化），无 IK 之外的依赖。
+# 守卫"画弧线"最要命的错：圆心算错、走成不含中间点的另一段弧、近共线没退化。
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_arc.c")
+add_executable(test_arc tests/test_arc.c)
+target_include_directories(test_arc PRIVATE src ${CMAKE_SOURCE_DIR})
+target_compile_options(test_arc PRIVATE ${WARN_FLAGS})
+target_link_libraries(test_arc PRIVATE kinematics trajectory ${MATH_LIB})
+add_test(NAME arc COMMAND test_arc)
 endif()
 
 # 下发前的目标合理性闸门：守卫"把垃圾目标写给驱动器"这一类事故。
