@@ -28,94 +28,70 @@
 
 
 /* ================= 运动/轮询调参常量 =================
- * 这一块是「运动行为」的全部可调旋钮，分四组（末尾另有一个运行期计数器）：
- *   ① 轮询与到位判据  ② 速度/加减速下限  ③ 几何与安全闸门  ④ 读回异常与免读路径
- * 每条的实测依据写在下面。改之前先看注释里的基线，别拿旧数值推理。
- * ⚠️ 与 ini 重名的项（acc_floor_ms / max_step_deg / max_jump_deg）都以 ini 为准，
- *    这里的值只是「ini 缺键时的兜底」。改 ini 不用动这里，但两边口径必须一致。
+ * 分四组：① 轮询与到位  ② 速度/加减速下限  ③ 几何与安全闸门  ④ 读回异常。
+ * 与 ini 同名项（acc_floor_ms / max_step_deg / max_jump_deg）以 ini 为准，这里只做兜底。
  */
 
 /* ---- ① 轮询与到位判据 ---- */
 
-/* 等位置时的轮询间隔(ms)（原 10）。读一轮六轴实测 10.2ms ⇒ 周期 20.3→≈12.2ms，
- * 每段到位判定至多提前 ~8ms ⇒ 段尾停车窗等量变短（卡顿感直接来源之一）。
- * Sleep(2) 受 Windows 定时器粒度影响，实际周期略浮动、无新风险（异常判定按轮数计）。
- * ⚠️ 运动行为变更：须真机验收 50mm 线「段间停顿」与直线度后再定稿。 */
+/* 等到位的轮询间隔(ms)。2ms 比 10ms 能提前判定到位，直接缩短段尾停车窗。 */
 #define MOVEJ_POLL_MS      2
 
-/* 到位容差（脉冲）。换算角度（1 步 = 360/(red×10000)°）：
- *   J2(red=100) 100 步 = 0.036°；其余五轴 100 步 = 0.072°。末端 ≈0.17mm。
- * 判据 = 位置落在 target±此值 + 无报警 + 已退出 RUN。偏紧但实测能通过 ⇒ 保持。 */
+/* 到位容差(脉冲)。1 步 = 360/(red×10000)° ⇒ J2≈ 0.036°、其余≈ 0.072°；
+ * 末端≈ 0.17mm。判据：位置落入 target±此值 + 无报警 + 已退出 RUN。 */
 #define MOVEJ_INPOS_TOL   100
 
-/* 等到位的总超时(ms)。对 1~2s 的线很宽松 ⇒ 不会误杀，代价是真卡住要等 60s。 */
+/* 等到位总超时(ms)。卡住时兜底保护。 */
 #define MOVEJ_TIMEOUT_MS  60000
 
-/* 状态行（\r 原地刷新那一行）的刷新间隔(ms)。200ms = 5Hz，够看又不刷屏。 */
+/* 状态行刷新间隔(ms)与定宽列数（78 为 80 列终端留 2 列防自汇行）。 */
 #define MOVEJ_STATUS_MS   200
-
-/* 状态行的定宽列数。78 是给 80 列终端留 2 列，避免自动换行把上一行顶掉。 */
 #define MOVEJ_STATUS_W    78
 
-/* 单轴最低速度(rpm)。各轴速度按位移比例分配，小位移轴会趋近 0；卡在 0 会让
- * 该轴永远不动、整条指令干等到超时 ⇒ 这个下限是必要保护。 */
+/* 单轴最低速度(rpm)。各轴按位移比例配速时小位移轴会趋近 0，卡零会整条指令干等到超时。 */
 #define MOVEJ_MIN_RPM       1.0
 
 /* ---- ② 速度/加减速下限 ---- */
 
-/* 加/减速时间的安全下限(ms)（ini [movel] acc_floor_ms 的兜底，两边现均为 40）。
- * 用户敲的 acc/dec 低于它会被抬到这里并打提示。依据：过短的减速会丢步（表现为
- * 「走到一半卡住」）。驱动器实测稳跑过 80/90ms；40 属试探区，丢步则退回 60
- *（改 ini 即可，不用重编）。减速窗是段间停顿的主体：210→40 每段少停 ≈0.34s。 */
+/* 加/减速安全下限(ms)，ini [movel] acc_floor_ms 缺键时的兜底。低于它会丢步。 */
 #define MOVL_ACC_FLOOR_MS   40
 
 /* ---- ③ 几何与安全闸门 ---- */
 
-/* 笔尖方向偏差告警阈值(度)。依据：J5 差 1° ⇒ 笔尖偏 0.72mm；5° ≈ 3.6mm。
- * 超了就该怀疑 movel 的姿态参数抄错了（没抄当前 getpos 原值）。 */
+/* 笔尖方向偏差告警阈值(度)：J5 差 1° 笔尖偏 0.72mm，5°≈ 3.6mm。超出时怀疑姿态参数抄错。 */
 #define MOVL_TIP_WARN_DEG  5.0
 
-/* 估算弓高时在段内采几个中间点（纯计算，不占总线；24 点足够）。 */
+/* 弓高估算的段内采样点数（纯计算）。 */
 #define MOVL_BOW_SAMPLES    24
 
-/* 腕部奇异判定阈值(度)：|J5| 小于它就算进入奇异区（θ4 与 θ6 同轴、分配不唯一）。
- * 依据（实测）：home 位形沿 +Y 走 30mm，第 1 段就要 J4 转 89.98°。 */
+/* 腕部奇异判定阈值(度)：|J5| 小于它即 θ4/θ6 同轴、逆解分支不唯一。 */
 #define MOVL_WRIST_SINGULAR_DEG 5.0
 
-/* 单段关节跳变【告警】阈值(度)。介于它与 max_jump_deg 之间只警告、不拦。 */
+/* 单段关节跳变告警阈值(度)：介于它与拒斥上限之间只警告不拦。 */
 #define MOVL_JUMP_WARN_DEG     15.0
 
-/* 单次运动位移上限(度)（ini [safety] max_step_deg 的兜底）。超限通常意味着
- * 单位/符号/坐标系搞错了，真发出去就是电机猛冲 + 超时急停。 */
+/* 单次运动位移上限(度)，ini [safety] max_step_deg 兜底。超限一般意味着单位/坐标系错了。 */
 #define MOVEJ_MAX_STEP_DEG     720.0
 
-/* 单段单关节跳变【拒绝】上限(度)（ini [safety] max_jump_deg 的兜底）。
- * 依据（实测）：超限时时间表会把这 1mm 段拉到十几秒，期间末端只挪 1mm 而
- * J4 转过 90°，臂会大幅度慢慢扫过一大片空间。 */
+/* 单段单关节跳变拒斥上限(度)，ini [safety] max_jump_deg 兜底。超过时时间表会拉长到十几秒，臂大幅扫过。 */
 #define MOVL_JUMP_MAX_DEG      30.0
 
-/* interp 逐点插补的默认步长(mm)（ini [movel] step_mm 的兜底，仅在未配 max_bow_mm 时用）。
- * 越小越贴直线但航点越多、越慢；上限受 LINE_MAX_POINTS=257 约束。 */
+/* interp 默认步长(mm)，ini [movel] step_mm 兜底（未配 max_bow_mm 时生效）。 */
 #define MOVL_STEP_MM_DEFAULT   8.0
 
-/* 弓高经验系数：单段弓高(mm) ≈ MOVL_BOW_K × 步长(mm)²。屏幕"单段弓高"与
- * 偏差预算反推步长【共用此系数】，改一处两边同步。依据：20mm 段实测弓高≈0.40mm
- * ⇒ 0.001×20²=0.40；与实测峰值偏差 0.25~0.35mm 相符（公式略保守，安全）。 */
+/* 弓高经验系数：单段弓高(mm) ≈ K × 步长(mm)²；屏幕显示与偏差预算反推共用。 */
 #define MOVL_BOW_K             0.001
 
-/* 偏差预算(max_bow_mm)反推步长后的夹取区间(mm)：下限防空转式爆航点，上限防
- * 单段过长撞关节跳变闸(max_jump_deg 30°)。 */
+/* 偏差预算反推步长后的夹取区间(mm)：下限防空转式爆航点，上限防撞关节跳变闸。 */
 #define MOVL_STEP_MIN_MM       5.0
 #define MOVL_STEP_MAX_MM       60.0
 
 /* ---- ④ 读回异常检测与免读路径 ---- */
 
-/* 读回异常判据：机械角超出软限位多少度才算「读数不可信」(度)。
- * 依据（2026-09-19 实测）：总线被打断时六轴读回【同时】变成越限值、
- * 末端偏差冻结在 258.92mm 不动。 */
+/* 读回异常判据：机械角越软限位此幅度时判为总线/读回异常（非真实位置）。 */
 #define MOVEJ_ANOM_MARGIN_DEG  15.0
 
-/* 连续多少轮异常才判定为真异常（防单次误报）。3 轮 × 轮询周期 ≈30ms。 */
+/* 连续多少轮异常才判为真异常（防单次误报）。 */
 #define MOVEJ_ANOM_MIN_POLLS   3
 
 static double movl_max_step_deg(void);
@@ -168,9 +144,8 @@ static double movl_point_dev_mm(const double x[3], const double a[3], const doub
     return sqrt(d2);
 }
 
-/* 三点定圆：过 P0/Pv/P2 的圆心 C、半径 R、单位法向 n（与 arc.c 同一几何，
- * 结果一致）。三点重合/近共线（圆退化）时返回 -1。仅用于 MoveC 偏差遥测，
- * 让"实测最大偏差"量到真实圆弧而非其弦，避免把设计内弓高（可达十几 mm）误当误差。 */
+/* 三点定圆：过 P0/Pv/P2 的圆心 C、半径 R、单位法向 n；近共线/重合时返回 -1。
+ * 仅用于 MoveC 偏差遥测，让实测最大偏差量到真实弧线而非其弦。 */
 static int arc_circle_3pt(const double P0[3], const double Pv[3], const double P2[3],
                           double C[3], double *out_R, double n[3])
 {
@@ -1304,16 +1279,11 @@ void cmd_zero_save(Robot *robot, const double vals[6])
 static double g_tlm_mech[6] = {0};
 static int    g_tlm_mech_ok = 0;
 
-/* 多关节运动的下发（含全部安全校验）。返回需要等待的轴数。
- * 校验顺序：① 目标角必须是有限数（NaN/Inf 会被转成 ±2147483647 步，
- *   电机朝天文数字猛冲并超时急停 —— 曾实测甩出 34mm）；② 关节号合法；
- *   ③ 目标在软限位内；④ 本次位移不超单步上限 max_step_deg。
- * 配速：按位移比例分配 —— 位移最大的轴 = 设定速度，其余按比例，下限 1rpm，
- * 这样各轴同时到达。set_profile：1=写加减速+速度；0=不写加减速且速度几乎没变时跳过；
- * 2=不写加减速（调用方已在循环外预写，如 interp）但每段仍写速度（走缓存跳写）。
- * ⚠️ dist[] 的单位是【脉冲】（tgt 与 motor_read_position 都是步数），
- *    即电机端行程 ⇒ 与 second/include/plan.c 的 plan_speeds()（|Δθ|×reduction）
- *    是同一个东西，只是量纲更干净。别再以为本机缺"按电机端分配"这块。 */
+/* movej_issue 多关节运动下发（含安全校验），返回需等待的轴数。
+ * 校验：① 目标角有限（拒 NaN/Inf，避免天文数字步数）；② 关节号合法；
+ *            ③ 目标在软限位内；④ 本次位移不超 max_step_deg。
+ * 配速：按位移比例分配，最大位移轴 = 设定速度，其余按比例，下限 1rpm。
+ * set_profile：1=写加减速+速度；0=不写加减速且速度几乎没变时跳过；2=调用方预写过加减速，本函数只写速度。 */
 static int movej_issue(Robot *robot, int num_joints, const int joints[6],
                        const double angles[6], const double *ref_angles,
                        double speed, int accel_ms, int decel_ms, int set_profile,
@@ -1494,15 +1464,14 @@ static void status_clear(void)
     fflush(stdout);
 }
 
-/* 轮询等到位（MOVEJ_POLL_MS=10ms 一轮，超时 MOVEJ_TIMEOUT_MS=60s）。
+/* 轮询等到位（每 MOVEJ_POLL_MS 一轮，超时 MOVEJ_TIMEOUT_MS）。
  * 三件事：
- *   ① 到位 = 位置落在 target ± MOVEJ_INPOS_TOL(100 步) 内；
- *   ② 【读回异常检测】连续 3 轮有轴读回越软限位 ⇒ 判定为总线/读回异常
- *      （2026-09-19 实测：六轴读回同时变越限值、末端偏差冻结 258.92mm）
- *      ⇒ 不等超时，立即急停并提示先查 USB-RS485 与驱动器供电；
- *   ③ 有 line_a/line_b 时顺便算末端到理想直线的偏差峰值；MoveC 传 arc_c/arc_n/arc_r
- *      （非空）时改为量到真实圆弧的距离，两者都发 telemetry。
- * 超时则逐轴急停并打印"还差多少度/多少步"。
+ *   ① 到位 = 位置落在 target ± MOVEJ_INPOS_TOL 内；
+ *   ② 读回异常检测：连续 MOVEJ_ANOM_MIN_POLLS 轮有轴读回越软限位且幅度超
+ *      MOVEJ_ANOM_MARGIN_DEG ⇒ 判为总线/读回异常（非真实位置），不等超时、立即急停；
+ *   ③ line_a/line_b 非空时算末端到直线的偏差峰值；arc_c/arc_n/arc_r 非空时改量到
+ *      真实圆弧的距离；两者都走 telemetry。
+ * 超时则逐轴急停并打印“还差多少度/多少步”。
  * 返回：1=全部到位；0=超时/异常急停中止（interp 据此跳过剩余航点）。 */
 static int movej_wait(Robot *robot, const int joints[6], const int32_t tgt[7],
                       uint8_t pend[7], int remain,
@@ -1671,18 +1640,11 @@ static void movej_multi(Robot *robot, const ParsedCmd *cmd)
                  cmd->speeds[0], acc, dec, NULL, NULL);
 }
 
-/* 笛卡尔路径规划（直线或三点圆弧）：几何插补 → 逐点 IK → 时间表；再做两道安全闸。
- * via==NULL 走直线(line_plan)；via!=NULL 走三点圆弧(arc_plan_3pt)，dist_mm 仍传
- *   起终点弦长（供"是否已在目标"判断与退化直线用），实际航点数由弧长内部决定。
- * out_path_len_mm 出参回带路径长度（直线=弦长，圆弧=弧长），可 NULL。
- * out_fell_back_line 出参：圆弧三点近共线退化成直线时置 1（否则 0），可 NULL。
- * 返回 0 成功 / -1 插补失败 / -2 IK 失败或越软限位 / -3 时间表失败 /
- *      -4 单段跳变超上限（整条 MoveL 不下发）。
- * ★ 跳变闸：> max_jump_deg(30°) 直接拒绝；> MOVL_JUMP_WARN_DEG(15°) 只警告。
- *   为什么这么严：时间表会按关节限速把这一段拉长到十几秒，期间末端只挪 1mm
- *   而 J4 转过 90° —— 臂会以完全没预料到的大幅度慢慢扫过去。
- *   实测：home 位形沿 +Y 走 30mm，第 1 段就要 J4 转 89.98°。
- *   成因通常是路径擦过腕部奇异（J5≈0）或逆解分支翻转。 */
+/* 笛卡尔路径规划（直线或三点圆弧）：几何插补 → 逐点 IK → 时间表 → 安全闸。两重安全闸。
+ * via==NULL 走直线(line_plan)；via!=NULL 走三点圆弧(arc_plan_3pt)，dist_mm 仍传弦长（退化直线时要用）。
+ * out_path_len_mm 回带路径长度（直线=弦长、圆弧=弧长）；out_fell_back_line 三点近共线时置 1。
+ * 返回：0 成功 / -1 插补失败 / -2 IK 失败或越限位 / -3 时间表失败 / -4 单段跳变超上限。
+ * 跳变闸：> max_jump_deg 直接拒、> MOVL_JUMP_WARN_DEG 只警告；成因常为路径擦过腕部奇异或逆解分支翻转。 */
 static int movl_plan(const double start_pose[6], const double end_pose[6],
                      const double q_start[6], const JointLimit *limits,
                      double dist_mm, double step_mm, const double vmax[6],
@@ -1761,7 +1723,7 @@ static int movl_plan(const double start_pose[6], const double end_pose[6],
 }
 
 /* 采样 24 个中间点，估算"整段走关节空间直线"偏离笛卡尔直线的最大弓高(mm)。
- * 用途：step/stream 模式据此判「弓高是否超预算」并告警（弓高 ≈ 0.001 x 段长²）。 */
+ * 用途：interp 模式据此判「弓高是否超预算」并告警（弓高 ≈ 0.001 × 段长²）。 */
 static double movl_bow_mm(const double q0[6], const double q1[6],
                           const double a[3], const double b[3])
 {
@@ -1953,7 +1915,7 @@ static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
  *   smooth = 终点一次 IK + 一次 MoveJ，不插补 ⇒ 零段间停顿；但末端走弧
  *   interp = 按 ini [movel] step_mm 逐点插补 ⇒ 逐航点下发并等到位。末端贴直线
  *            （弓高 ∝ 段长²、极小）+ 每段走读回异常/超时急停；代价段间有停顿。
- * 姿态：9 段里的 Rx,Ry,Rz 必须显式写（一般抄 getpos 当前值）；已无 keep 简写。 */
+ * 姿态：9 段里的 Rx,Ry,Rz 必须显式写（一般抄 getpos 当前值）。 */
 void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 {
     const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -2109,11 +2071,9 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 
     /* interp：逐航点下发。q_seq[0]≈当前位，从 seg=1 起逐点 movej 并等到位。
      * 每段速度按 seg_dt 反推（与 smooth 同口径）；line_a/line_b 传整条线
-     * ⇒ movej_wait 跨段累计【到理想直线的偏差峰值】（dev_reset 已在前面清过）。
-     * 每段都走 movej_wait 的读回异常/超时逐轴急停 ⇒ 比 smooth 全程不查更安全。
-     * ⛔ interp 消卡顿候选路线实测否决（2026-09-29）：0x00CE 连发/运行中补链均被
-     *   丢弃、0x00DD 表格本就一次触发走一点 ⇒ 段间停车是驱动器硬件性质；
-     *   软件侧只剩瘦身一途：本块用 QPC 分段计时【下发/等待】，量化可压缩开销。 */
+     * ⇒ movej_wait 跨段累计到理想直线的偏差峰值。
+     * 段间停车为驱动器硬件性质（0x00CE 连发/补链、0x00DD 表格均不能一次走多点），
+     * 软件侧只能量化开销：本块用 QPC 分段计时【下发/等待】。 */
     {
         const uint16_t red[ROBOT_JOINT_COUNT] = ROBOT_REDUCTION_TABLE;
         uint32_t t0 = GetTickCount();
@@ -2128,9 +2088,8 @@ void cmd_movel(Robot *robot, const ParsedCmd *cmd)
 
         QueryPerformanceFrequency(&qf);
 
-        /* 软件优化（2026-09-29 实测驱动）：下发开销 ≈ 42ms/段，其中加减速 6 写是整程
-         * 常量 ⇒ 循环前写一次，循环内 set_profile=2 跳过；下一段的位移参考用上一段
-         * 规划角 q_seq[seg-1]，不再读回硬件（到位确认仍由 movej_wait 负责）。 */
+        /* 下发开销优化：加减速 6 写是整程常量⇒循环前预写；循环内 set_profile=2
+         * 只写速度。下一段位移参考用上一段规划角 q_seq[seg-1]，不再读回硬件。 */
         for (j = 1; j <= 6; j++) {
             if (motor_set_profile(robot, j, acc, dec) != ERR_NONE)
                 printf("[警告] 关节%d 加减速设置失败\n", j);

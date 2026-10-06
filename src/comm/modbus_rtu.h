@@ -7,27 +7,27 @@
 #include "utils/err.h"
 #include "comm/comm_if.h"
 
-#define MODBUS_FUNC_READ_HOLDING 0x03
-#define MODBUS_FUNC_READ_INPUT   0x04
-#define MODBUS_FUNC_WRITE_SINGLE 0x06
-#define MODBUS_FUNC_WRITE_MULTI  0x10
+#define MODBUS_FUNC_READ_HOLDING 0x03   /* 读保持寄存器（主用） */
+#define MODBUS_FUNC_READ_INPUT   0x04   /* 读输入寄存器 */
+#define MODBUS_FUNC_WRITE_SINGLE 0x06   /* 写单寄存器（16 位） */
+#define MODBUS_FUNC_WRITE_MULTI  0x10   /* 写多寄存器（DWORD 拆两字下发） */
 
-#define MODBUS_FUNC_ERR_BIT      0x80
+#define MODBUS_FUNC_ERR_BIT      0x80   /* 响应功能码置此 bit ⇒ 异常响应 */
 
-#define MODBUS_ERR_NONE      ERR_NONE
-#define MODBUS_ERR_BAD_LEN   ERR_LEN
-#define MODBUS_ERR_BAD_CRC   ERR_CRC
-#define MODBUS_ERR_BAD_FUNC  ERR_ARG
-#define MODBUS_ERR_BAD_SLAVE ERR_ARG
-#define MODBUS_ERR_EXCEPTION ERR_EXCEPTION
+#define MODBUS_ERR_NONE      ERR_NONE       /* 正常 */
+#define MODBUS_ERR_BAD_LEN   ERR_LEN        /* 帧长度不符 */
+#define MODBUS_ERR_BAD_CRC   ERR_CRC        /* CRC16 校验失败 */
+#define MODBUS_ERR_BAD_FUNC  ERR_ARG        /* 功能码不匹配 */
+#define MODBUS_ERR_BAD_SLAVE ERR_ARG        /* 从站地址不匹配 */
+#define MODBUS_ERR_EXCEPTION ERR_EXCEPTION  /* 驱动器回异常码 */
 
 typedef struct ModbusFrame {
-    uint8_t  slave;
-    uint8_t  func;
-    uint16_t reg_addr;
-    uint16_t reg_count;
-    uint8_t  data[256];
-    size_t   data_len;
+    uint8_t  slave;      /* 从站地址（1~6 对应六轴，0 = 广播） */
+    uint8_t  func;       /* 功能码 03H/04H/06H/10H（异常响应含 0x80） */
+    uint16_t reg_addr;   /* 起始寄存器地址 */
+    uint16_t reg_count;  /* 寄存器个数 */
+    uint8_t  data[256];  /* 数据区（每寄存器 2 字节，高字节在前） */
+    size_t   data_len;   /* data[] 实际有效长度（字节） */
 } ModbusFrame;
 
 

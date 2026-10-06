@@ -492,8 +492,8 @@ int cmd_parse(const char *line, ParsedCmd *out)
         out->movl_mode = MOVL_MODE_INTERP;   /* 默认逐点插补；显式 ,smooth 才走 smooth */
         for (i = 0; i < 3; i++) out->cartesian[i] = v[i];
         /* ★ 段数语义：movel 只接受 9 段 X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC（强制显式姿态）。
-         *   执行前 cmd_movel 用 movl_pose_warn 比对当前姿态，超阈打警告但仍照走
-         *   （用户显式指令优先）。已移除 keep 逃生门——姿态必须显式写满。 */
+         *   执行前 cmd_movel 用 movl_pose_warn 比对当前姿态，超阈时告警但仍照走
+         *   （用户显式指令优先）。 */
         for (i = 3; i < 6; i++) out->cartesian[i] = v[i];
         if (v[6] <= 0.0) {
             printf("[警告] MoveL 速度须大于 0 rpm（收到 %.2f）\n", v[6]);

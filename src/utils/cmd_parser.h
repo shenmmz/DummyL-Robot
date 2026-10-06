@@ -3,7 +3,7 @@
 
 
 /* 命令类型码（ParsedCmd.type）：cmd_parser.c 解析时置位，commands.c 按此分发。
- * 编号为历史追加顺序，12 已删（stream 模式）不再回收；新命令往 32 起追加。 */
+ * 编号按追加顺序，不回收到中间空位（如 12）；新命令从 32 起接。 */
 #define CMD_UNKNOWN   0     /* 未识别命令（只报警，不分发） */
 #define CMD_HOME      1     /* home[:N]      回零（全轴/单关节） */
 #define CMD_MOVEJ     2     /* MoveJ         单关节运动 / 多关节同步 */
