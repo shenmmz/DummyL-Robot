@@ -151,12 +151,6 @@ cmake --build build
 build\bin\dummyrobot.exe
 ```
 
-**单元测试**（仅当 `tests/` 目录存在时才会配置）：
-
-```bash
-ctest --test-dir build
-```
-
 > ⚠️ 若同时设了 `HTTP_PROXY` 与 `http_proxy`（仅大小写不同），MSBuild 会因字典键冲突报
 > `MSB6001` ⇒ 先取消小写那个：`Remove-Item Env:\http_proxy`。
 
