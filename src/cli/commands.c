@@ -37,8 +37,8 @@
 /* 等到位的轮询间隔(ms)。2ms 比 10ms 能提前判定到位，直接缩短段尾停车窗。 */
 #define MOVEJ_POLL_MS      2
 
-/* 到位容差(脉冲)。1 步 = 360/(red×10000)° ⇒ J2≈ 0.036°、其余≈ 0.072°；
- * 末端≈ 0.17mm。判据：位置落入 target±此值 + 无报警 + 已退出 RUN。 */
+/* 到位容差(脉冲)。1 步 = 360/(red×10000)°，故 ±此值(100 步) ≈ J2 ±0.036°、其余 ±0.072°。
+ * 判据：位置落入 target±此值 + 无报警 + 已退出 RUN。 */
 #define MOVEJ_INPOS_TOL   100
 
 /* 等到位总超时(ms)。卡住时兜底保护。 */
@@ -1606,7 +1606,7 @@ static void movej_joints(Robot *robot, int num_joints, const int joints[6],
     movej_wait(robot, joints, tgt, pend, remain, line_a, line_b, NULL, NULL, 0.0);
 }
 
-/* 取 ini [movel] acc_floor_ms，缺键兜底 MOVL_ACC_FLOOR_MS(60ms)。
+/* 取 ini [movel] acc_floor_ms，缺键兜底 MOVL_ACC_FLOOR_MS。
  * 作用：过短的减速会丢步（表现为走到一半卡住），所以 ACC/DEC 有下限。 */
 static int movl_acc_floor_ms(void)
 {
@@ -1851,13 +1851,8 @@ static double movl_tip_warn_deg(void)
     return MOVL_TIP_WARN_DEG;
 }
 
-/* 起点/终点姿态不一致时告警：算出法兰倾角变化与笔尖空间摆幅。
- * 为什么必须有：起点姿态由 FK 得、终点姿态全取用户输入；两者不一致 ⇒
- * SLERP 会一路拧姿态 ⇒ 笔尖绕法兰摆 tool_length x sin(θ)。
- * ★ 80mm 线实测：姿态抄【当前 getpos 原值】⇒ 偏差 0.0000mm；
- *   抄 home 的 115,90,115 ⇒ 7.71mm。而法兰坐标直线度恒 0.0000mm
- *   ⇒ 只看法兰坐标永远发现不了这个问题。
- * 提示用户：Rx,Ry,Rz 要抄 getpos 打印的原值，含负号、含 -0.00。 */
+/* 姿态偏离告警：起点/终点姿态不一致 ⇒ SLERP 拧姿态，笔尖偏离直线（法兰坐标看不出来）。
+ * 阈值 ini [movel] tip_warn_deg，摆幅算法见下。 */
 static void movl_pose_warn(const double start_pose[6], const double end_pose[6])
 {
     const double RAD2DEG = 180.0 / 3.14159265358979323846;
@@ -2417,9 +2412,8 @@ void cmd_fk(const ParsedCmd *cmd)
 /* `diag`：总线体检（只读 J1 位置，不动臂）。
  * 输出：后台巡检停住耗时、巡检累计轮数、flush/write/read/单事务耗时、
  *   20 轮"连读 J1..J6"的逐轮数据、只写不读对照、以及线上/周转/流水线推算。
- * ★ N=10（曾为 30）：噪声反推 sigma_单事务 ≈ 0.053ms ⇒ N=10 的 SEM 约 1.0%，
- *   而"两种测法互相印证"的判据阈值是 5% ⇒ 有 5 倍余量。
- * ★ 判据：`后台巡检停住` 预期 0.1~30ms（旧版是固定盲等 320ms）；
+ * ★ N=10：采样轮数取 10 已足够让"两种测法互相印证"（判据阈值 5%）。
+ * ★ 判据：`后台巡检停住` 应为毫秒级（不再是旧的固定盲等）；
  *   `后台巡检累计` 间隔 5 秒敲两次应涨约 15，不涨 ⇒ 监控被永久挂起。 */
 void cmd_diag(Robot *robot, const ParsedCmd *cmd)
 {

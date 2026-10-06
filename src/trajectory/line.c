@@ -112,7 +112,7 @@ void line_pose_to_matrix(const double pose6[6], double m[4][4])
     m[3][3] = 1.0;
 }
 
-/* 按步长把总距离切成几段（至少 1 段）。 */
+/* 按步长把总距离切成若干段，返回插补点数（含首尾，段数 = 点数-1，至少 2 个点）。 */
 int line_count_for_distance(double dist_mm, double step_mm)
 {
     int count;
@@ -130,11 +130,7 @@ int line_count_for_distance(double dist_mm, double step_mm)
     return count;
 }
 
-/* 笛卡尔直线插补：位置线性插值 + 姿态四元数 SLERP，产出 count 个位姿点。
- * count 被夹到 [2, LINE_MAX_POINTS]。任一分量出现 NaN/Inf 立即返回 -1。
- * ⚠️ 起点姿态必须抄【当前 getpos 原值】：起点由 FK 得、终点取用户输入，
- *   两者姿态不一致 ⇒ SLERP 拧姿态 ⇒ 笔尖绕法兰摆 tool_length×sin(θ)。
- *   80mm 线实测：抄 getpos 原值 0.0000mm；抄 home 的 115,90,115 ⇒ 7.71mm。 */
+/* 笛卡尔直线插补：位置线性插值 + 姿态四元数 SLERP，产出 count 个位姿点。 */
 int line_plan(const double start_pose[6], const double end_pose[6],
                int count, LinePath *path)
 {

@@ -1382,7 +1382,7 @@ static const char HELP_MOTION[] =
     "                          速度SPEED(rpm)，末段 r=相对当前位置 / a=绝对(默认)\n"
     "  MoveJ:ANG1,ANG2,ANG3,ANG4,ANG5,ANG6,SPD,ACC,DEC   多关节同步关节空间运动\n"
     "  MoveL:X,Y,Z,Rx,Ry,Rz,SPD,ACC,DEC   笛卡尔直线（唯一格式，9 段写满）\n"
-    "                          SPD=rpm、ACC/DEC=ms；Rx,Ry,Rz 拄 getpos 的当前姿态\n"
+    "                          SPD=rpm、ACC/DEC=ms；Rx,Ry,Rz 抄 getpos 的当前姿态\n"
     "  MoveL:...,DEC           默认=interp 逐点插补（末端贴直线、逐段保护；段间有加减速停顿，较慢）\n"
     "  MoveL:...,DEC,smooth    显式加 ,smooth 走流畅：终点一次 MoveJ、段间零停顿，但末端走弧、不查过流\n"
     "                          ★ 写法约定：\n"

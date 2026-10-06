@@ -58,7 +58,7 @@ ErrCode motor_set_pos_err_prewarn(Robot *robot, int joint, uint16_t steps);
 /* 软件限位失效/有效（0x006D）。 */
 ErrCode motor_set_limit(Robot *robot, int joint, int enable);
 
-/* 点动（0x00CA，bit15 方向 / bit14~6 速度 / bit5 停止方式 / bit0 启停）。 */
+/* 单轴连续运行（0x00C8 速度运行模式，dir 决定正/反转），非定位。 */
 ErrCode motor_run(Robot *robot, int joint, int dir);
 
 /* 读实时电流 0x001A（mA）；失败返回 -1。 */
@@ -94,7 +94,7 @@ ErrCode motor_write_u16_broadcast(Robot *robot, uint16_t reg, uint16_t val);
 /* 读实时速度 0x00D6（0.01rpm），转整数 rpm 返回；失败返回 -1。 */
 int motor_read_speed(Robot *robot, int joint);
 
-/* 读实时速度 0x00D6 原始值（0.01rpm）；失败返回 0。 */
+/* 读实时速度 0x00D6 原始值（0.01rpm）；失败返回 -1。 */
 int32_t motor_read_speed_raw(Robot *robot, int joint);
 
 /* 读细分（每转脉冲数，0x0024）；失败返回 -1。 */
