@@ -41,7 +41,7 @@ static struct {
     int accel_ms;
 } sensor = { 300, 90, 30, -1, 100 };
 
-#define HOME_J6_ZERO_RPM         100
+#define HOME_J6_ZERO_RPM         100 // 关节 6 回零速度（rpm）
 
 /* 关节 j 回零后的电机侧机械角（机械角表 + 零点偏置）。 */
 static double home_forward_deg(int j)
@@ -56,14 +56,14 @@ static int home_forward_rpm(int j)
     return (j == 6) ? HOME_J6_ZERO_RPM : stall[j].speed_rpm;
 }
 
-static int    home_timeout_ms  = 20000;
+static int    home_timeout_ms  = 20000; // 回零超时时间（ms）
 
-#define HOME_STALL_POLL_MS  1
+#define HOME_STALL_POLL_MS  1 // 堵转轮询间隔（ms）
 
-#define HOME_STALL_MASK_MS   150
+#define HOME_STALL_MASK_MS   150 // 堵转判定屏蔽时间（ms）
 
-#define SENSOR_IN0  0x0001u
-#define SENSOR_IN1  0x0002u
+#define SENSOR_IN0  0x0001u  // 传感器输入 0
+#define SENSOR_IN1  0x0002u  // 传感器输入 1
 
 
 typedef enum {
@@ -101,7 +101,7 @@ static void home_restore(Robot *robot, int joint)
 }
 
 
-#define STALL_PREWARN_STEPS   10000
+#define STALL_PREWARN_STEPS   10000 // 堵转预警步数
 
 
 static uint32_t s_stall_t0_ms[7];
